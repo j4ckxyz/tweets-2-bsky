@@ -5,6 +5,8 @@ const path = require('path');
 const axios = require('axios');
 const cron = require('node-cron');
 const { TwitterClient } = require('@steipete/bird/dist/lib/twitter-client');
+const franc = require('franc-min');
+const iso6391 = require('iso-639-1');
 
 // Configuration
 const TWITTER_AUTH_TOKEN = process.env.TWITTER_AUTH_TOKEN;
@@ -81,6 +83,18 @@ const twitter = new CustomTwitterClient({
 
 // --- Helper Functions ---
 
+function detectLanguage(text) {
+    if (!text || text.trim().length === 0) return ['en'];
+    try {
+        const code3 = franc(text);
+        if (code3 === 'und') return ['en']; // Undetermined
+        const code2 = iso6391.getCode(code3);
+        return code2 ? [code2] : ['en'];
+    } catch (e) {
+        return ['en'];
+    }
+}
+
 async function expandUrl(shortUrl) {
     try {
         const response = await axios.head(shortUrl, {
@@ -135,7 +149,7 @@ async function getUsername() {
 
 // --- Main Processing Logic ---
 
-async function processTweets(tweets, delayBetweenPosts = 0) {
+async function processTweets(tweets, delayBetweenPosts = 1000) {
     // Ensure chronological order
     tweets.reverse();
 
@@ -289,10 +303,12 @@ async function processTweets(tweets, delayBetweenPosts = 0) {
         // --- 4. Construct Post ---
         const rt = new RichText({ text });
         await rt.detectFacets(agent);
+        const detectedLangs = detectLanguage(text);
 
         const postRecord = {
             text: rt.text,
             facets: rt.facets,
+            langs: detectedLangs,
             createdAt: tweet.created_at ? new Date(tweet.created_at).toISOString() : new Date().toISOString()
         };
 
@@ -353,8 +369,9 @@ async function processTweets(tweets, delayBetweenPosts = 0) {
 
             // Pacing
             if (delayBetweenPosts > 0) {
-                const sleepTime = Math.random() * delayBetweenPosts + 2000; // Min 2s + random
-                // console.log(`Sleeping ${Math.floor(sleepTime)}ms...`);
+                // Min delay + random jitter (0-500ms)
+                const sleepTime = delayBetweenPosts + Math.floor(Math.random() * 500); 
+                // console.log(`Sleeping ${sleepTime}ms...`);
                 await new Promise(r => setTimeout(r, sleepTime));
             }
 
@@ -393,7 +410,7 @@ async function checkAndPost() {
         const tweets = result.tweets || [];
         if (tweets.length === 0) return;
 
-        await processTweets(tweets, 0); // No extra delay for live checks
+        await processTweets(tweets, 1000); // 1s delay for live checks
 
     } catch (err) {
         console.error("Error in checkAndPost:", err);
@@ -456,8 +473,8 @@ async function importHistory() {
     
     if (allFoundTweets.length > 0) {
         console.log("Starting processing (Oldest -> Newest) with pacing...");
-        // 5 seconds delay average for human-like backfill
-        await processTweets(allFoundTweets, 5000); 
+        // 1 seconds delay average for human-like backfill
+        await processTweets(allFoundTweets, 1000); 
         console.log("History import complete.");
     } else {
         console.log("Nothing new to import.");

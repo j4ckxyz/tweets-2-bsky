@@ -10,6 +10,9 @@ Most crossposters are either paid services or lack key features. This tool is de
     *   **Videos:** Downloads videos from Twitter and uploads them natively to Bluesky (up to 100MB).
     *   **Images:** Uploads high-resolution images with the **correct aspect ratio** (no weird cropping).
     *   **Links:** Automatically removes `t.co` tracking links and expands them to their real destinations.
+*   **Smart Features:**
+    *   **Language Detection:** Automatically detects the language of your tweet (e.g., English, Japanese) and tags the Bluesky post correctly.
+    *   **Human-like Pacing:** Adds a small delay between posts to prevent spam detection and rate limits.
 *   **Threads & Replies:**
     *   **Perfect Threading:** If you write a thread (reply to yourself) on Twitter, it appears as a threaded conversation on Bluesky.
     *   **Clean Feed:** Automatically filters out your replies to *other* people, keeping your Bluesky timeline focused on your original content.
