@@ -622,8 +622,16 @@ async function processTweets(
   dryRun = false,
 ): Promise<void> {
   const processedTweets = loadProcessedTweets(twitterUsername);
-  tweets.reverse();
+  const toProcess = tweets.filter(t => !processedTweets[t.id_str || t.id || '']);
+  
+  if (toProcess.length === 0) {
+    console.log(`[${twitterUsername}] ✅ No new tweets to process.`);
+    return;
+  }
 
+  console.log(`[${twitterUsername}] 🚀 Processing ${toProcess.length} new tweets...`);
+  
+  tweets.reverse();
   let count = 0;
   for (const tweet of tweets) {
     count++;
@@ -953,6 +961,7 @@ async function checkAndPost(dryRun = false, forceBackfill = false): Promise<void
   }
 
   updateAppStatus({ state: 'idle', currentAccount: undefined, message: 'Check complete.' });
+  console.log(`[${new Date().toISOString()}] ✅ Check cycle complete. Waiting for next interval...`);
   if (!dryRun) {
     updateLastCheckTime();
   }
