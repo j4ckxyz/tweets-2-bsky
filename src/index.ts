@@ -886,7 +886,21 @@ async function processTweets(
       }
 
       try {
-        const response = await agent.post(postRecord);
+        // Retry logic for network/socket errors
+        let response: any;
+        let retries = 3;
+        while (retries > 0) {
+          try {
+            response = await agent.post(postRecord);
+            break;
+          } catch (err: any) {
+            retries--;
+            if (retries === 0) throw err;
+            console.warn(`[${twitterUsername}] ⚠️ Post failed (Socket/Network), retrying in 5s... (${retries} retries left)`);
+            await new Promise(r => setTimeout(r, 5000));
+          }
+        }
+        
         const currentPostInfo = {
           uri: response.uri,
           cid: response.cid,
