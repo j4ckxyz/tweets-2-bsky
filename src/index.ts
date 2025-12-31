@@ -267,9 +267,15 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
   
   try {
     // 1. Get Service Auth
-    // The audience (aud) must be the user's PDS DID (did:web:HOST)
-    const pdsUrl = new URL(agent.service as any);
-    const pdsHost = pdsUrl.host;
+    // We need to resolve the actual PDS host for this DID
+    console.log(`[VIDEO] 🔍 Resolving PDS host for DID: ${agent.session!.did}...`);
+    const { data: repoDesc } = await agent.com.atproto.repo.describeRepo({ repo: agent.session!.did! });
+    
+    // didDoc might be present in repoDesc
+    const pdsService = (repoDesc as any).didDoc?.service?.find((s: any) => s.id === '#atproto_pds' || s.type === 'AtProtoPds');
+    const pdsUrl = pdsService?.serviceEndpoint;
+    const pdsHost = pdsUrl ? new URL(pdsUrl).host : 'bsky.social';
+    
     console.log(`[VIDEO] 🌐 PDS Host detected: ${pdsHost}`);
     console.log(`[VIDEO] 🔑 Requesting service auth token for audience: did:web:${pdsHost}...`);
     
@@ -317,7 +323,6 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
             const statusUrl = new URL("https://video.bsky.app/xrpc/app.bsky.video.getJobStatus");
             statusUrl.searchParams.append("jobId", jobStatus.jobId);
             
-            // Using a plain fetch for the status check as it doesn't always need auth
             const statusResponse = await fetch(statusUrl);
             if (!statusResponse.ok) {
                 console.warn(`[VIDEO] ⚠️ Job status fetch failed (${statusResponse.status}), retrying...`);
@@ -565,11 +570,11 @@ async function processTweets(
               
               console.warn(`[${twitterUsername}] ⚠️ Video too large (${(buffer.length / 1024 / 1024).toFixed(2)}MB). Fallback to link.`);
               const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
-              if (!text.includes(tweetUrl)) text += `\n\nOriginal Tweet: ${tweetUrl}`;
+              if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
             } catch (err) {
               console.error(`[${twitterUsername}] ❌ Failed video upload flow:`, (err as Error).message);
               const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
-              if (!text.includes(tweetUrl)) text += `\n\nOriginal Tweet: ${tweetUrl}`;
+              if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
             }
           }
         }
@@ -591,10 +596,19 @@ async function processTweets(
         console.log(`[${twitterUsername}] 🔄 Found quoted tweet in local history.`);
         quoteEmbed = { $type: 'app.bsky.embed.record', record: { uri: quoteRef.uri, cid: quoteRef.cid } };
       } else {
-        // If it's NOT in our managed account history, it's external
         const quoteUrlEntity = urls.find((u) => u.expanded_url?.includes(quoteId));
-        externalQuoteUrl = quoteUrlEntity?.expanded_url || `https://twitter.com/i/status/${quoteId}`;
-        console.log(`[${twitterUsername}] 🔗 Quoted tweet is external: ${externalQuoteUrl}`);
+        const qUrl = quoteUrlEntity?.expanded_url || `https://twitter.com/i/status/${quoteId}`;
+        
+        // Check if it's a self-quote
+        const isSelfQuote = qUrl.toLowerCase().includes(`twitter.com/${twitterUsername.toLowerCase()}/`) || 
+                           qUrl.toLowerCase().includes(`x.com/${twitterUsername.toLowerCase()}/`);
+        
+        if (!isSelfQuote) {
+          externalQuoteUrl = qUrl;
+          console.log(`[${twitterUsername}] 🔗 Quoted tweet is external: ${externalQuoteUrl}`);
+        } else {
+          console.log(`[${twitterUsername}] 🔁 Quoted tweet is a self-quote, skipping 'QT:' link.`);
+        }
       }
     }
 
