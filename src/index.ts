@@ -160,6 +160,12 @@ async function migrateJsonToSqlite() {
       console.error(`❌ Failed to migrate ${file}:`, err);
     }
   }
+
+  // REPAIR STEP: Fix any 'unknown' records in SQLite that came from the broken schema migration
+  for (const mapping of config.mappings) {
+    dbService.repairUnknownIdentifiers(mapping.twitterUsername, mapping.bskyIdentifier);
+  }
+  
   console.log('✅ Migration complete.');
 }
 
