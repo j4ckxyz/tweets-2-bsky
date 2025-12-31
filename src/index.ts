@@ -261,6 +261,91 @@ async function uploadToBluesky(agent: BskyAgent, buffer: Buffer, mimeType: strin
   return data.blob;
 }
 
+async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: string): Promise<BlobRef> {
+  console.log(`[VIDEO] 🟢 Starting upload process for ${filename} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
+  
+  try {
+    // 1. Get Service Auth
+    console.log(`[VIDEO] 🔑 Requesting service auth token for video.bsky.app...`);
+    const { data: serviceAuth } = await agent.com.atproto.server.getServiceAuth({
+        aud: `did:web:video.bsky.app`,
+        lxm: "com.atproto.repo.uploadBlob",
+        exp: Math.floor(Date.now() / 1000) + 60 * 30,
+    });
+    console.log(`[VIDEO] ✅ Service auth token obtained.`);
+
+    const token = serviceAuth.token;
+
+    // 2. Upload to Video Service
+    const uploadUrl = new URL("https://video.bsky.app/xrpc/app.bsky.video.uploadVideo");
+    uploadUrl.searchParams.append("did", agent.session!.did!);
+    uploadUrl.searchParams.append("name", filename);
+
+    console.log(`[VIDEO] 📤 Uploading to ${uploadUrl.href}...`);
+    const uploadResponse = await fetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "video/mp4",
+      },
+      body: buffer,
+    });
+
+    if (!uploadResponse.ok) {
+        const errText = await uploadResponse.text();
+        throw new Error(`Video upload failed: ${uploadResponse.status} ${errText}`);
+    }
+
+    const jobStatus = (await uploadResponse.json()) as any;
+    console.log(`[VIDEO] 📦 Upload accepted. Job ID: ${jobStatus.jobId}, Initial State: ${jobStatus.state}`);
+    
+    let blob: BlobRef | undefined = jobStatus.blob;
+
+    // 3. Poll for processing status
+    if (!blob) {
+        console.log(`[VIDEO] ⏳ Polling for processing completion...`);
+        let attempts = 0;
+        while (!blob) {
+            attempts++;
+            const statusUrl = new URL("https://video.bsky.app/xrpc/app.bsky.video.getJobStatus");
+            statusUrl.searchParams.append("jobId", jobStatus.jobId);
+            
+            const statusResponse = await fetch(statusUrl);
+            if (!statusResponse.ok) {
+                console.warn(`[VIDEO] ⚠️ Job status fetch failed (${statusResponse.status}), retrying...`);
+                await new Promise((resolve) => setTimeout(resolve, 3000));
+                continue;
+            }
+
+            const statusData = await statusResponse.json() as any;
+            const state = statusData.jobStatus.state;
+            const progress = statusData.jobStatus.progress || 0;
+            
+            console.log(`[VIDEO] 🔄 Job ${jobStatus.jobId}: ${state} (${progress}%)`);
+            
+            if (statusData.jobStatus.blob) {
+                blob = statusData.jobStatus.blob;
+                console.log(`[VIDEO] 🎉 Video processing complete! Blob ref obtained.`);
+            } else if (state === 'JOB_STATE_FAILED') {
+                throw new Error(`Video processing failed: ${statusData.jobStatus.error || 'Unknown error'}`);
+            } else {
+                // Wait before next poll
+                await new Promise((resolve) => setTimeout(resolve, 3000));
+            }
+            
+            if (attempts > 100) { // ~5 minute timeout
+                throw new Error("Video processing timed out after 5 minutes.");
+            }
+        }
+    }
+
+    return blob!;
+  } catch (err) {
+    console.error(`[VIDEO] ❌ Error in uploadVideoToBluesky:`, (err as Error).message);
+    throw err;
+  }
+}
+
 function getRandomDelay(min = 1000, max = 4000): number {
   return Math.floor(Math.random() * (max - min + 1) + min);
 }
@@ -348,6 +433,10 @@ async function safeSearch(query: string, limit: number): Promise<TwitterSearchRe
 // Main Processing Logic
 // ============================================================================
 
+// ============================================================================
+// Main Processing Logic
+// ============================================================================
+
 async function processTweets(
   agent: BskyAgent,
   twitterUsername: string,
@@ -363,6 +452,8 @@ async function processTweets(
 
     if (processedTweets[tweetId]) continue;
 
+    console.log(`\n[${twitterUsername}] 🕒 Processing tweet: ${tweetId}`);
+
     const replyStatusId = tweet.in_reply_to_status_id_str || tweet.in_reply_to_status_id;
     const replyUserId = tweet.in_reply_to_user_id_str || tweet.in_reply_to_user_id;
     const tweetText = tweet.full_text || tweet.text || '';
@@ -372,8 +463,10 @@ async function processTweets(
 
     if (isReply) {
       if (replyStatusId && processedTweets[replyStatusId] && !processedTweets[replyStatusId]?.migrated) {
+        console.log(`[${twitterUsername}] 🧵 Threading reply to local post: ${replyStatusId}`);
         replyParentInfo = processedTweets[replyStatusId] ?? null;
       } else {
+        console.log(`[${twitterUsername}] ⏩ Skipping external/unknown reply.`);
         if (!dryRun) {
           processedTweets[tweetId] = { skipped: true };
           saveProcessedTweets(twitterUsername, processedTweets);
@@ -382,14 +475,15 @@ async function processTweets(
       }
     }
 
-    console.log(`[${twitterUsername}] ${dryRun ? '[DRY RUN] ' : ''}Processing tweet: ${tweetId}`);
-
     if (dryRun) {
-      console.log(`[DRY RUN] Content: ${tweetText.substring(0, 100)}...`);
+      console.log(`[${twitterUsername}] 🧪 [DRY RUN] Content: ${tweetText.substring(0, 100)}...`);
       continue;
     }
 
     let text = tweetText;
+    
+    // 1. Link Expansion
+    console.log(`[${twitterUsername}] 🔗 Expanding links...`);
     const urls = tweet.entities?.urls || [];
     for (const urlEntity of urls) {
       const tco = urlEntity.url;
@@ -404,18 +498,21 @@ async function processTweets(
       if (resolved !== tco) text = text.replace(tco, resolved);
     }
 
+    // 2. Media Handling
     const images: ImageEmbed[] = [];
     let videoBlob: BlobRef | null = null;
-    let videoThumbnailBlob: BlobRef | null = null;
     let videoAspectRatio: AspectRatio | undefined;
     const mediaEntities = tweet.extended_entities?.media || tweet.entities?.media || [];
     const mediaLinksToRemove: string[] = [];
+
+    console.log(`[${twitterUsername}] 🖼️ Found ${mediaEntities.length} media entities.`);
 
     for (const media of mediaEntities) {
       if (media.url) {
         mediaLinksToRemove.push(media.url);
         if (media.expanded_url) mediaLinksToRemove.push(media.expanded_url);
       }
+      
       let aspectRatio: AspectRatio | undefined;
       if (media.sizes?.large) {
         aspectRatio = { width: media.sizes.large.w, height: media.sizes.large.h };
@@ -427,11 +524,14 @@ async function processTweets(
         const url = media.media_url_https;
         if (!url) continue;
         try {
+          console.log(`[${twitterUsername}] 📥 Downloading image: ${url}`);
           const { buffer, mimeType } = await downloadMedia(url);
+          console.log(`[${twitterUsername}] 📤 Uploading image to Bluesky...`);
           const blob = await uploadToBluesky(agent, buffer, mimeType);
           images.push({ alt: media.ext_alt_text || 'Image from Twitter', image: blob, aspectRatio });
+          console.log(`[${twitterUsername}] ✅ Image uploaded.`);
         } catch (err) {
-          console.error(`Failed to upload image ${url}:`, (err as Error).message);
+          console.error(`[${twitterUsername}] ❌ Failed to upload image ${url}:`, (err as Error).message);
         }
       } else if (media.type === 'video' || media.type === 'animated_gif') {
         const variants = media.video_info?.variants || [];
@@ -444,29 +544,35 @@ async function processTweets(
           if (firstVariant) {
             const videoUrl = firstVariant.url;
             try {
+              console.log(`[${twitterUsername}] 📥 Downloading video: ${videoUrl}`);
               const { buffer, mimeType } = await downloadMedia(videoUrl);
-              if (buffer.length <= 95 * 1024 * 1024) {
-                const blob = await uploadToBluesky(agent, buffer, mimeType);
-                videoBlob = blob;
+              
+              if (buffer.length <= 100 * 1024 * 1024) {
+                const filename = videoUrl.split('/').pop() || 'video.mp4';
+                videoBlob = await uploadVideoToBluesky(agent, buffer, filename);
                 videoAspectRatio = aspectRatio;
-                break;
+                console.log(`[${twitterUsername}] ✅ Video upload process complete.`);
+                break; // Prioritize first video
               }
-              console.warn('Video too large (>95MB). Linking to tweet.');
+              
+              console.warn(`[${twitterUsername}] ⚠️ Video too large (${(buffer.length / 1024 / 1024).toFixed(2)}MB). Fallback to link.`);
               const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
-              if (!text.includes(tweetUrl)) text += `\n${tweetUrl}`;
+              if (!text.includes(tweetUrl)) text += `\n\nOriginal Tweet: ${tweetUrl}`;
             } catch (err) {
-              console.error(`Failed to upload video ${videoUrl}:`, (err as Error).message);
+              console.error(`[${twitterUsername}] ❌ Failed video upload flow:`, (err as Error).message);
               const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
-              if (!text.includes(tweetUrl)) text += `\n${tweetUrl}`;
+              if (!text.includes(tweetUrl)) text += `\n\nOriginal Tweet: ${tweetUrl}`;
             }
           }
         }
       }
     }
 
+    // Cleanup text
     for (const link of mediaLinksToRemove) text = text.split(link).join('').trim();
     text = text.replace(/\n\s*\n/g, '\n\n').trim();
 
+    // 3. Quoting Logic
     let quoteEmbed: { $type: string; record: { uri: string; cid: string } } | null = null;
     let externalQuoteUrl: string | null = null;
 
@@ -474,15 +580,12 @@ async function processTweets(
       const quoteId = tweet.quoted_status_id_str;
       const quoteRef = processedTweets[quoteId];
       if (quoteRef && !quoteRef.migrated && quoteRef.uri && quoteRef.cid) {
+        console.log(`[${twitterUsername}] 🔄 Found quoted tweet in local history.`);
         quoteEmbed = { $type: 'app.bsky.embed.record', record: { uri: quoteRef.uri, cid: quoteRef.cid } };
       } else {
-        // External quote - find the URL in entities or fallback
         const quoteUrlEntity = urls.find((u) => u.expanded_url?.includes(quoteId));
-        if (quoteUrlEntity?.expanded_url) {
-          externalQuoteUrl = quoteUrlEntity.expanded_url;
-        } else {
-          externalQuoteUrl = `https://twitter.com/i/status/${quoteId}`;
-        }
+        externalQuoteUrl = quoteUrlEntity?.expanded_url || `https://twitter.com/i/status/${quoteId}`;
+        console.log(`[${twitterUsername}] 🔗 Quoted tweet is external: ${externalQuoteUrl}`);
       }
     }
 
@@ -490,11 +593,16 @@ async function processTweets(
       text += `\n\nQT: ${externalQuoteUrl}`;
     }
 
+    // 4. Threading and Posting
     const chunks = splitText(text);
+    console.log(`[${twitterUsername}] 📝 Splitting text into ${chunks.length} chunks.`);
+    
     let lastPostInfo: ProcessedTweetEntry | null = replyParentInfo;
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i] as string;
+      console.log(`[${twitterUsername}] 📤 Posting chunk ${i + 1}/${chunks.length}...`);
+      
       const rt = new RichText({ text: chunk });
       await rt.detectFacets(agent);
       const detectedLangs = detectLanguage(chunk);
@@ -507,14 +615,14 @@ async function processTweets(
         createdAt: tweet.created_at ? new Date(tweet.created_at).toISOString() : new Date().toISOString(),
       };
 
-      // Only attach media/quotes to the first chunk
       if (i === 0) {
         if (videoBlob) {
-          postRecord.embed = {
+          const videoEmbed: any = {
             $type: 'app.bsky.embed.video',
             video: videoBlob,
-            aspectRatio: videoAspectRatio,
           };
+          if (videoAspectRatio) videoEmbed.aspectRatio = videoAspectRatio;
+          postRecord.embed = videoEmbed;
         } else if (images.length > 0) {
           const imagesEmbed = { $type: 'app.bsky.embed.images', images };
           if (quoteEmbed) {
@@ -548,17 +656,20 @@ async function processTweets(
         }
         
         lastPostInfo = currentPostInfo;
+        console.log(`[${twitterUsername}] ✅ Chunk ${i + 1} posted successfully.`);
         
         if (chunks.length > 1) {
-          await new Promise((r) => setTimeout(r, 1000)); // Short delay between thread parts
+          await new Promise((r) => setTimeout(r, 2000));
         }
       } catch (err) {
-        console.error(`Failed to post ${tweetId} (chunk ${i + 1}):`, err);
-        break; // Stop threading if a chunk fails
+        console.error(`[${twitterUsername}] ❌ Failed to post ${tweetId} (chunk ${i + 1}):`, err);
+        break;
       }
     }
     
-    await new Promise((r) => setTimeout(r, getRandomDelay(1000, 4000)));
+    const wait = getRandomDelay(2000, 5000);
+    console.log(`[${twitterUsername}] 😴 Pacing: Waiting ${wait}ms before next tweet.`);
+    await new Promise((r) => setTimeout(r, wait));
   }
 }
 
