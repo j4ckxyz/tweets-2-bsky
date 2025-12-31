@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BskyAgent, RichText } from '@atproto/api';
 import type { BlobRef } from '@atproto/api';
-import { TwitterClient } from '@steipete/bird/dist/lib/twitter-client';
+import { TwitterClient } from '@steipete/bird/dist/lib/twitter-client.js';
 import axios from 'axios';
 import * as francModule from 'franc-min';
 import iso6391 from 'iso-639-1';

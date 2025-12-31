@@ -1,4 +1,4 @@
-declare module '@steipete/bird/dist/lib/twitter-client' {
+declare module '@steipete/bird/dist/lib/twitter-client.js' {
   export interface TwitterClientOptions {
     cookies: {
       authToken: string;
