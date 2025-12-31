@@ -2,6 +2,8 @@
 
 A powerful, set-and-forget tool to mirror your Twitter/X account to Bluesky.
 
+> **Credits:** This project is powered by [bird](https://github.com/steipete/bird) by [steipete](https://github.com/steipete) for robust Twitter/X data fetching.
+
 ## Why this tool?
 
 Most crossposters are either paid services or lack key features. This tool is designed for power users who want a perfect mirror:
