@@ -13,10 +13,14 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret';
 
+// In-memory state for triggers and scheduling
+let lastCheckTime = Date.now();
+let nextCheckTime = Date.now() + (getConfig().checkIntervalMinutes || 5) * 60 * 1000;
+let pendingBackfills: string[] = [];
+
 app.use(cors());
 app.use(express.json());
 
-// Serve static files from the React app (we will build this later)
 app.use(express.static(path.join(__dirname, '../public')));
 
 // Middleware to protect routes
@@ -127,6 +131,69 @@ app.post('/api/twitter-config', authenticateToken, requireAdmin, (req, res) => {
   saveConfig(config);
   res.json({ success: true });
 });
+
+// --- Status & Actions Routes ---
+
+app.get('/api/status', authenticateToken, (_req, res) => {
+  const config = getConfig();
+  const now = Date.now();
+  const checkIntervalMs = (config.checkIntervalMinutes || 5) * 60 * 1000;
+  const nextRunMs = Math.max(0, nextCheckTime - now);
+
+  res.json({
+    lastCheckTime,
+    nextCheckTime,
+    nextCheckMinutes: Math.ceil(nextRunMs / 60000),
+    checkIntervalMinutes: config.checkIntervalMinutes,
+    pendingBackfills,
+  });
+});
+
+app.post('/api/run-now', authenticateToken, (_req, res) => {
+  lastCheckTime = 0;
+  nextCheckTime = Date.now() + 1000;
+  res.json({ success: true, message: 'Check triggered' });
+});
+
+app.post('/api/backfill/:id', authenticateToken, requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const config = getConfig();
+  const mapping = config.mappings.find((m) => m.id === id);
+
+  if (!mapping) {
+    res.status(404).json({ error: 'Mapping not found' });
+    return;
+  }
+
+  if (!pendingBackfills.includes(id)) {
+    pendingBackfills.push(id);
+  }
+
+  lastCheckTime = 0;
+  nextCheckTime = Date.now() + 1000;
+  res.json({ success: true, message: `Backfill queued for @${mapping.twitterUsername}` });
+});
+
+app.delete('/api/backfill/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  pendingBackfills = pendingBackfills.filter((bid) => bid !== id);
+  res.json({ success: true });
+});
+
+// Export for use by index.ts
+export function updateLastCheckTime() {
+  const config = getConfig();
+  lastCheckTime = Date.now();
+  nextCheckTime = lastCheckTime + (config.checkIntervalMinutes || 5) * 60 * 1000;
+}
+
+export function getPendingBackfills(): string[] {
+  return [...pendingBackfills];
+}
+
+export function clearBackfill(id: string) {
+  pendingBackfills = pendingBackfills.filter((bid) => bid !== id);
+}
 
 // Serve the frontend for any other route (middleware approach for Express 5)
 app.use((_req, res) => {

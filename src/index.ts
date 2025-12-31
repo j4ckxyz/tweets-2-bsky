@@ -479,9 +479,11 @@ async function getAgent(mapping: {
   }
 }
 
-async function checkAndPost(dryRun = false): Promise<void> {
+async function checkAndPost(dryRun = false, forceBackfill = false): Promise<void> {
   const config = getConfig();
   if (config.mappings.length === 0) return;
+
+  const pendingBackfills = getPendingBackfills();
 
   console.log(`[${new Date().toISOString()}] Checking all accounts...`);
 
@@ -491,13 +493,23 @@ async function checkAndPost(dryRun = false): Promise<void> {
       const agent = await getAgent(mapping);
       if (!agent) continue;
 
-      const result = await safeSearch(`from:${mapping.twitterUsername}`, 30);
-      if (!result.success || !result.tweets) continue;
-
-      await processTweets(agent, mapping.twitterUsername, result.tweets, dryRun);
+      if (forceBackfill || pendingBackfills.includes(mapping.id)) {
+        console.log(`[${mapping.twitterUsername}] Running backfill...`);
+        await importHistory(mapping.twitterUsername, undefined, dryRun);
+        clearBackfill(mapping.id);
+        console.log(`[${mapping.twitterUsername}] Backfill complete.`);
+      } else {
+        const result = await safeSearch(`from:${mapping.twitterUsername}`, 30);
+        if (!result.success || !result.tweets) continue;
+        await processTweets(agent, mapping.twitterUsername, result.tweets, dryRun);
+      }
     } catch (err) {
       console.error(`Error processing mapping ${mapping.twitterUsername}:`, err);
     }
+  }
+
+  if (!dryRun) {
+    updateLastCheckTime();
   }
 }
 
@@ -556,7 +568,7 @@ async function importHistory(twitterUsername: string, limit?: number, dryRun = f
   }
 }
 
-import { startServer } from './server.js';
+import { startServer, updateLastCheckTime, getPendingBackfills, clearBackfill } from './server.js';
 
 // ... (previous imports)
 
@@ -619,20 +631,19 @@ async function main(): Promise<void> {
 
   console.log(`Scheduling check every ${config.checkIntervalMinutes} minutes.`);
   cron.schedule(`*/${config.checkIntervalMinutes} * * * *`, () => {
-    if (twitter) {
-      checkAndPost(options.dryRun);
-    } else {
-      // Try to re-initialize if config was updated via web
+    const pendingBackfills = getPendingBackfills();
+    const forceBackfill = pendingBackfills.length > 0;
+    if (twitter || forceBackfill) {
       const currentConfig = getConfig();
-      if (currentConfig.twitter.authToken && currentConfig.twitter.ct0) {
+      if (!twitter && currentConfig.twitter.authToken && currentConfig.twitter.ct0) {
         twitter = new CustomTwitterClient({
           cookies: {
             authToken: currentConfig.twitter.authToken,
             ct0: currentConfig.twitter.ct0,
           },
         });
-        checkAndPost(options.dryRun);
       }
+      checkAndPost(options.dryRun, forceBackfill);
     }
   });
 }

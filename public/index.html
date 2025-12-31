@@ -7,13 +7,39 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
     <style>
-        body { background-color: #f8f9fa; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        .card { border: none; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-        .navbar { background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.03); }
+        body { background-color: #f8f9fa; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; transition: background-color 0.3s, color 0.3s; }
+        .card { border: none; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); transition: background-color 0.3s, box-shadow 0.3s; }
+        .navbar { background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.03); transition: background-color 0.3s; }
         .btn-primary { background-color: #0085ff; border: none; border-radius: 8px; }
         .btn-primary:hover { background-color: #0072db; }
         .login-container { max-width: 400px; margin: 100px auto; }
-        .owner-badge { background-color: #e9ecef; color: #495057; padding: 4px 8px; border-radius: 6px; font-size: 0.8rem; font-weight: 600; }
+        .owner-badge { background-color: #e9ecef; color: #495057; padding: 4px 8px; border-radius: 6px; font-size: 0.8rem; font-weight: 600; transition: background-color 0.3s, color 0.3s; }
+        
+        /* Dark mode styles */
+        .dark body { background-color: #1a1a2e; color: #e0e0e0; }
+        .dark .card { background-color: #16213e; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .dark .navbar { background-color: #16213e; color: #e0e0e0; }
+        .dark .form-control { background-color: #0f3460; border-color: #1a4a7a; color: #e0e0e0; }
+        .dark .form-control:focus { background-color: #0f3460; border-color: #0085ff; color: #e0e0e0; }
+        .dark .form-label { color: #b0b0b0; }
+        .dark .text-muted { color: #888 !important; }
+        .dark input::placeholder { color: #666; }
+        .dark .table { color: #e0e0e0; }
+        .dark .table td { border-color: #2a3a5a; }
+        .dark .table th { border-color: #2a3a5a; }
+        .dark hr { border-color: #2a3a5a; }
+        .dark .owner-badge { background-color: #0f3460; color: #a0a0a0; }
+        .dark .btn-outline-secondary { border-color: #4a5a7a; color: #a0a0a0; }
+        .dark .btn-outline-secondary:hover { background-color: #0f3460; border-color: #4a5a7a; color: #e0e0e0; }
+        .dark .btn-link { color: #6ea8fe; }
+        
+        /* Status indicator */
+        .status-indicator { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+        .status-active { background-color: #28a745; }
+        .status-queued { background-color: #ffc107; }
+        
+        /* Countdown timer */
+        .countdown-timer { font-family: monospace; font-size: 0.9rem; }
     </style>
 </head>
 <body>
@@ -29,12 +55,20 @@
 
         function App() {
             const [token, setToken] = useState(localStorage.getItem('token'));
-            const [view, setView] = useState('login'); // login, register, dashboard
+            const [darkMode, setDarkMode] = useState(() => localStorage.getItem('darkMode') === 'true');
+            const [view, setView] = useState('login');
             const [mappings, setMappings] = useState([]);
             const [twitterConfig, setTwitterConfig] = useState({ authToken: '', ct0: '' });
             const [isAdmin, setIsAdmin] = useState(false);
+            const [status, setStatus] = useState({});
             const [loading, setLoading] = useState(false);
             const [error, setError] = useState('');
+            const [countdown, setCountdown] = useState('');
+
+            useEffect(() => {
+                document.body.classList.toggle('dark', darkMode);
+                localStorage.setItem('darkMode', darkMode);
+            }, [darkMode]);
 
             useEffect(() => {
                 if (token) {
@@ -42,6 +76,45 @@
                     setView('dashboard');
                 }
             }, [token]);
+
+            useEffect(() => {
+                if (view === 'dashboard' && token) {
+                    fetchStatus();
+                    const interval = setInterval(() => {
+                        updateCountdown();
+                    }, 1000);
+                    const statusInterval = setInterval(fetchStatus, 30000);
+                    return () => {
+                        clearInterval(interval);
+                        clearInterval(statusInterval);
+                    };
+                }
+            }, [view, token, status.nextCheckTime]);
+
+            const updateCountdown = () => {
+                if (!status.nextCheckTime) return;
+                const now = Date.now();
+                const diff = status.nextCheckTime - now;
+                if (diff <= 0) {
+                    setCountdown('Checking soon...');
+                    return;
+                }
+                const mins = Math.floor(diff / 60000);
+                const secs = Math.floor((diff % 60000) / 1000);
+                setCountdown(`${mins}m ${secs}s`);
+            };
+
+            const fetchStatus = async () => {
+                try {
+                    const res = await axios.get('/api/status', { 
+                        headers: { Authorization: `Bearer ${token}` } 
+                    });
+                    setStatus(res.data);
+                    updateCountdown();
+                } catch (err) {
+                    console.error('Failed to fetch status');
+                }
+            };
 
             const fetchData = async () => {
                 try {
@@ -56,6 +129,7 @@
                         const twitRes = await axios.get('/api/twitter-config', { headers });
                         setTwitterConfig(twitRes.data);
                     }
+                    fetchStatus();
                 } catch (err) {
                     if (err.response?.status === 401) handleLogout();
                 }
@@ -130,6 +204,32 @@
                 }
             };
 
+            const runNow = async () => {
+                if (!confirm('Run check now for all accounts?')) return;
+                try {
+                    await axios.post('/api/run-now', {}, { 
+                        headers: { Authorization: `Bearer ${token}` } 
+                    });
+                    alert('Check triggered! It will run in a few seconds.');
+                    setTimeout(fetchStatus, 2000);
+                } catch (err) {
+                    alert('Failed to trigger check');
+                }
+            };
+
+            const runBackfill = async (id, twitterUsername) => {
+                if (!confirm(`Run full history backfill for @${twitterUsername}?\n\nThis may take a while and could take multiple API rate limit hits.`)) return;
+                try {
+                    await axios.post(`/api/backfill/${id}`, {}, { 
+                        headers: { Authorization: `Bearer ${token}` } 
+                    });
+                    alert(`Backfill queued for @${twitterUsername}.\n\nThe check will run immediately.`);
+                    setTimeout(fetchStatus, 2000);
+                } catch (err) {
+                    alert(err.response?.data?.error || 'Failed to queue backfill');
+                }
+            };
+
             const updateTwitter = async (e) => {
                 e.preventDefault();
                 try {
@@ -173,6 +273,8 @@
                 );
             }
 
+            const isBackfillQueued = (id) => status.pendingBackfills?.includes(id);
+
             return (
                 <div>
                     <nav className="navbar navbar-expand-lg mb-4">
@@ -181,7 +283,19 @@
                                 <span className="material-icons me-2 text-primary">swap_calls</span>
                                 <strong>Tweets-2-Bsky</strong>
                             </span>
-                            <button className="btn btn-outline-danger btn-sm" onClick={handleLogout}>Logout</button>
+                            <div className="d-flex align-items-center gap-2">
+                                <span className="countdown-timer text-muted">
+                                    <span className="material-icons" style={{fontSize: '1rem', marginRight: '4px'}}>schedule</span>
+                                    Next: {countdown}
+                                </span>
+                                <button className="btn btn-outline-secondary btn-sm" onClick={runNow} title="Run check now">
+                                    <span className="material-icons" style={{fontSize: '1rem'}}>play_arrow</span> Run Now
+                                </button>
+                                <button className="btn btn-outline-secondary btn-sm" onClick={() => setDarkMode(!darkMode)} title="Toggle dark mode">
+                                    <span className="material-icons" style={{fontSize: '1rem'}}>{darkMode ? 'light_mode' : 'dark_mode'}</span>
+                                </button>
+                                <button className="btn btn-outline-danger btn-sm" onClick={handleLogout}>Logout</button>
+                            </div>
                         </div>
                     </nav>
 
@@ -252,7 +366,7 @@
                                                     <th>Twitter</th>
                                                     <th>Bluesky</th>
                                                     <th>Status</th>
-                                                    <th></th>
+                                                    <th className="text-end">Actions</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -261,10 +375,22 @@
                                                         <td><span className="owner-badge">{m.owner || 'System'}</span></td>
                                                         <td>@{m.twitterUsername}</td>
                                                         <td className="small text-muted">{m.bskyIdentifier}</td>
-                                                        <td><span className="badge bg-success">Active</span></td>
+                                                        <td>
+                                                            <span className={`status-indicator ${isBackfillQueued(m.id) ? 'status-queued' : 'status-active'}`}></span>
+                                                            {isBackfillQueued(m.id) ? 'Backfill Queued' : 'Active'}
+                                                        </td>
                                                         <td className="text-end">
-                                                            <button onClick={() => deleteMapping(m.id)} className="btn btn-link text-danger p-0">
-                                                                <span className="material-icons">delete</span>
+                                                            {isAdmin && (
+                                                            <button 
+                                                                onClick={() => runBackfill(m.id, m.twitterUsername)} 
+                                                                className="btn btn-link btn-sm text-warning p-0 me-2"
+                                                                title="Run full history backfill"
+                                                            >
+                                                                <span className="material-icons" style={{fontSize: '1.1rem'}}>history</span>
+                                                            </button>
+                                                            )}
+                                                            <button onClick={() => deleteMapping(m.id)} className="btn btn-link text-danger p-0" title="Delete mapping">
+                                                                <span className="material-icons" style={{fontSize: '1.1rem'}}>delete</span>
                                                             </button>
                                                         </td>
                                                     </tr>
