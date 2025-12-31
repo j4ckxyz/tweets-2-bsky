@@ -115,7 +115,7 @@ app.post('/api/twitter-config', authenticateToken, (req, res) => {
 });
 
 // Serve the frontend for any other route
-app.get('*', (_req, res) => {
+app.get('/*', (_req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
