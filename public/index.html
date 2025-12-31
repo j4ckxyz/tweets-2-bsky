@@ -207,11 +207,11 @@
             };
 
             const runBackfill = async (id, twitterUsername) => {
-                const limit = prompt(`How many tweets to backfill for @${twitterUsername}?`, "100");
+                const limit = prompt(`How many tweets to backfill for @${twitterUsername}?`, "15");
                 if (limit === null) return; // Cancelled
                 
                 try {
-                    await axios.post(`/api/backfill/${id}`, { limit: parseInt(limit) || 100 }, { 
+                    await axios.post(`/api/backfill/${id}`, { limit: parseInt(limit) || 15 }, { 
                         headers: { Authorization: `Bearer ${token}` } 
                     });
                     alert(`Backfill queued for @${twitterUsername}`);
@@ -257,7 +257,7 @@
             };
 
             const resetAndBackfill = async (id, twitterUsername) => {
-                const limit = prompt(`Reset cache and backfill how many tweets for @${twitterUsername}?`, "100");
+                const limit = prompt(`Reset cache and backfill how many tweets for @${twitterUsername}?`, "15");
                 if (limit === null) return;
 
                 try {
@@ -266,7 +266,7 @@
                         headers: { Authorization: `Bearer ${token}` } 
                     });
                     // 2. Queue Backfill
-                    await axios.post(`/api/backfill/${id}`, { limit: parseInt(limit) || 100 }, { 
+                    await axios.post(`/api/backfill/${id}`, { limit: parseInt(limit) || 15 }, { 
                         headers: { Authorization: `Bearer ${token}` } 
                     });
                     alert(`Cache cleared and backfill queued for @${twitterUsername}`);

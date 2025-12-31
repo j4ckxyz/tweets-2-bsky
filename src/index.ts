@@ -898,7 +898,7 @@ async function checkAndPost(dryRun = false, forceBackfill = false): Promise<void
 
       const backfillReq = getPendingBackfills().find(b => b.id === mapping.id);
       if (forceBackfill || backfillReq) {
-        const limit = backfillReq?.limit || 100;
+        const limit = backfillReq?.limit || 15;
         console.log(`[${mapping.twitterUsername}] Running backfill (limit ${limit})...`);
         updateAppStatus({ state: 'backfilling', currentAccount: mapping.twitterUsername, message: `Starting backfill (limit ${limit})...` });
         await importHistory(mapping.twitterUsername, limit, dryRun);
@@ -921,7 +921,7 @@ async function checkAndPost(dryRun = false, forceBackfill = false): Promise<void
   }
 }
 
-async function importHistory(twitterUsername: string, limit = 100, dryRun = false): Promise<void> {
+async function importHistory(twitterUsername: string, limit = 15, dryRun = false): Promise<void> {
   const config = getConfig();
   const mapping = config.mappings.find((m) => m.twitterUsername.toLowerCase() === twitterUsername.toLowerCase());
   if (!mapping) {
