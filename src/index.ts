@@ -406,6 +406,7 @@ async function processTweets(
 
     const images: ImageEmbed[] = [];
     let videoBlob: BlobRef | null = null;
+    let videoThumbnailBlob: BlobRef | null = null;
     let videoAspectRatio: AspectRatio | undefined;
     const mediaEntities = tweet.extended_entities?.media || tweet.entities?.media || [];
     const mediaLinksToRemove: string[] = [];
@@ -436,10 +437,15 @@ async function processTweets(
         const variants = media.video_info?.variants || [];
         const mp4s = variants
           .filter((v) => v.content_type === 'video/mp4')
-          .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+          .sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0)); // Sort ASCENDING to pick smaller variants
 
-        if (mp4s.length > 0 && mp4s[0]) {
-          const videoUrl = mp4s[0].url;
+        if (mp4s.length > 0) {
+          // Pick a medium variant if available, otherwise the smallest
+          const variantIndex = mp4s.length > 1 ? 1 : 0;
+          const variant = mp4s[variantIndex];
+          if (!variant) continue;
+          
+          const videoUrl = variant.url;
           try {
             const { buffer, mimeType } = await downloadMedia(videoUrl);
             if (buffer.length > 95 * 1024 * 1024) {
@@ -448,10 +454,23 @@ async function processTweets(
               if (!text.includes(tweetUrl)) text += `\n${tweetUrl}`;
               continue;
             }
+            
+            // 1. Upload Video
             const blob = await uploadToBluesky(agent, buffer, mimeType);
             videoBlob = blob;
             videoAspectRatio = aspectRatio;
-            break; // Prioritize video and stop looking for other media
+
+            // 2. Try to upload thumbnail
+            if (media.media_url_https) {
+              try {
+                const thumb = await downloadMedia(media.media_url_https);
+                videoThumbnailBlob = await uploadToBluesky(agent, thumb.buffer, thumb.mimeType);
+              } catch (e) {
+                console.warn('Failed to upload video thumbnail');
+              }
+            }
+
+            break; // Prioritize video
           } catch (err) {
             console.warn(`Failed to upload video ${videoUrl}, linking to tweet instead:`, (err as Error).message);
             const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
@@ -510,6 +529,7 @@ async function processTweets(
           postRecord.embed = {
             $type: 'app.bsky.embed.video',
             video: videoBlob,
+            thumbnail: videoThumbnailBlob,
             aspectRatio: videoAspectRatio,
           };
         } else if (images.length > 0) {
