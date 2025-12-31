@@ -2,5 +2,7 @@ node_modules/
 dist/
 .env
 processed_tweets.json
+config.json
+processed/
 npm-debug.log
 .DS_Store
