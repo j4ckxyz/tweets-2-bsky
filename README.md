@@ -32,7 +32,7 @@ Most crossposters are either paid services or lack key features. This tool is de
 ### 1. Installation
 
 ```bash
-git clone https://github.com/yourusername/tweets-2-bsky.git
+git clone https://github.com/j4ckxyz/tweets-2-bsky.git
 cd tweets-2-bsky
 npm install
 ```
@@ -73,36 +73,61 @@ The tool will use the alt account to "view" your main account's profile and copy
 
 ### 3. Usage
 
-**Start the Crossposter (Run 24/7):**
-Checks for new tweets every 5 minutes.
+**Development (with hot reload):**
 ```bash
-node index.js
+npm run dev
+```
+
+**Production:**
+```bash
+npm run build
+npm start
 ```
 
 **Import History:**
 Migrate your old tweets. This runs once and stops.
 ```bash
-node index.js --import-history
+npm run import
 ```
+
+### 4. Other Commands
+
+| Command | Description |
+|---------|-------------|
+| `npm run build` | Compile TypeScript to `dist/` |
+| `npm run dev` | Run directly with tsx (no build needed) |
+| `npm run lint` | Run Biome linter with auto-fix |
+| `npm run format` | Format code with Biome |
+| `npm run typecheck` | Type-check without emitting |
 
 ## Running on a Server (VPS)
 
 To keep this running 24/7 on a Linux server (e.g., Ubuntu):
 
-1.  **Install PM2 (Process Manager):**
+1.  **Build the project:**
+    ```bash
+    npm run build
+    ```
+2.  **Install PM2 (Process Manager):**
     ```bash
     sudo npm install -g pm2
     ```
-2.  **Start the tool:**
+3.  **Start the tool:**
     ```bash
-    pm2 start index.js --name "twitter-mirror"
+    pm2 start dist/index.js --name "twitter-mirror"
     ```
-3.  **Check logs:**
+4.  **Check logs:**
     ```bash
     pm2 logs twitter-mirror
     ```
-4.  **Enable startup on reboot:**
+5.  **Enable startup on reboot:**
     ```bash
     pm2 startup
     pm2 save
     ```
+
+## Tech Stack
+
+- **TypeScript** – Full type safety
+- **Biome** – Fast linting & formatting
+- **tsx** – TypeScript execution for development
