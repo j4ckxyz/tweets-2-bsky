@@ -1,133 +1,91 @@
-# Tweets to Bluesky Crossposter
+# 🐦 Tweets-2-Bsky
 
-A powerful, set-and-forget tool to mirror your Twitter/X account to Bluesky.
+A powerful tool to crosspost your Tweets to Bluesky automatically. Now supports **multiple accounts**, **custom PDS (hosting) locations**, and a **user-friendly CLI** for easy management.
 
-> **Credits:** This project is powered by [bird](https://github.com/steipete/bird) by [steipete](https://github.com/steipete) for robust Twitter/X data fetching.
+## ✨ Features
 
-## Why this tool?
+- **Multi-Account Support**: Sync Twitter A -> Bluesky A, Twitter B -> Bluesky B, or multiple Twitters to one Bluesky.
+- **Interactive CLI**: Manage all your account mappings and credentials without touching code.
+- **Custom PDS Support**: Works with `bsky.social` or any independent Bluesky hosting provider.
+- **Thread Support**: Maintains your Twitter threads perfectly on Bluesky.
+- **Media Support**: Automatically migrates high-quality images and videos.
+- **Smart Logic**: Automatically detects languages and expands short links.
+- **Safety First**: Includes a `--dry-run` mode to test before you post.
 
-Most crossposters are either paid services or lack key features. This tool is designed for power users who want a perfect mirror:
+---
 
-*   **Smart Media Handling:**
-    *   **Videos:** Downloads videos from Twitter and uploads them natively to Bluesky (up to 100MB).
-    *   **Images:** Uploads high-resolution images with the **correct aspect ratio** (no weird cropping).
-    *   **Links:** Automatically removes `t.co` tracking links and expands them to their real destinations.
-*   **Smart Features:**
-    *   **Language Detection:** Automatically detects the language of your tweet (e.g., English, Japanese) and tags the Bluesky post correctly.
-    *   **Human-like Pacing:** Randomly waits (1-4s) between posts to behave more like a real user and avoid spam detection.
-    *   **Auto-Healing:** Automatically rotates internal Twitter Query IDs if they expire, ensuring the tool keeps working 24/7 without manual intervention.
-*   **Threads & Replies:**
-    *   **Perfect Threading:** If you write a thread (reply to yourself) on Twitter, it appears as a threaded conversation on Bluesky.
-    *   **Clean Feed:** Automatically filters out your replies to *other* people, keeping your Bluesky timeline focused on your original content.
-    *   **Quotes:** Smartly handles Quote Tweets, embedding the quoted post if available.
-*   **History Import:**
-    *   Backfill your entire tweet history chronologically (Oldest → Newest).
-    *   Preserves original timestamps on posts.
-    *   Uses human-like pacing to avoid rate limits.
-*   **Safety:**
-    *   Designed to use **Alt Account Cookies**. You can use a burner account to fetch tweets, protecting your main account from suspension risks.
+## 🚀 Quick Start (For Everyone)
 
-## Setup
+### 1. Prerequisites
+- **Node.js** installed on your computer.
+- A Twitter account (preferably an alt/burner for the web cookies).
+- A Bluesky account and an **App Password** (Settings -> Privacy & Security -> App Passwords).
 
-### 1. Installation
-
+### 2. Installation
+Open your terminal and run:
 ```bash
 git clone https://github.com/j4ckxyz/tweets-2-bsky.git
 cd tweets-2-bsky
 npm install
 ```
 
-### 2. Configuration (`.env`)
-
-Create a `.env` file in the project folder:
-
+### 3. Setup (Using the CLI)
+Instead of editing files, use our simple setup command:
 ```bash
-# --- Twitter Configuration ---
-# 1. Log in to x.com (RECOMMENDED: Use a separate "burner" account!)
-# 2. Open Developer Tools (F12) -> Application -> Cookies
-# 3. Copy the values for 'auth_token' and 'ct0'
-TWITTER_AUTH_TOKEN=d03...
-TWITTER_CT0=e1a...
+# 1. Set your Twitter cookies (one set of cookies works for all mappings)
+npm run cli setup-twitter
 
-# The username of the account you want to MIRROR (e.g., your main account)
-# If left empty, it tries to mirror the account you logged in with (NOT RECOMMENDED).
-TWITTER_TARGET_USERNAME=jack
-
-# --- Bluesky Configuration ---
-BLUESKY_IDENTIFIER=jack.bsky.social
-# Generate an App Password in Bluesky Settings -> Privacy & Security
-BLUESKY_PASSWORD=xxxx-xxxx-xxxx-xxxx
-
-# --- Optional ---
-CHECK_INTERVAL_MINUTES=5
-# BLUESKY_SERVICE_URL=https://bsky.social (Change for custom PDS)
+# 2. Add your first account mapping
+npm run cli add-mapping
 ```
+*Note: You can find your Twitter `auth_token` and `ct0` in your browser's developer tools under Application -> Cookies.*
 
-**⚠️ Safety Tip:**
-Twitter is strict about scraping. **Do not use your main account's cookies.**
-1.  Create a fresh Twitter account (or use an old alt).
-2.  Log in with that alt account in your browser.
-3.  Grab the cookies (`auth_token`, `ct0`) from that alt account.
-4.  Set `TWITTER_TARGET_USERNAME` to your **main** account's handle (e.g., `elonmusk`).
-The tool will use the alt account to "view" your main account's profile and copy the tweets.
-
-### 3. Usage
-
-**Development (with hot reload):**
+### 4. Run the Sync
 ```bash
-npm run dev
-```
-
-**Production:**
-```bash
+# Build the project
 npm run build
+
+# Start the automatic syncing daemon
 npm start
 ```
 
-**Import History:**
-Migrate your old tweets. This runs once and stops.
+---
+
+## 🛠 Advanced Usage
+
+### Backfilling Old Tweets
+If you want to import your historical tweets for a specific account:
 ```bash
-npm run import
+# Get the command from the CLI help
+npm run cli import-history
+
+# Example: Import the last 10 tweets for a specific user
+npm run import -- --username YOUR_TWITTER_HANDLE --limit 10
 ```
 
-### 4. Other Commands
+### Testing with Dry Run
+See what would be posted without actually posting anything:
+```bash
+npm start -- --dry-run
+```
 
-| Command | Description |
-|---------|-------------|
-| `npm run build` | Compile TypeScript to `dist/` |
-| `npm run dev` | Run directly with tsx (no build needed) |
-| `npm run lint` | Run Biome linter with auto-fix |
-| `npm run format` | Format code with Biome |
-| `npm run typecheck` | Type-check without emitting |
+### Management Commands
+```bash
+npm run cli list             # Show all active mappings
+npm run cli remove           # Remove an account mapping
+npm run cli set-interval     # Change how often to check for new tweets
+```
 
-## Running on a Server (VPS)
+---
 
-To keep this running 24/7 on a Linux server (e.g., Ubuntu):
+## 📝 Configuration Details
 
-1.  **Build the project:**
-    ```bash
-    npm run build
-    ```
-2.  **Install PM2 (Process Manager):**
-    ```bash
-    sudo npm install -g pm2
-    ```
-3.  **Start the tool:**
-    ```bash
-    pm2 start dist/index.js --name "twitter-mirror"
-    ```
-4.  **Check logs:**
-    ```bash
-    pm2 logs twitter-mirror
-    ```
-5.  **Enable startup on reboot:**
-    ```bash
-    pm2 startup
-    pm2 save
-    ```
+- **Check Interval**: Default is 5 minutes.
+- **Database**: Processed tweets are tracked per-account in the `processed/` folder so you never get duplicates.
+- **Service URL**: If you use a custom Bluesky host (like `bsky.network`), you can set it during the `add-mapping` process.
 
-## Tech Stack
+## ⚖️ License
+MIT
 
-- **TypeScript** – Full type safety
-- **Biome** – Fast linting & formatting
-- **tsx** – TypeScript execution for development
+---
+*Created with ❤️ for the decentralized web.*
