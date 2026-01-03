@@ -291,6 +291,7 @@ async function downloadMedia(url: string): Promise<DownloadedMedia> {
     url,
     method: 'GET',
     responseType: 'arraybuffer',
+    timeout: 30000,
   });
   return {
     buffer: Buffer.from(response.data as ArrayBuffer),
@@ -301,37 +302,72 @@ async function downloadMedia(url: string): Promise<DownloadedMedia> {
 async function uploadToBluesky(agent: BskyAgent, buffer: Buffer, mimeType: string): Promise<BlobRef> {
   let finalBuffer = buffer;
   let finalMimeType = mimeType;
-  const MAX_SIZE = 950 * 1024; // 950KB safety margin
+  const MAX_SIZE = 950 * 1024;
 
-  if (buffer.length > MAX_SIZE && (mimeType.startsWith('image/') || mimeType === 'application/octet-stream')) {
-    console.log(`[UPLOAD] ⚖️ Image too large (${(buffer.length / 1024).toFixed(2)} KB). Compressing...`);
+  const isPng = mimeType === 'image/png';
+  const isJpeg = mimeType === 'image/jpeg' || mimeType === 'image/jpg';
+  const isWebp = mimeType === 'image/webp';
+  const isGif = mimeType === 'image/gif';
+  const isAnimation = isGif || isWebp;
+
+  if ((buffer.length > MAX_SIZE && (mimeType.startsWith('image/') || mimeType === 'application/octet-stream')) || (isPng && buffer.length > MAX_SIZE)) {
+    console.log(`[UPLOAD] ⚖️ Image too large (${(buffer.length / 1024).toFixed(2)} KB). Optimizing...`);
     try {
-      const image = sharp(buffer);
+      let image = sharp(buffer);
       const metadata = await image.metadata();
-      
-      let pipeline = image;
-      // If it's a very large resolution, downscale it slightly
-      if (metadata.width && metadata.width > 2000) {
-        pipeline = pipeline.resize(2000, undefined, { withoutEnlargement: true });
+
+      if (isAnimation) {
+        console.log(`[UPLOAD] 🖼️ Preserving animation format.`);
+        if (isWebp && buffer.length > MAX_SIZE) {
+          image = image.webp({ quality: 90, effort: 6 });
+        }
+      } else {
+        if (metadata.width && metadata.width > 2000) {
+          image = image.resize(2000, undefined, { withoutEnlargement: true });
+        }
+
+        if (isPng) {
+          if (metadata.hasAlpha) {
+            image = image.png({ compressionLevel: 9, adaptiveFiltering: true });
+          } else {
+            image = image.jpeg({ quality: 92, mozjpeg: true });
+            finalMimeType = 'image/jpeg';
+          }
+        } else if (isJpeg) {
+          if (buffer.length > MAX_SIZE) {
+            image = image.jpeg({ quality: 92, mozjpeg: true });
+          }
+        } else {
+          image = image.jpeg({ quality: 92, mozjpeg: true });
+          finalMimeType = 'image/jpeg';
+        }
       }
 
-      finalBuffer = await pipeline
-        .jpeg({ quality: 85, mozjpeg: true })
-        .toBuffer();
-      finalMimeType = 'image/jpeg';
-      
-      console.log(`[UPLOAD] ✅ Compressed to ${(finalBuffer.length / 1024).toFixed(2)} KB`);
-      
-      // If still too large, aggressive compression
-      if (finalBuffer.length > MAX_SIZE) {
-        finalBuffer = await sharp(buffer)
-          .resize(1200, undefined, { withoutEnlargement: true })
-          .jpeg({ quality: 70 })
-          .toBuffer();
-        console.log(`[UPLOAD] ⚠️ Required aggressive compression: ${(finalBuffer.length / 1024).toFixed(2)} KB`);
+      finalBuffer = await image.toBuffer();
+      console.log(`[UPLOAD] ✅ Optimized to ${(finalBuffer.length / 1024).toFixed(2)} KB`);
+
+      if (finalBuffer.length > MAX_SIZE && !isAnimation) {
+        console.log(`[UPLOAD] ⚠️ Still large, trying higher compression...`);
+        const pipeline = sharp(buffer);
+        const md = await pipeline.metadata();
+
+        if (md.width && md.width > 1600) {
+          pipeline.resize(1600, undefined, { withoutEnlargement: true });
+        }
+
+        if (mimeType === 'image/png' && md.hasAlpha) {
+          finalBuffer = await pipeline.png({ compressionLevel: 9 }).toBuffer();
+          finalMimeType = 'image/png';
+        } else {
+          finalBuffer = await pipeline.jpeg({ quality: 85, mozjpeg: true }).toBuffer();
+          finalMimeType = 'image/jpeg';
+        }
+        console.log(`[UPLOAD] ✅ Further compressed to ${(finalBuffer.length / 1024).toFixed(2)} KB`);
       }
     } catch (err) {
-      console.warn(`[UPLOAD] ⚠️ Compression failed, attempting original upload:`, (err as Error).message);
+      console.warn(`[UPLOAD] ⚠️ Optimization failed, attempting original upload:`, (err as Error).message);
+      finalBuffer = buffer;
+      finalMimeType = mimeType;
     }
   }
 
@@ -537,10 +573,6 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
   }
 }
 
-function getRandomDelay(min = 1000, max = 4000): number {
-  return Math.floor(Math.random() * (max - min + 1) + min);
-}
-
 function splitText(text: string, limit = 300): string[] {
   if (text.length <= limit) return [text];
 
@@ -737,16 +769,27 @@ async function processTweets(
         const url = media.media_url_https;
         if (!url) continue;
         try {
-          console.log(`[${twitterUsername}] 📥 Downloading image: ${url}`);
-          updateAppStatus({ message: `Downloading image: ${path.basename(url)}` });
-          const { buffer, mimeType } = await downloadMedia(url);
+          const highQualityUrl = url.includes('?') ? url.replace('?', ':orig?') : url + ':orig';
+          console.log(`[${twitterUsername}] 📥 Downloading image (high quality): ${path.basename(highQualityUrl)}`);
+          updateAppStatus({ message: `Downloading high quality image...` });
+          const { buffer, mimeType } = await downloadMedia(highQualityUrl);
           console.log(`[${twitterUsername}] 📤 Uploading image to Bluesky...`);
           updateAppStatus({ message: `Uploading image to Bluesky...` });
           const blob = await uploadToBluesky(agent, buffer, mimeType);
           images.push({ alt: media.ext_alt_text || 'Image from Twitter', image: blob, aspectRatio });
           console.log(`[${twitterUsername}] ✅ Image uploaded.`);
         } catch (err) {
-          console.error(`[${twitterUsername}] ❌ Failed to upload image ${url}:`, (err as Error).message);
+          console.error(`[${twitterUsername}] ❌ High quality upload failed:`, (err as Error).message);
+          try {
+            console.log(`[${twitterUsername}] 🔄 Retrying with standard quality...`);
+            updateAppStatus({ message: `Retrying with standard quality...` });
+            const { buffer, mimeType } = await downloadMedia(url);
+            const blob = await uploadToBluesky(agent, buffer, mimeType);
+            images.push({ alt: media.ext_alt_text || 'Image from Twitter', image: blob, aspectRatio });
+            console.log(`[${twitterUsername}] ✅ Image uploaded on retry.`);
+          } catch (retryErr) {
+            console.error(`[${twitterUsername}] ❌ Retry also failed:`, (retryErr as Error).message);
+          }
         }
       } else if (media.type === 'video' || media.type === 'animated_gif') {
         const variants = media.video_info?.variants || [];
@@ -915,7 +958,7 @@ async function processTweets(
         console.log(`[${twitterUsername}] ✅ Chunk ${i + 1} posted successfully.`);
         
         if (chunks.length > 1) {
-          await new Promise((r) => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 3000));
         }
       } catch (err) {
         console.error(`[${twitterUsername}] ❌ Failed to post ${tweetId} (chunk ${i + 1}):`, err);
@@ -923,9 +966,9 @@ async function processTweets(
       }
     }
     
-    const wait = getRandomDelay(2000, 5000);
-    console.log(`[${twitterUsername}] 😴 Pacing: Waiting ${wait}ms before next tweet.`);
-    updateAppStatus({ state: 'pacing', message: `Pacing: Waiting ${Math.round(wait/1000)}s...` });
+    const wait = 10000;
+    console.log(`[${twitterUsername}] 😴 Pacing: Waiting ${wait / 1000}s before next tweet.`);
+    updateAppStatus({ state: 'pacing', message: `Pacing: Waiting ${wait / 1000}s...` });
     await new Promise((r) => setTimeout(r, wait));
   }
 }
@@ -1055,7 +1098,7 @@ async function importHistory(twitterUsername: string, bskyIdentifier: string, li
 
     if (limit && allFoundTweets.length >= limit) break;
 
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 5000));
   }
 
   console.log(`Fetch complete. Found ${allFoundTweets.length} new tweets to import.`);
