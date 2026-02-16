@@ -1,0 +1,13 @@
+node_modules
+npm-debug.log
+.git
+.github
+.cursor
+dist
+web/dist
+data
+config.json
+.env
+*.sqlite
+*.pid
+*.log
