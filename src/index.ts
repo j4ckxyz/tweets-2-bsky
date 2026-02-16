@@ -1225,9 +1225,21 @@ const pLimit = (concurrency: number) => {
 
 // Replaced safeSearch with fetchUserTweets to use UserTweets endpoint instead of Search
 // Added processedIds for early stopping optimization
-async function fetchUserTweets(username: string, limit: number, processedIds?: Set<string>): Promise<Tweet[]> {
+type FetchUserTweetsResult = {
+  tweets: Tweet[];
+  failed: boolean;
+  error?: string;
+};
+
+async function fetchUserTweets(
+  username: string,
+  limit: number,
+  processedIds?: Set<string>,
+): Promise<FetchUserTweetsResult> {
   const client = await getTwitterScraper();
-  if (!client) return [];
+  if (!client) {
+    return { tweets: [], failed: true, error: 'Twitter credentials not set (missing auth_token/ct0).' };
+  }
 
   let retries = 3;
   while (retries > 0) {
@@ -1255,7 +1267,7 @@ async function fetchUserTweets(username: string, limit: number, processedIds?: S
         tweets.push(tweet);
         if (tweets.length >= limit) break;
       }
-      return tweets;
+      return { tweets, failed: false };
     } catch (e: any) {
       retries--;
       const isRetryable =
@@ -1290,13 +1302,14 @@ async function fetchUserTweets(username: string, limit: number, processedIds?: S
         }
       }
 
-      console.warn(`Error fetching tweets for ${username}:`, e.message || e);
-      return [];
+      const reason = e?.message ? String(e.message) : String(e);
+      console.warn(`Error fetching tweets for ${username}:`, reason);
+      return { tweets: [], failed: true, error: reason };
     }
   }
 
   console.log(`[${username}] ⚠️ Scraper returned 0 tweets (or failed silently) after retries.`);
-  return [];
+  return { tweets: [], failed: true, error: 'Scraper returned 0 tweets (or failed silently) after retries.' };
 }
 
 // ============================================================================
@@ -2224,10 +2237,18 @@ async function runAccountTask(mapping: AccountMapping, backfillRequest?: Pending
 
             // Use fetchUserTweets with early stopping optimization
             // Increase limit slightly since we have early stopping now
-            const tweets = await fetchUserTweets(twitterUsername, 50, processedIds);
+            const fetchResult = await fetchUserTweets(twitterUsername, 50, processedIds);
 
-            if (!tweets || tweets.length === 0) {
-              console.log(`[${twitterUsername}] ℹ️ No tweets found (or fetch failed).`);
+            if (fetchResult.failed) {
+              console.warn(
+                `[${twitterUsername}] ⚠️ Tweet fetch failed: ${fetchResult.error || 'unknown reason'}`,
+              );
+              continue;
+            }
+
+            const tweets = fetchResult.tweets;
+            if (tweets.length === 0) {
+              console.log(`[${twitterUsername}] ℹ️ No new tweets found.`);
               continue;
             }
 
