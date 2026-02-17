@@ -828,11 +828,11 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
       <html>
       <head>
         <style>
-          body { 
-            margin: 0; 
-            padding: 20px; 
-            background: #ffffff; 
-            display: flex; 
+          body {
+            margin: 0;
+            padding: 20px;
+            background: #ffffff;
+            display: flex;
             justify-content: center;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
           }
