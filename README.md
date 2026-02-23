@@ -1,4 +1,5 @@
 # tweets-2-bsky
+This repo can also be found on Tangled at [j4ck.xyz/tweets2bsky](https://tangled.org/j4ck.xyz/tweets2bsky)
 
 Crosspost posts from Twitter/X to Bluesky with thread support, media handling, account mapping, and a web dashboard.
 
