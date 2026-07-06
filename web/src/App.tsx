@@ -4500,639 +4500,589 @@ function App() {
               </div>
             </aside>
             <div className="space-y-6">
-          <Card id="accounts-overview" className="">
-            <CardHeader className="pb-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="space-y-1">
-                  <CardTitle>Active Accounts</CardTitle>
-                  <CardDescription>Organize mappings into folders and collapse/expand groups.</CardDescription>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  {canCreateMappings ? (
-                    <Button size="sm" variant="outline" onClick={openAddAccountSheet}>
-                      <Plus className="mr-2 h-4 w-4" />
-                      Add account
-                    </Button>
-                  ) : null}
-                  {isBridgeAllBusy && bridgeAllProgress ? (
-                    <Badge variant="outline" className="max-w-[280px] truncate">
-                      {bridgeAllProgress.currentHandle
-                        ? `Now bridging ${bridgeAllProgress.currentHandle}`
-                        : 'Preparing bridge-all...'}
-                    </Badge>
-                  ) : null}
-                  <Badge variant="outline">{accountMappingsForView.length} configured</Badge>
-                  <Badge variant={selectedManageableMappingsCount > 0 ? 'success' : 'outline'}>
-                    {selectedManageableMappingsCount} selected
-                  </Badge>
-                  <Badge variant="outline">{botLabeledMappingsForView.length} bot-labeled</Badge>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4 pt-0">
-              <details className="rounded-lg border border-border/70 bg-muted/20 p-3">
-                <summary className="cursor-pointer text-sm font-medium">Bulk actions</summary>
-                <div className="mt-3 flex flex-wrap items-end gap-2">
-                  <select
-                    className={cn(selectClassName, 'h-9 w-[260px] px-2 py-1 text-xs')}
-                    value={accountsBulkAction}
-                    disabled={isAnyBulkAccountsActionBusy}
-                    onChange={(event) => setAccountsBulkAction(event.target.value as BulkAccountsAction)}
-                  >
-                    <option value="sync_profiles">Apply profile sync to accounts</option>
-                    <option value="pull_twitter_bio">Pull Twitter bio to accounts</option>
-                    <option value="bridge_all">Apply fediverse bridge to eligible accounts</option>
-                    <option value="apply_bot_label">Apply automated-account label to accounts</option>
-                    <option value="append_bot_name">Apply {'{bot}'} display-name suffix to accounts</option>
-                    <option value="sync_pins">Sync pinned tweets to accounts</option>
-                  </select>
-                  <select
-                    className={cn(selectClassName, 'h-9 w-[200px] px-2 py-1 text-xs')}
-                    value={accountsBulkScope}
-                    disabled={isAnyBulkAccountsActionBusy}
-                    onChange={(event) => setAccountsBulkScope(event.target.value as 'all' | 'selected')}
-                  >
-                    <option value="all">Target all manageable</option>
-                    <option value="selected">Target selected only</option>
-                  </select>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={
-                      isAnyBulkAccountsActionBusy ||
-                      (accountsBulkScope === 'selected' && selectedManageableMappingsCount === 0)
-                    }
-                    onClick={() => {
-                      void handleApplyAllAccountsAction();
-                    }}
-                  >
-                    {isAnyBulkAccountsActionBusy ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : accountsBulkAction === 'pull_twitter_bio' ? (
-                      <Download className="mr-2 h-4 w-4" />
-                    ) : accountsBulkAction === 'bridge_all' ? (
-                      <Link2 className="mr-2 h-4 w-4" />
-                    ) : accountsBulkAction === 'sync_profiles' ? (
-                      <RefreshCw className="mr-2 h-4 w-4" />
-                    ) : accountsBulkAction === 'sync_pins' ? (
-                      <Pin className="mr-2 h-4 w-4" />
-                    ) : (
-                      <Bot className="mr-2 h-4 w-4" />
-                    )}
-                    {accountsBulkAction === 'sync_profiles'
-                      ? 'Apply sync all'
-                      : accountsBulkAction === 'pull_twitter_bio'
-                        ? 'Apply pull bio'
-                        : accountsBulkAction === 'bridge_all'
-                          ? 'Apply bridge all'
-                          : accountsBulkAction === 'apply_bot_label'
-                            ? 'Apply bot label all'
-                            : accountsBulkAction === 'sync_pins'
-                              ? 'Apply pin sync all'
-                              : 'Apply append {bot} all'}
-                  </Button>
-                </div>
-              </details>
-              {canManageGroupsPermission ? (
-                <form
-                  className="rounded-lg border border-border/70 bg-muted/30 p-3"
-                  onSubmit={(event) => {
-                    void handleCreateGroup(event);
-                  }}
-                >
-                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Create Folder
-                  </p>
-                  <div className="flex flex-wrap items-end gap-2">
-                    <div className="min-w-[180px] flex-1 space-y-1">
-                      <Label htmlFor="accounts-group-name">Folder name</Label>
-                      <Input
-                        id="accounts-group-name"
-                        value={newGroupName}
-                        onChange={(event) => setNewGroupName(event.target.value)}
-                        placeholder="Gaming, News, Sports..."
-                      />
+              <Card id="accounts-overview" className="">
+                <CardHeader className="pb-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <CardTitle>Active Accounts</CardTitle>
+                      <CardDescription>Organize mappings into folders and collapse/expand groups.</CardDescription>
                     </div>
-                    <div className="w-20 space-y-1">
-                      <Label htmlFor="accounts-group-emoji">Emoji</Label>
-                      <Input
-                        id="accounts-group-emoji"
-                        value={newGroupEmoji}
-                        onChange={(event) => setNewGroupEmoji(event.target.value)}
-                        placeholder="📁"
-                        maxLength={8}
-                      />
-                    </div>
-                    <Button type="submit" size="sm" disabled={isBusy || newGroupName.trim().length === 0}>
-                      <Plus className="mr-2 h-4 w-4" />
-                      Create
-                    </Button>
-                  </div>
-                </form>
-              ) : null}
-
-              <div id="accounts-controls" className="grid gap-2 md:grid-cols-[1fr_auto]">
-                <div className="space-y-1">
-                  <Label htmlFor="accounts-search">Search accounts</Label>
-                  <Input
-                    id="accounts-search"
-                    value={accountsSearchQuery}
-                    onChange={(event) => setAccountsSearchQuery(event.target.value)}
-                    placeholder="Find by @username, owner, Bluesky handle, or folder"
-                  />
-                  {normalizedAccountsQuery ? (
-                    <p className="text-xs text-muted-foreground">
-                      {accountMatchesCount} result{accountMatchesCount === 1 ? '' : 's'} ranked by relevance
-                    </p>
-                  ) : null}
-                  {isAdmin ? (
-                    <div className="mt-2 space-y-1">
-                      <Label htmlFor="accounts-creator-filter">Created by user</Label>
-                      <select
-                        id="accounts-creator-filter"
-                        className={cn(selectClassName, 'h-9 text-xs')}
-                        value={accountsCreatorFilter}
-                        onChange={(event) => setAccountsCreatorFilter(event.target.value)}
-                      >
-                        <option value="all">All users</option>
-                        {managedUsers.map((user) => (
-                          <option key={`creator-filter-${user.id}`} value={user.id}>
-                            {user.username || user.email || user.id}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ) : null}
-                </div>
-                <div className="flex flex-wrap items-end justify-end gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={filteredManageableMappingIds.length === 0}
-                    onClick={() => toggleSelectAllFilteredManageable(!allFilteredManageableSelected)}
-                  >
-                    {allFilteredManageableSelected
-                      ? `Unselect page (${filteredManageableMappingIds.length})`
-                      : `Select page (${filteredManageableMappingIds.length})`}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={selectedManageableMappingsCount === 0}
-                    onClick={clearSelectedAccountMappings}
-                  >
-                    Clear selected
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setShowAccountAvatars((previous) => !previous)}>
-                    {showAccountAvatars ? 'Hide avatars (faster)' : 'Show avatars'}
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setShowAccountBios((previous) => !previous)}>
-                    {showAccountBios ? 'Hide bios (faster)' : 'Show bios'}
-                  </Button>
-                  {accountsViewMode === 'grouped' ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={toggleCollapseAllGroups}
-                      disabled={groupKeysForCollapse.length === 0}
-                    >
-                      {allGroupsCollapsed ? 'Expand all' : 'Collapse all'}
-                    </Button>
-                  ) : null}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setAccountsViewMode((previous) => (previous === 'grouped' ? 'global' : 'grouped'))}
-                  >
-                    {accountsViewMode === 'grouped' ? 'View all' : 'Grouped view'}
-                  </Button>
-                </div>
-              </div>
-
-              <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                      Fediverse Bridge
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      {bridgedMappingsForView.length} bridged - {bridgeEligibleUnbridgedMappings.length} eligible to
-                      bridge now
-                    </p>
-                  </div>
-                  <Badge variant="outline">{bridgedMappingsForView.length} bridged</Badge>
-                </div>
-                {bridgedMappingsForView.length > 0 ? (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {bridgedMappingsForView.slice(0, 24).map((mapping) => {
-                      const profile = getProfileForActor(mapping.bskyIdentifier);
-                      const handle = profile?.handle || mapping.bskyIdentifier;
-                      return (
-                        <Badge key={`bridged-list-${mapping.id}`} variant="success">
-                          <Link2 className="mr-1 h-3 w-3" />@{handle}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {canCreateMappings ? (
+                        <Button size="sm" variant="outline" onClick={openAddAccountSheet}>
+                          <Plus className="mr-2 h-4 w-4" />
+                          Add account
+                        </Button>
+                      ) : null}
+                      {isBridgeAllBusy && bridgeAllProgress ? (
+                        <Badge variant="outline" className="max-w-[280px] truncate">
+                          {bridgeAllProgress.currentHandle
+                            ? `Now bridging ${bridgeAllProgress.currentHandle}`
+                            : 'Preparing bridge-all...'}
                         </Badge>
-                      );
-                    })}
-                    {bridgedMappingsForView.length > 24 ? (
-                      <Badge variant="outline">+{bridgedMappingsForView.length - 24} more</Badge>
-                    ) : null}
+                      ) : null}
+                      <Badge variant="outline">{accountMappingsForView.length} configured</Badge>
+                      <Badge variant={selectedManageableMappingsCount > 0 ? 'success' : 'outline'}>
+                        {selectedManageableMappingsCount} selected
+                      </Badge>
+                      <Badge variant="outline">{botLabeledMappingsForView.length} bot-labeled</Badge>
+                    </div>
                   </div>
-                ) : (
-                  <p className="mt-2 text-xs text-muted-foreground">No bridged accounts yet.</p>
-                )}
-              </div>
-
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
-                <p className="text-xs text-muted-foreground">
-                  Showing {currentAccountsPageStart}-{currentAccountsPageEnd} of {accountMatchesCount} account
-                  {accountMatchesCount === 1 ? '' : 's'}
-                </p>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">Per page</span>
-                  <select
-                    className={cn(selectClassName, 'h-8 w-24 px-2 py-1 text-xs')}
-                    value={accountsPageSize}
-                    onChange={(event) => setAccountsPageSize(Number(event.target.value) || ACCOUNT_PAGE_SIZE_DEFAULT)}
-                  >
-                    <option value={25}>25</option>
-                    <option value={50}>50</option>
-                    <option value={100}>100</option>
-                    <option value={200}>200</option>
-                  </select>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={accountsPage <= 1}
-                    onClick={() => setAccountsPage((previous) => Math.max(1, previous - 1))}
-                  >
-                    <ChevronLeft className="h-4 w-4" />
-                  </Button>
-                  <span className="w-24 text-center text-xs text-muted-foreground">
-                    Page {accountsPage}/{accountsPageCount}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={accountsPage >= accountsPageCount}
-                    onClick={() => setAccountsPage((previous) => Math.min(accountsPageCount, previous + 1))}
-                  >
-                    <ChevronRight className="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
-
-              {accountMatchesCount === 0 ? (
-                <div className="rounded-lg border border-dashed border-border/70 p-6 text-center text-sm text-muted-foreground">
-                  {normalizedAccountsQuery ? 'No accounts matched this search.' : 'No mappings yet.'}
-                  {canCreateMappings ? (
-                    <div className="mt-3">
-                      <Button size="sm" variant="outline" onClick={openAddAccountSheet}>
-                        <Plus className="mr-2 h-4 w-4" />
-                        Create your first account
+                </CardHeader>
+                <CardContent className="space-y-4 pt-0">
+                  <details className="rounded-lg border border-border/70 bg-muted/20 p-3">
+                    <summary className="cursor-pointer text-sm font-medium">Bulk actions</summary>
+                    <div className="mt-3 flex flex-wrap items-end gap-2">
+                      <select
+                        className={cn(selectClassName, 'h-9 w-[260px] px-2 py-1 text-xs')}
+                        value={accountsBulkAction}
+                        disabled={isAnyBulkAccountsActionBusy}
+                        onChange={(event) => setAccountsBulkAction(event.target.value as BulkAccountsAction)}
+                      >
+                        <option value="sync_profiles">Apply profile sync to accounts</option>
+                        <option value="pull_twitter_bio">Pull Twitter bio to accounts</option>
+                        <option value="bridge_all">Apply fediverse bridge to eligible accounts</option>
+                        <option value="apply_bot_label">Apply automated-account label to accounts</option>
+                        <option value="append_bot_name">Apply {'{bot}'} display-name suffix to accounts</option>
+                        <option value="sync_pins">Sync pinned tweets to accounts</option>
+                      </select>
+                      <select
+                        className={cn(selectClassName, 'h-9 w-[200px] px-2 py-1 text-xs')}
+                        value={accountsBulkScope}
+                        disabled={isAnyBulkAccountsActionBusy}
+                        onChange={(event) => setAccountsBulkScope(event.target.value as 'all' | 'selected')}
+                      >
+                        <option value="all">Target all manageable</option>
+                        <option value="selected">Target selected only</option>
+                      </select>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={
+                          isAnyBulkAccountsActionBusy ||
+                          (accountsBulkScope === 'selected' && selectedManageableMappingsCount === 0)
+                        }
+                        onClick={() => {
+                          void handleApplyAllAccountsAction();
+                        }}
+                      >
+                        {isAnyBulkAccountsActionBusy ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : accountsBulkAction === 'pull_twitter_bio' ? (
+                          <Download className="mr-2 h-4 w-4" />
+                        ) : accountsBulkAction === 'bridge_all' ? (
+                          <Link2 className="mr-2 h-4 w-4" />
+                        ) : accountsBulkAction === 'sync_profiles' ? (
+                          <RefreshCw className="mr-2 h-4 w-4" />
+                        ) : accountsBulkAction === 'sync_pins' ? (
+                          <Pin className="mr-2 h-4 w-4" />
+                        ) : (
+                          <Bot className="mr-2 h-4 w-4" />
+                        )}
+                        {accountsBulkAction === 'sync_profiles'
+                          ? 'Apply sync all'
+                          : accountsBulkAction === 'pull_twitter_bio'
+                            ? 'Apply pull bio'
+                            : accountsBulkAction === 'bridge_all'
+                              ? 'Apply bridge all'
+                              : accountsBulkAction === 'apply_bot_label'
+                                ? 'Apply bot label all'
+                                : accountsBulkAction === 'sync_pins'
+                                  ? 'Apply pin sync all'
+                                  : 'Apply append {bot} all'}
                       </Button>
                     </div>
+                  </details>
+                  {canManageGroupsPermission ? (
+                    <form
+                      className="rounded-lg border border-border/70 bg-muted/30 p-3"
+                      onSubmit={(event) => {
+                        void handleCreateGroup(event);
+                      }}
+                    >
+                      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        Create Folder
+                      </p>
+                      <div className="flex flex-wrap items-end gap-2">
+                        <div className="min-w-[180px] flex-1 space-y-1">
+                          <Label htmlFor="accounts-group-name">Folder name</Label>
+                          <Input
+                            id="accounts-group-name"
+                            value={newGroupName}
+                            onChange={(event) => setNewGroupName(event.target.value)}
+                            placeholder="Gaming, News, Sports..."
+                          />
+                        </div>
+                        <div className="w-20 space-y-1">
+                          <Label htmlFor="accounts-group-emoji">Emoji</Label>
+                          <Input
+                            id="accounts-group-emoji"
+                            value={newGroupEmoji}
+                            onChange={(event) => setNewGroupEmoji(event.target.value)}
+                            placeholder="📁"
+                            maxLength={8}
+                          />
+                        </div>
+                        <Button type="submit" size="sm" disabled={isBusy || newGroupName.trim().length === 0}>
+                          <Plus className="mr-2 h-4 w-4" />
+                          Create
+                        </Button>
+                      </div>
+                    </form>
                   ) : null}
-                </div>
-              ) : (
-                <div id="accounts-list" className="space-y-3">
-                  {pagedGroupedMappings.map((group, groupIndex) => {
-                    const canCollapseGroup = accountsViewMode === 'grouped';
-                    const collapsed = canCollapseGroup ? collapsedGroupKeys[group.key] === true : false;
-                    const visibleRows = visibleRowsByGroupKey[group.key] || ACCOUNT_ROWS_BATCH_SIZE;
-                    const renderedMappings = group.mappings.slice(0, visibleRows);
-                    const remainingMappingsCount = Math.max(0, group.mappings.length - renderedMappings.length);
 
-                    return (
-                      <div key={group.key} className="cv-auto overflow-hidden rounded-lg border border-border bg-card">
-                        <button
-                          className={cn(
-                            'group flex w-full items-center justify-between bg-muted/40 px-3 py-2 text-left',
-                            canCollapseGroup ? 'hover:bg-muted/70' : '',
-                          )}
-                          onClick={() => {
-                            if (canCollapseGroup) {
-                              toggleGroupCollapsed(group.key);
-                            }
-                          }}
-                          type="button"
+                  <div id="accounts-controls" className="grid gap-2 md:grid-cols-[1fr_auto]">
+                    <div className="space-y-1">
+                      <Label htmlFor="accounts-search">Search accounts</Label>
+                      <Input
+                        id="accounts-search"
+                        value={accountsSearchQuery}
+                        onChange={(event) => setAccountsSearchQuery(event.target.value)}
+                        placeholder="Find by @username, owner, Bluesky handle, or folder"
+                      />
+                      {normalizedAccountsQuery ? (
+                        <p className="text-xs text-muted-foreground">
+                          {accountMatchesCount} result{accountMatchesCount === 1 ? '' : 's'} ranked by relevance
+                        </p>
+                      ) : null}
+                      {isAdmin ? (
+                        <div className="mt-2 space-y-1">
+                          <Label htmlFor="accounts-creator-filter">Created by user</Label>
+                          <select
+                            id="accounts-creator-filter"
+                            className={cn(selectClassName, 'h-9 text-xs')}
+                            value={accountsCreatorFilter}
+                            onChange={(event) => setAccountsCreatorFilter(event.target.value)}
+                          >
+                            <option value="all">All users</option>
+                            {managedUsers.map((user) => (
+                              <option key={`creator-filter-${user.id}`} value={user.id}>
+                                {user.username || user.email || user.id}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap items-end justify-end gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={filteredManageableMappingIds.length === 0}
+                        onClick={() => toggleSelectAllFilteredManageable(!allFilteredManageableSelected)}
+                      >
+                        {allFilteredManageableSelected
+                          ? `Unselect page (${filteredManageableMappingIds.length})`
+                          : `Select page (${filteredManageableMappingIds.length})`}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={selectedManageableMappingsCount === 0}
+                        onClick={clearSelectedAccountMappings}
+                      >
+                        Clear selected
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setShowAccountAvatars((previous) => !previous)}
+                      >
+                        {showAccountAvatars ? 'Hide avatars (faster)' : 'Show avatars'}
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setShowAccountBios((previous) => !previous)}>
+                        {showAccountBios ? 'Hide bios (faster)' : 'Show bios'}
+                      </Button>
+                      {accountsViewMode === 'grouped' ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={toggleCollapseAllGroups}
+                          disabled={groupKeysForCollapse.length === 0}
                         >
-                          <div className="flex items-center gap-2">
-                            <Folder className="h-4 w-4 text-muted-foreground" />
-                            <span className="text-base">{group.emoji}</span>
-                            <span className="font-medium">{group.name}</span>
-                            <Badge variant="outline">{group.mappings.length}</Badge>
-                          </div>
-                          {canCollapseGroup ? (
-                            <ChevronDown className={cn('h-4 w-4', collapsed ? '-rotate-90' : 'rotate-0')} />
-                          ) : null}
-                        </button>
+                          {allGroupsCollapsed ? 'Expand all' : 'Collapse all'}
+                        </Button>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          setAccountsViewMode((previous) => (previous === 'grouped' ? 'global' : 'grouped'))
+                        }
+                      >
+                        {accountsViewMode === 'grouped' ? 'View all' : 'Grouped view'}
+                      </Button>
+                    </div>
+                  </div>
 
-                        <div
-                          className={cn(
-                            'grid',
-                            collapsed ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100',
-                          )}
-                        >
-                          <div className="min-h-0 overflow-hidden">
-                            {group.mappings.length === 0 ? (
-                              <div className="border-t border-border/60 p-4 text-sm text-muted-foreground">
-                                No accounts in this folder yet.
+                  <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                          Fediverse Bridge
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          {bridgedMappingsForView.length} bridged - {bridgeEligibleUnbridgedMappings.length} eligible to
+                          bridge now
+                        </p>
+                      </div>
+                      <Badge variant="outline">{bridgedMappingsForView.length} bridged</Badge>
+                    </div>
+                    {bridgedMappingsForView.length > 0 ? (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {bridgedMappingsForView.slice(0, 24).map((mapping) => {
+                          const profile = getProfileForActor(mapping.bskyIdentifier);
+                          const handle = profile?.handle || mapping.bskyIdentifier;
+                          return (
+                            <Badge key={`bridged-list-${mapping.id}`} variant="success">
+                              <Link2 className="mr-1 h-3 w-3" />@{handle}
+                            </Badge>
+                          );
+                        })}
+                        {bridgedMappingsForView.length > 24 ? (
+                          <Badge variant="outline">+{bridgedMappingsForView.length - 24} more</Badge>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs text-muted-foreground">No bridged accounts yet.</p>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
+                    <p className="text-xs text-muted-foreground">
+                      Showing {currentAccountsPageStart}-{currentAccountsPageEnd} of {accountMatchesCount} account
+                      {accountMatchesCount === 1 ? '' : 's'}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">Per page</span>
+                      <select
+                        className={cn(selectClassName, 'h-8 w-24 px-2 py-1 text-xs')}
+                        value={accountsPageSize}
+                        onChange={(event) =>
+                          setAccountsPageSize(Number(event.target.value) || ACCOUNT_PAGE_SIZE_DEFAULT)
+                        }
+                      >
+                        <option value={25}>25</option>
+                        <option value={50}>50</option>
+                        <option value={100}>100</option>
+                        <option value={200}>200</option>
+                      </select>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={accountsPage <= 1}
+                        onClick={() => setAccountsPage((previous) => Math.max(1, previous - 1))}
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                      </Button>
+                      <span className="w-24 text-center text-xs text-muted-foreground">
+                        Page {accountsPage}/{accountsPageCount}
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={accountsPage >= accountsPageCount}
+                        onClick={() => setAccountsPage((previous) => Math.min(accountsPageCount, previous + 1))}
+                      >
+                        <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+
+                  {accountMatchesCount === 0 ? (
+                    <div className="rounded-lg border border-dashed border-border/70 p-6 text-center text-sm text-muted-foreground">
+                      {normalizedAccountsQuery ? 'No accounts matched this search.' : 'No mappings yet.'}
+                      {canCreateMappings ? (
+                        <div className="mt-3">
+                          <Button size="sm" variant="outline" onClick={openAddAccountSheet}>
+                            <Plus className="mr-2 h-4 w-4" />
+                            Create your first account
+                          </Button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div id="accounts-list" className="space-y-3">
+                      {pagedGroupedMappings.map((group, groupIndex) => {
+                        const canCollapseGroup = accountsViewMode === 'grouped';
+                        const collapsed = canCollapseGroup ? collapsedGroupKeys[group.key] === true : false;
+                        const visibleRows = visibleRowsByGroupKey[group.key] || ACCOUNT_ROWS_BATCH_SIZE;
+                        const renderedMappings = group.mappings.slice(0, visibleRows);
+                        const remainingMappingsCount = Math.max(0, group.mappings.length - renderedMappings.length);
+
+                        return (
+                          <div
+                            key={group.key}
+                            className="cv-auto overflow-hidden rounded-lg border border-border bg-card"
+                          >
+                            <button
+                              className={cn(
+                                'group flex w-full items-center justify-between bg-muted/40 px-3 py-2 text-left',
+                                canCollapseGroup ? 'hover:bg-muted/70' : '',
+                              )}
+                              onClick={() => {
+                                if (canCollapseGroup) {
+                                  toggleGroupCollapsed(group.key);
+                                }
+                              }}
+                              type="button"
+                            >
+                              <div className="flex items-center gap-2">
+                                <Folder className="h-4 w-4 text-muted-foreground" />
+                                <span className="text-base">{group.emoji}</span>
+                                <span className="font-medium">{group.name}</span>
+                                <Badge variant="outline">{group.mappings.length}</Badge>
                               </div>
-                            ) : (
-                              <>
-                                <div className="overflow-x-auto">
-                                  <table className="min-w-full text-left text-sm">
-                                    <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
-                                      <tr>
-                                        <th className="px-3 py-3">Owner</th>
-                                        {isAdmin ? <th className="px-3 py-3">Created By</th> : null}
-                                        <th className="px-3 py-3">Twitter Sources</th>
-                                        <th className="px-3 py-3">Bluesky Target</th>
-                                        <th className="px-3 py-3">Status</th>
-                                        <th className="px-3 py-3 text-right">Actions</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {renderedMappings.map((mapping) => {
-                                        const queued = isBackfillQueued(mapping.id);
-                                        const active = isBackfillActive(mapping.id);
-                                        const queuePosition = getBackfillEntry(mapping.id)?.position;
-                                        const profile = getProfileForActor(mapping.bskyIdentifier);
-                                        const profileHandle = profile?.handle || mapping.bskyIdentifier;
-                                        const profileName = profile?.displayName || profileHandle;
-                                        const profileBio = showAccountBios ? profile?.description?.trim() || '' : '';
-                                        const profileUrl = `https://bsky.app/profile/${profileHandle}`;
-                                        const canManageThisMapping = canManageMapping(mapping);
-                                        const canUseFediverseBridge = canBridgeToFediverse(profile?.createdAt);
-                                        const bridgeStatus = fediverseBridgeStatusByMappingId[mapping.id];
-                                        const isFediverseBridged = bridgeStatus?.bridged === true;
-                                        const bridging = bridgingMappingId === mapping.id;
-                                        const mappingGroup = getMappingGroupMeta(mapping);
-                                        const syncingProfile = syncingProfileMappingId === mapping.id;
-                                        const pullingBio = pullingBioMappingId === mapping.id;
-                                        const isSelectedForBulk = selectedAccountMappingIdSet.has(mapping.id);
+                              {canCollapseGroup ? (
+                                <ChevronDown className={cn('h-4 w-4', collapsed ? '-rotate-90' : 'rotate-0')} />
+                              ) : null}
+                            </button>
 
-                                        return (
-                                          <tr
-                                            key={mapping.id}
-                                            className="interactive-row border-b border-border/60 last:border-0"
-                                          >
-                                            <td className="px-3 py-3 align-top">
-                                              <div className="flex items-center gap-2 font-medium">
-                                                <UserRound className="h-4 w-4 text-muted-foreground" />
-                                                {mapping.owner || 'System'}
-                                              </div>
-                                            </td>
-                                            {isAdmin ? (
-                                              <td className="px-3 py-3 align-top text-xs text-muted-foreground">
-                                                {mapping.createdByLabel ||
-                                                  mapping.createdByUser?.username ||
-                                                  mapping.createdByUser?.email ||
-                                                  '--'}
-                                              </td>
-                                            ) : null}
-                                            <td className="px-3 py-3 align-top">
-                                              <div className="flex flex-wrap gap-2">
-                                                {mapping.twitterUsernames.map((username) => (
-                                                  <Badge key={username} variant="secondary">
-                                                    @{username}
-                                                  </Badge>
-                                                ))}
-                                              </div>
-                                            </td>
-                                            <td className="px-3 py-3 align-top">
-                                              <div className="flex items-center gap-2">
-                                                {showAccountAvatars && profile?.avatar ? (
-                                                  <img
-                                                    className="h-8 w-8 rounded-full border border-border/70 object-cover"
-                                                    src={profile.avatar}
-                                                    alt={profileName}
-                                                    loading="lazy"
-                                                    decoding="async"
-                                                    fetchPriority="low"
-                                                  />
-                                                ) : (
-                                                  <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
-                                                    <UserRound className="h-4 w-4" />
+                            <div
+                              className={cn(
+                                'grid',
+                                collapsed ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100',
+                              )}
+                            >
+                              <div className="min-h-0 overflow-hidden">
+                                {group.mappings.length === 0 ? (
+                                  <div className="border-t border-border/60 p-4 text-sm text-muted-foreground">
+                                    No accounts in this folder yet.
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="overflow-x-auto">
+                                      <table className="min-w-full text-left text-sm">
+                                        <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+                                          <tr>
+                                            <th className="px-3 py-3">Owner</th>
+                                            {isAdmin ? <th className="px-3 py-3">Created By</th> : null}
+                                            <th className="px-3 py-3">Twitter Sources</th>
+                                            <th className="px-3 py-3">Bluesky Target</th>
+                                            <th className="px-3 py-3">Status</th>
+                                            <th className="px-3 py-3 text-right">Actions</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {renderedMappings.map((mapping) => {
+                                            const queued = isBackfillQueued(mapping.id);
+                                            const active = isBackfillActive(mapping.id);
+                                            const queuePosition = getBackfillEntry(mapping.id)?.position;
+                                            const profile = getProfileForActor(mapping.bskyIdentifier);
+                                            const profileHandle = profile?.handle || mapping.bskyIdentifier;
+                                            const profileName = profile?.displayName || profileHandle;
+                                            const profileBio = showAccountBios
+                                              ? profile?.description?.trim() || ''
+                                              : '';
+                                            const profileUrl = `https://bsky.app/profile/${profileHandle}`;
+                                            const canManageThisMapping = canManageMapping(mapping);
+                                            const canUseFediverseBridge = canBridgeToFediverse(profile?.createdAt);
+                                            const bridgeStatus = fediverseBridgeStatusByMappingId[mapping.id];
+                                            const isFediverseBridged = bridgeStatus?.bridged === true;
+                                            const bridging = bridgingMappingId === mapping.id;
+                                            const mappingGroup = getMappingGroupMeta(mapping);
+                                            const syncingProfile = syncingProfileMappingId === mapping.id;
+                                            const pullingBio = pullingBioMappingId === mapping.id;
+                                            const isSelectedForBulk = selectedAccountMappingIdSet.has(mapping.id);
+
+                                            return (
+                                              <tr
+                                                key={mapping.id}
+                                                className="interactive-row border-b border-border/60 last:border-0"
+                                              >
+                                                <td className="px-3 py-3 align-top">
+                                                  <div className="flex items-center gap-2 font-medium">
+                                                    <UserRound className="h-4 w-4 text-muted-foreground" />
+                                                    {mapping.owner || 'System'}
                                                   </div>
-                                                )}
-                                                <div className="min-w-0">
-                                                  <p className="truncate text-sm font-medium">{profileName}</p>
-                                                  <a
-                                                    className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-                                                    href={profileUrl}
-                                                    target="_blank"
-                                                    rel="noreferrer"
-                                                    title={`Open @${profileHandle} on Bluesky`}
-                                                  >
-                                                    {profileHandle}
-                                                    <ArrowUpRight className="ml-1 h-3 w-3 shrink-0" />
-                                                  </a>
-                                                  {profileBio ? (
-                                                    <p
-                                                      className="mt-1 overflow-hidden text-xs text-muted-foreground"
-                                                      style={{
-                                                        display: '-webkit-box',
-                                                        WebkitLineClamp: 2,
-                                                        WebkitBoxOrient: 'vertical',
-                                                      }}
-                                                      title={profileBio}
-                                                    >
-                                                      {profileBio}
-                                                    </p>
-                                                  ) : null}
-                                                </div>
-                                              </div>
-                                            </td>
-                                            <td className="px-3 py-3 align-top">
-                                              <div className="flex flex-wrap items-center gap-1.5">
-                                                {active ? (
-                                                  <Badge variant="warning">Backfilling</Badge>
-                                                ) : queued ? (
-                                                  <Badge variant="warning">
-                                                    Queued {queuePosition ? `#${queuePosition}` : ''}
-                                                  </Badge>
-                                                ) : (
-                                                  <Badge variant="success">Active</Badge>
-                                                )}
-                                                {isFediverseBridged ? (
-                                                  <Badge variant="success">
-                                                    <Link2 className="mr-1 h-3 w-3" />
-                                                    Bridged
-                                                  </Badge>
+                                                </td>
+                                                {isAdmin ? (
+                                                  <td className="px-3 py-3 align-top text-xs text-muted-foreground">
+                                                    {mapping.createdByLabel ||
+                                                      mapping.createdByUser?.username ||
+                                                      mapping.createdByUser?.email ||
+                                                      '--'}
+                                                  </td>
                                                 ) : null}
-                                                {mapping.hasBotLabel ? (
-                                                  <Badge variant="outline">
-                                                    <Bot className="mr-1 h-3 w-3" />
-                                                    Bot
-                                                  </Badge>
-                                                ) : null}
-                                              </div>
-                                            </td>
-                                            <td className="px-3 py-3 align-top">
-                                              <div className="flex flex-wrap justify-end gap-1.5">
-                                                {canManageThisMapping ? (
-                                                  <label className="inline-flex items-center gap-1 rounded border border-border/70 px-2 py-1 text-xs text-muted-foreground">
-                                                    <input
-                                                      type="checkbox"
-                                                      className="h-3.5 w-3.5 rounded border-border"
-                                                      checked={isSelectedForBulk}
-                                                      disabled={isAnyBulkAccountsActionBusy}
-                                                      onChange={(event) =>
-                                                        toggleAccountMappingSelection(mapping.id, event.target.checked)
-                                                      }
-                                                    />
-                                                    Select
-                                                  </label>
-                                                ) : null}
-                                                <select
-                                                  className={cn(selectClassName, 'h-9 w-44 px-2 py-1 text-xs')}
-                                                  value={mappingGroup.key}
-                                                  disabled={
-                                                    !canManageThisMapping ||
-                                                    !canManageGroupsPermission ||
-                                                    isBridgeAllBusy ||
-                                                    isAnyBulkAccountsActionBusy ||
-                                                    isSyncAllProfilesBusy ||
-                                                    Boolean(syncingProfileMappingId)
-                                                  }
-                                                  onChange={(event) => {
-                                                    void handleAssignMappingGroup(mapping, event.target.value);
-                                                  }}
-                                                >
-                                                  <option value={DEFAULT_GROUP_KEY}>
-                                                    {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
-                                                  </option>
-                                                  {groupOptions
-                                                    .filter((option) => option.key !== DEFAULT_GROUP_KEY)
-                                                    .map((option) => (
-                                                      <option
-                                                        key={`group-move-${mapping.id}-${option.key}`}
-                                                        value={option.key}
-                                                      >
-                                                        {option.emoji} {option.name}
-                                                      </option>
+                                                <td className="px-3 py-3 align-top">
+                                                  <div className="flex flex-wrap gap-2">
+                                                    {mapping.twitterUsernames.map((username) => (
+                                                      <Badge key={username} variant="secondary">
+                                                        @{username}
+                                                      </Badge>
                                                     ))}
-                                                </select>
-                                                {canManageThisMapping ? (
-                                                  <>
-                                                    {mapping.twitterUsernames.length > 1 ? (
-                                                      <select
-                                                        className={cn(selectClassName, 'h-9 w-44 px-2 py-1 text-xs')}
-                                                        value={mapping.profileSyncSourceUsername || ''}
-                                                        disabled={
-                                                          isBridgeAllBusy ||
-                                                          isAnyBulkAccountsActionBusy ||
-                                                          isSyncAllProfilesBusy ||
-                                                          Boolean(syncingProfileMappingId) ||
-                                                          Boolean(bridgingMappingId)
-                                                        }
-                                                        onChange={(event) => {
-                                                          void handleUpdateProfileSyncSource(
-                                                            mapping,
-                                                            event.target.value,
-                                                          );
-                                                        }}
+                                                  </div>
+                                                </td>
+                                                <td className="px-3 py-3 align-top">
+                                                  <div className="flex items-center gap-2">
+                                                    {showAccountAvatars && profile?.avatar ? (
+                                                      <img
+                                                        className="h-8 w-8 rounded-full border border-border/70 object-cover"
+                                                        src={profile.avatar}
+                                                        alt={profileName}
+                                                        loading="lazy"
+                                                        decoding="async"
+                                                        fetchPriority="low"
+                                                      />
+                                                    ) : (
+                                                      <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
+                                                        <UserRound className="h-4 w-4" />
+                                                      </div>
+                                                    )}
+                                                    <div className="min-w-0">
+                                                      <p className="truncate text-sm font-medium">{profileName}</p>
+                                                      <a
+                                                        className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                                                        href={profileUrl}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        title={`Open @${profileHandle} on Bluesky`}
                                                       >
-                                                        <option value="">Select sync source</option>
-                                                        {mapping.twitterUsernames.map((username) => (
-                                                          <option
-                                                            key={`sync-source-${mapping.id}-${username}`}
-                                                            value={username}
-                                                          >
-                                                            @{username}
-                                                          </option>
-                                                        ))}
-                                                      </select>
+                                                        {profileHandle}
+                                                        <ArrowUpRight className="ml-1 h-3 w-3 shrink-0" />
+                                                      </a>
+                                                      {profileBio ? (
+                                                        <p
+                                                          className="mt-1 overflow-hidden text-xs text-muted-foreground"
+                                                          style={{
+                                                            display: '-webkit-box',
+                                                            WebkitLineClamp: 2,
+                                                            WebkitBoxOrient: 'vertical',
+                                                          }}
+                                                          title={profileBio}
+                                                        >
+                                                          {profileBio}
+                                                        </p>
+                                                      ) : null}
+                                                    </div>
+                                                  </div>
+                                                </td>
+                                                <td className="px-3 py-3 align-top">
+                                                  <div className="flex flex-wrap items-center gap-1.5">
+                                                    {active ? (
+                                                      <Badge variant="warning">Backfilling</Badge>
+                                                    ) : queued ? (
+                                                      <Badge variant="warning">
+                                                        Queued {queuePosition ? `#${queuePosition}` : ''}
+                                                      </Badge>
+                                                    ) : (
+                                                      <Badge variant="success">Active</Badge>
+                                                    )}
+                                                    {isFediverseBridged ? (
+                                                      <Badge variant="success">
+                                                        <Link2 className="mr-1 h-3 w-3" />
+                                                        Bridged
+                                                      </Badge>
                                                     ) : null}
-                                                    <Button
-                                                      variant="outline"
-                                                      size="sm"
+                                                    {mapping.hasBotLabel ? (
+                                                      <Badge variant="outline">
+                                                        <Bot className="mr-1 h-3 w-3" />
+                                                        Bot
+                                                      </Badge>
+                                                    ) : null}
+                                                  </div>
+                                                </td>
+                                                <td className="px-3 py-3 align-top">
+                                                  <div className="flex flex-wrap justify-end gap-1.5">
+                                                    {canManageThisMapping ? (
+                                                      <label className="inline-flex items-center gap-1 rounded border border-border/70 px-2 py-1 text-xs text-muted-foreground">
+                                                        <input
+                                                          type="checkbox"
+                                                          className="h-3.5 w-3.5 rounded border-border"
+                                                          checked={isSelectedForBulk}
+                                                          disabled={isAnyBulkAccountsActionBusy}
+                                                          onChange={(event) =>
+                                                            toggleAccountMappingSelection(
+                                                              mapping.id,
+                                                              event.target.checked,
+                                                            )
+                                                          }
+                                                        />
+                                                        Select
+                                                      </label>
+                                                    ) : null}
+                                                    <select
+                                                      className={cn(selectClassName, 'h-9 w-44 px-2 py-1 text-xs')}
+                                                      value={mappingGroup.key}
                                                       disabled={
+                                                        !canManageThisMapping ||
+                                                        !canManageGroupsPermission ||
                                                         isBridgeAllBusy ||
                                                         isAnyBulkAccountsActionBusy ||
+                                                        isSyncAllProfilesBusy ||
                                                         Boolean(syncingProfileMappingId)
                                                       }
-                                                      onClick={() => startEditMapping(mapping)}
+                                                      onChange={(event) => {
+                                                        void handleAssignMappingGroup(mapping, event.target.value);
+                                                      }}
                                                     >
-                                                      Edit
-                                                    </Button>
-                                                    <details className="group">
-                                                      <summary className="list-none">
-                                                        <span className="inline-flex h-9 cursor-pointer items-center rounded-md border border-border bg-background px-3 text-xs font-medium text-foreground hover:bg-muted">
-                                                          More
-                                                        </span>
-                                                      </summary>
-                                                      <div className="mt-1 flex flex-wrap justify-end gap-1.5 rounded-md border border-border/70 bg-background p-2">
-                                                        <Button
-                                                          variant="outline"
-                                                          size="sm"
-                                                          disabled={
-                                                            isBridgeAllBusy ||
-                                                            isAnyBulkAccountsActionBusy ||
-                                                            Boolean(syncingProfileMappingId) ||
-                                                            Boolean(pullingBioMappingId) ||
-                                                            isSyncAllProfilesBusy ||
-                                                            Boolean(bridgingMappingId)
-                                                          }
-                                                          onClick={() => {
-                                                            void handleSyncProfileFromTwitter(mapping);
-                                                          }}
-                                                        >
-                                                          {syncingProfile ? (
-                                                            <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                                                          ) : (
-                                                            <RefreshCw className="mr-1 h-4 w-4" />
-                                                          )}
-                                                          Sync Profile
-                                                        </Button>
-                                                        <Button
-                                                          variant="outline"
-                                                          size="sm"
-                                                          disabled={
-                                                            isBridgeAllBusy ||
-                                                            isAnyBulkAccountsActionBusy ||
-                                                            Boolean(syncingProfileMappingId) ||
-                                                            Boolean(pullingBioMappingId) ||
-                                                            isSyncAllProfilesBusy ||
-                                                            Boolean(bridgingMappingId)
-                                                          }
-                                                          onClick={() => {
-                                                            void handlePullTwitterBio(mapping);
-                                                          }}
-                                                        >
-                                                          {pullingBio ? (
-                                                            <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                                                          ) : (
-                                                            <Download className="mr-1 h-4 w-4" />
-                                                          )}
-                                                          Pull Twitter Bio
-                                                        </Button>
-                                                        {canUseFediverseBridge && !isFediverseBridged ? (
-                                                          <Button
-                                                            variant="outline"
-                                                            size="sm"
+                                                      <option value={DEFAULT_GROUP_KEY}>
+                                                        {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
+                                                      </option>
+                                                      {groupOptions
+                                                        .filter((option) => option.key !== DEFAULT_GROUP_KEY)
+                                                        .map((option) => (
+                                                          <option
+                                                            key={`group-move-${mapping.id}-${option.key}`}
+                                                            value={option.key}
+                                                          >
+                                                            {option.emoji} {option.name}
+                                                          </option>
+                                                        ))}
+                                                    </select>
+                                                    {canManageThisMapping ? (
+                                                      <>
+                                                        {mapping.twitterUsernames.length > 1 ? (
+                                                          <select
+                                                            className={cn(
+                                                              selectClassName,
+                                                              'h-9 w-44 px-2 py-1 text-xs',
+                                                            )}
+                                                            value={mapping.profileSyncSourceUsername || ''}
                                                             disabled={
                                                               isBridgeAllBusy ||
                                                               isAnyBulkAccountsActionBusy ||
-                                                              Boolean(bridgingMappingId) ||
+                                                              isSyncAllProfilesBusy ||
                                                               Boolean(syncingProfileMappingId) ||
-                                                              isSyncAllProfilesBusy
+                                                              Boolean(bridgingMappingId)
                                                             }
-                                                            onClick={() => {
-                                                              void handleBridgeToFediverse(mapping);
+                                                            onChange={(event) => {
+                                                              void handleUpdateProfileSyncSource(
+                                                                mapping,
+                                                                event.target.value,
+                                                              );
                                                             }}
                                                           >
-                                                            {bridging ? (
-                                                              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                                                            ) : (
-                                                              <Repeat2 className="mr-1 h-4 w-4" />
-                                                            )}
-                                                            Bridge
-                                                          </Button>
+                                                            <option value="">Select sync source</option>
+                                                            {mapping.twitterUsernames.map((username) => (
+                                                              <option
+                                                                key={`sync-source-${mapping.id}-${username}`}
+                                                                value={username}
+                                                              >
+                                                                @{username}
+                                                              </option>
+                                                            ))}
+                                                          </select>
                                                         ) : null}
-                                                        {canQueueBackfillsPermission ? (
-                                                          <>
+                                                        <Button
+                                                          variant="outline"
+                                                          size="sm"
+                                                          disabled={
+                                                            isBridgeAllBusy ||
+                                                            isAnyBulkAccountsActionBusy ||
+                                                            Boolean(syncingProfileMappingId)
+                                                          }
+                                                          onClick={() => startEditMapping(mapping)}
+                                                        >
+                                                          Edit
+                                                        </Button>
+                                                        <details className="group">
+                                                          <summary className="list-none">
+                                                            <span className="inline-flex h-9 cursor-pointer items-center rounded-md border border-border bg-background px-3 text-xs font-medium text-foreground hover:bg-muted">
+                                                              More
+                                                            </span>
+                                                          </summary>
+                                                          <div className="mt-1 flex flex-wrap justify-end gap-1.5 rounded-md border border-border/70 bg-background p-2">
                                                             <Button
                                                               variant="outline"
                                                               size="sm"
@@ -5140,13 +5090,20 @@ function App() {
                                                                 isBridgeAllBusy ||
                                                                 isAnyBulkAccountsActionBusy ||
                                                                 Boolean(syncingProfileMappingId) ||
-                                                                isSyncAllProfilesBusy
+                                                                Boolean(pullingBioMappingId) ||
+                                                                isSyncAllProfilesBusy ||
+                                                                Boolean(bridgingMappingId)
                                                               }
                                                               onClick={() => {
-                                                                void requestBackfill(mapping.id, 'normal');
+                                                                void handleSyncProfileFromTwitter(mapping);
                                                               }}
                                                             >
-                                                              Queue
+                                                              {syncingProfile ? (
+                                                                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                                                              ) : (
+                                                                <RefreshCw className="mr-1 h-4 w-4" />
+                                                              )}
+                                                              Sync Profile
                                                             </Button>
                                                             <Button
                                                               variant="outline"
@@ -5155,34 +5112,115 @@ function App() {
                                                                 isBridgeAllBusy ||
                                                                 isAnyBulkAccountsActionBusy ||
                                                                 Boolean(syncingProfileMappingId) ||
-                                                                isSyncAllProfilesBusy
+                                                                Boolean(pullingBioMappingId) ||
+                                                                isSyncAllProfilesBusy ||
+                                                                Boolean(bridgingMappingId)
                                                               }
                                                               onClick={() => {
-                                                                void requestPinSync(mapping.id);
+                                                                void handlePullTwitterBio(mapping);
                                                               }}
                                                             >
-                                                              Sync Pin
+                                                              {pullingBio ? (
+                                                                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                                                              ) : (
+                                                                <Download className="mr-1 h-4 w-4" />
+                                                              )}
+                                                              Pull Twitter Bio
                                                             </Button>
-                                                            {queued && !active ? (
+                                                            {canUseFediverseBridge && !isFediverseBridged ? (
                                                               <Button
-                                                                variant="ghost"
+                                                                variant="outline"
                                                                 size="sm"
                                                                 disabled={
                                                                   isBridgeAllBusy ||
                                                                   isAnyBulkAccountsActionBusy ||
+                                                                  Boolean(bridgingMappingId) ||
                                                                   Boolean(syncingProfileMappingId) ||
                                                                   isSyncAllProfilesBusy
                                                                 }
                                                                 onClick={() => {
-                                                                  void cancelQueuedBackfill(mapping.id);
+                                                                  void handleBridgeToFediverse(mapping);
                                                                 }}
                                                               >
-                                                                Cancel queue
+                                                                {bridging ? (
+                                                                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                                                                ) : (
+                                                                  <Repeat2 className="mr-1 h-4 w-4" />
+                                                                )}
+                                                                Bridge
                                                               </Button>
+                                                            ) : null}
+                                                            {canQueueBackfillsPermission ? (
+                                                              <>
+                                                                <Button
+                                                                  variant="outline"
+                                                                  size="sm"
+                                                                  disabled={
+                                                                    isBridgeAllBusy ||
+                                                                    isAnyBulkAccountsActionBusy ||
+                                                                    Boolean(syncingProfileMappingId) ||
+                                                                    isSyncAllProfilesBusy
+                                                                  }
+                                                                  onClick={() => {
+                                                                    void requestBackfill(mapping.id, 'normal');
+                                                                  }}
+                                                                >
+                                                                  Queue
+                                                                </Button>
+                                                                <Button
+                                                                  variant="outline"
+                                                                  size="sm"
+                                                                  disabled={
+                                                                    isBridgeAllBusy ||
+                                                                    isAnyBulkAccountsActionBusy ||
+                                                                    Boolean(syncingProfileMappingId) ||
+                                                                    isSyncAllProfilesBusy
+                                                                  }
+                                                                  onClick={() => {
+                                                                    void requestPinSync(mapping.id);
+                                                                  }}
+                                                                >
+                                                                  Sync Pin
+                                                                </Button>
+                                                                {queued && !active ? (
+                                                                  <Button
+                                                                    variant="ghost"
+                                                                    size="sm"
+                                                                    disabled={
+                                                                      isBridgeAllBusy ||
+                                                                      isAnyBulkAccountsActionBusy ||
+                                                                      Boolean(syncingProfileMappingId) ||
+                                                                      isSyncAllProfilesBusy
+                                                                    }
+                                                                    onClick={() => {
+                                                                      void cancelQueuedBackfill(mapping.id);
+                                                                    }}
+                                                                  >
+                                                                    Cancel queue
+                                                                  </Button>
+                                                                ) : null}
+                                                                {isAdmin ? (
+                                                                  <Button
+                                                                    variant="subtle"
+                                                                    size="sm"
+                                                                    disabled={
+                                                                      isBridgeAllBusy ||
+                                                                      isAnyBulkAccountsActionBusy ||
+                                                                      Boolean(syncingProfileMappingId) ||
+                                                                      isSyncAllProfilesBusy
+                                                                    }
+                                                                    onClick={() => {
+                                                                      void requestBackfill(mapping.id, 'reset');
+                                                                    }}
+                                                                  >
+                                                                    Reset + Backfill
+                                                                  </Button>
+                                                                ) : null}
+                                                              </>
                                                             ) : null}
                                                             {isAdmin ? (
                                                               <Button
-                                                                variant="subtle"
+                                                                variant="destructive"
                                                                 size="sm"
                                                                 disabled={
                                                                   isBridgeAllBusy ||
@@ -5191,151 +5229,136 @@ function App() {
                                                                   isSyncAllProfilesBusy
                                                                 }
                                                                 onClick={() => {
-                                                                  void requestBackfill(mapping.id, 'reset');
+                                                                  void handleDeleteAllPosts(mapping.id);
                                                                 }}
                                                               >
-                                                                Reset + Backfill
+                                                                Delete Posts
                                                               </Button>
                                                             ) : null}
-                                                          </>
-                                                        ) : null}
-                                                        {isAdmin ? (
-                                                          <Button
-                                                            variant="destructive"
-                                                            size="sm"
-                                                            disabled={
-                                                              isBridgeAllBusy ||
-                                                              isAnyBulkAccountsActionBusy ||
-                                                              Boolean(syncingProfileMappingId) ||
-                                                              isSyncAllProfilesBusy
-                                                            }
-                                                            onClick={() => {
-                                                              void handleDeleteAllPosts(mapping.id);
-                                                            }}
-                                                          >
-                                                            Delete Posts
-                                                          </Button>
-                                                        ) : null}
-                                                      </div>
-                                                    </details>
-                                                  </>
-                                                ) : null}
-                                                {canManageThisMapping ? (
-                                                  <Button
-                                                    variant="ghost"
-                                                    size="sm"
-                                                    disabled={
-                                                      isBridgeAllBusy ||
-                                                      isAnyBulkAccountsActionBusy ||
-                                                      Boolean(syncingProfileMappingId) ||
-                                                      isSyncAllProfilesBusy
-                                                    }
-                                                    onClick={() => {
-                                                      void handleDeleteMapping(mapping.id);
-                                                    }}
-                                                  >
-                                                    <Trash2 className="mr-1 h-4 w-4" />
-                                                    Remove
-                                                  </Button>
-                                                ) : null}
-                                              </div>
-                                            </td>
-                                          </tr>
-                                        );
-                                      })}
-                                    </tbody>
-                                  </table>
-                                </div>
-                                {remainingMappingsCount > 0 ? (
-                                  <div className="border-t border-border/60 px-3 py-2">
-                                    <Button size="sm" variant="outline" onClick={() => showMoreRowsForGroup(group.key)}>
-                                      Show {Math.min(ACCOUNT_ROWS_BATCH_SIZE, remainingMappingsCount)} more (
-                                      {remainingMappingsCount} remaining)
-                                    </Button>
-                                  </div>
-                                ) : null}
-                              </>
-                            )}
+                                                          </div>
+                                                        </details>
+                                                      </>
+                                                    ) : null}
+                                                    {canManageThisMapping ? (
+                                                      <Button
+                                                        variant="ghost"
+                                                        size="sm"
+                                                        disabled={
+                                                          isBridgeAllBusy ||
+                                                          isAnyBulkAccountsActionBusy ||
+                                                          Boolean(syncingProfileMappingId) ||
+                                                          isSyncAllProfilesBusy
+                                                        }
+                                                        onClick={() => {
+                                                          void handleDeleteMapping(mapping.id);
+                                                        }}
+                                                      >
+                                                        <Trash2 className="mr-1 h-4 w-4" />
+                                                        Remove
+                                                      </Button>
+                                                    ) : null}
+                                                  </div>
+                                                </td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                    {remainingMappingsCount > 0 ? (
+                                      <div className="border-t border-border/60 px-3 py-2">
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          onClick={() => showMoreRowsForGroup(group.key)}
+                                        >
+                                          Show {Math.min(ACCOUNT_ROWS_BATCH_SIZE, remainingMappingsCount)} more (
+                                          {remainingMappingsCount} remaining)
+                                        </Button>
+                                      </div>
+                                    ) : null}
+                                  </>
+                                )}
+                              </div>
+                            </div>
                           </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                        );
+                      })}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
 
-          {canManageGroupsPermission ? (
-            <Card id="accounts-groups" className="">
-              <CardHeader className="pb-3">
-                <CardTitle>Group Manager</CardTitle>
-                <CardDescription>Edit folder names/emojis or delete a group.</CardDescription>
-              </CardHeader>
-              <CardContent className="pt-0">
-                {reusableGroupOptions.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
-                    No custom folders yet.
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {reusableGroupOptions.map((group) => {
-                      const draft = groupDraftsByKey[group.key] || { name: group.name, emoji: group.emoji };
-                      return (
-                        <div
-                          key={`group-manager-${group.key}`}
-                          className="grid gap-2 rounded-lg border border-border/70 bg-muted/20 p-3 md:grid-cols-[90px_minmax(0,1fr)_auto_auto]"
-                        >
-                          <div className="space-y-1">
-                            <Label htmlFor={`group-manager-emoji-${group.key}`}>Emoji</Label>
-                            <Input
-                              id={`group-manager-emoji-${group.key}`}
-                              value={draft.emoji}
-                              onChange={(event) => updateGroupDraft(group.key, 'emoji', event.target.value)}
-                              maxLength={8}
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <Label htmlFor={`group-manager-name-${group.key}`}>Name</Label>
-                            <Input
-                              id={`group-manager-name-${group.key}`}
-                              value={draft.name}
-                              onChange={(event) => updateGroupDraft(group.key, 'name', event.target.value)}
-                            />
-                          </div>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="self-end"
-                            disabled={isGroupActionBusy || !draft.name.trim()}
-                            onClick={() => {
-                              void handleRenameGroup(group.key);
-                            }}
-                          >
-                            Save
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="self-end text-red-600 hover:text-red-500 dark:text-red-300 dark:hover:text-red-200"
-                            disabled={isGroupActionBusy}
-                            onClick={() => {
-                              void handleDeleteGroup(group.key);
-                            }}
-                          >
-                            Delete
-                          </Button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                <p className="mt-3 text-xs text-muted-foreground">
-                  Deleting a folder keeps mappings intact and moves them to {DEFAULT_GROUP_NAME}.
-                </p>
-              </CardContent>
-            </Card>
-          ) : null}
+              {canManageGroupsPermission ? (
+                <Card id="accounts-groups" className="">
+                  <CardHeader className="pb-3">
+                    <CardTitle>Group Manager</CardTitle>
+                    <CardDescription>Edit folder names/emojis or delete a group.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    {reusableGroupOptions.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
+                        No custom folders yet.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {reusableGroupOptions.map((group) => {
+                          const draft = groupDraftsByKey[group.key] || { name: group.name, emoji: group.emoji };
+                          return (
+                            <div
+                              key={`group-manager-${group.key}`}
+                              className="grid gap-2 rounded-lg border border-border/70 bg-muted/20 p-3 md:grid-cols-[90px_minmax(0,1fr)_auto_auto]"
+                            >
+                              <div className="space-y-1">
+                                <Label htmlFor={`group-manager-emoji-${group.key}`}>Emoji</Label>
+                                <Input
+                                  id={`group-manager-emoji-${group.key}`}
+                                  value={draft.emoji}
+                                  onChange={(event) => updateGroupDraft(group.key, 'emoji', event.target.value)}
+                                  maxLength={8}
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <Label htmlFor={`group-manager-name-${group.key}`}>Name</Label>
+                                <Input
+                                  id={`group-manager-name-${group.key}`}
+                                  value={draft.name}
+                                  onChange={(event) => updateGroupDraft(group.key, 'name', event.target.value)}
+                                />
+                              </div>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="self-end"
+                                disabled={isGroupActionBusy || !draft.name.trim()}
+                                onClick={() => {
+                                  void handleRenameGroup(group.key);
+                                }}
+                              >
+                                Save
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="self-end text-red-600 hover:text-red-500 dark:text-red-300 dark:hover:text-red-200"
+                                disabled={isGroupActionBusy}
+                                onClick={() => {
+                                  void handleDeleteGroup(group.key);
+                                }}
+                              >
+                                Delete
+                              </Button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      Deleting a folder keeps mappings intact and moves them to {DEFAULT_GROUP_NAME}.
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : null}
             </div>
           </div>
         </section>
@@ -5853,732 +5876,746 @@ function App() {
               </div>
             </aside>
             <div className="space-y-6">
-          <Card id="settings-section-account" className="">
-            <button
-              className="flex w-full items-center justify-between px-5 py-4 text-left"
-              onClick={() => toggleSettingsSection('account')}
-              type="button"
-            >
-              <div>
-                <p className="text-sm font-semibold">Account Security</p>
-                <p className="text-xs text-muted-foreground">Update your own email/password with verification.</p>
-              </div>
-              <ChevronDown
-                className={cn('h-4 w-4', isSettingsSectionExpanded('account') ? 'rotate-0' : '-rotate-90')}
-              />
-            </button>
-            <div
-              className={cn(
-                'grid',
-                isSettingsSectionExpanded('account') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-              )}
-            >
-              <div className="min-h-0 overflow-hidden">
-                <CardContent className="grid gap-4 border-t border-border/70 pt-4 lg:grid-cols-2">
-                  <form className="space-y-3" onSubmit={handleChangeOwnEmail}>
-                    <p className="text-sm font-semibold">Change Email</p>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-current-email">Current Email</Label>
-                      <Input
-                        id="account-current-email"
-                        type="email"
-                        value={emailForm.currentEmail}
-                        onChange={(event) => {
-                          setEmailForm((previous) => ({ ...previous, currentEmail: event.target.value }));
-                        }}
-                        placeholder={hasCurrentEmail ? undefined : 'No current email on this account'}
-                        required={hasCurrentEmail}
-                        disabled={!hasCurrentEmail}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-new-email">New Email</Label>
-                      <Input
-                        id="account-new-email"
-                        type="email"
-                        value={emailForm.newEmail}
-                        onChange={(event) => {
-                          setEmailForm((previous) => ({ ...previous, newEmail: event.target.value }));
-                        }}
-                        required
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-email-password">Current Password</Label>
-                      <Input
-                        id="account-email-password"
-                        type="password"
-                        value={emailForm.password}
-                        onChange={(event) => {
-                          setEmailForm((previous) => ({ ...previous, password: event.target.value }));
-                        }}
-                        required
-                      />
-                    </div>
-                    <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
-                      <Save className="mr-2 h-4 w-4" />
-                      Save Email
-                    </Button>
-                  </form>
-
-                  <form className="space-y-3" onSubmit={handleChangeOwnPassword}>
-                    <p className="text-sm font-semibold">Change Password</p>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-current-password">Current Password</Label>
-                      <Input
-                        id="account-current-password"
-                        type="password"
-                        value={passwordForm.currentPassword}
-                        onChange={(event) => {
-                          setPasswordForm((previous) => ({ ...previous, currentPassword: event.target.value }));
-                        }}
-                        required
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-new-password">New Password</Label>
-                      <Input
-                        id="account-new-password"
-                        type="password"
-                        value={passwordForm.newPassword}
-                        onChange={(event) => {
-                          setPasswordForm((previous) => ({ ...previous, newPassword: event.target.value }));
-                        }}
-                        required
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-confirm-password">Confirm New Password</Label>
-                      <Input
-                        id="account-confirm-password"
-                        type="password"
-                        value={passwordForm.confirmPassword}
-                        onChange={(event) => {
-                          setPasswordForm((previous) => ({ ...previous, confirmPassword: event.target.value }));
-                        }}
-                        required
-                      />
-                    </div>
-                    <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
-                      <Save className="mr-2 h-4 w-4" />
-                      Save Password
-                    </Button>
-                  </form>
-                </CardContent>
-              </div>
-            </div>
-          </Card>
-
-          {isAdmin ? (
-            <>
-              <Card className="">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Settings2 className="h-4 w-4" />
-                    Admin Settings
-                  </CardTitle>
-                  <CardDescription>Configured sections stay collapsed so adding accounts is one click.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4 pt-0">
-                  <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="space-y-1">
-                        <p className="text-sm font-semibold">Running Version</p>
-                        <p className="font-mono text-sm text-foreground">{runtimeVersionLabel}</p>
-                        {runtimeBranchLabel ? (
-                          <p className="text-xs text-muted-foreground">{runtimeBranchLabel}</p>
-                        ) : null}
-                        <p className="text-xs text-muted-foreground">{updateStateLabel}</p>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="outline"
-                          onClick={() => {
-                            void handleRunUpdate();
-                          }}
-                          disabled={isUpdateBusy || updateStatus?.running}
-                        >
-                          {isUpdateBusy || updateStatus?.running ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <RefreshCw className="mr-2 h-4 w-4" />
-                          )}
-                          {updateStatus?.running ? 'Updating...' : 'Update'}
-                        </Button>
-                        {canCreateMappings ? (
-                          <Button className="w-full sm:w-auto" onClick={openAddAccountSheet}>
-                            <Plus className="mr-2 h-4 w-4" />
-                            Add Account
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-                    {updateStatus?.logTail && updateStatus.logTail.length > 0 ? (
-                      <details className="mt-3">
-                        <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
-                          Update log
-                        </summary>
-                        <pre className="mt-2 max-h-44 overflow-auto rounded-md bg-background p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                          {updateStatus.logTail.join('\n')}
-                        </pre>
-                      </details>
-                    ) : null}
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="">
+              <Card id="settings-section-account" className="">
                 <button
                   className="flex w-full items-center justify-between px-5 py-4 text-left"
-                  onClick={() => toggleSettingsSection('users')}
+                  onClick={() => toggleSettingsSection('account')}
                   type="button"
                 >
                   <div>
-                    <p className="text-sm font-semibold">User Access Manager</p>
-                    <p className="text-xs text-muted-foreground">Create users and control what they can see/manage.</p>
+                    <p className="text-sm font-semibold">Account Security</p>
+                    <p className="text-xs text-muted-foreground">Update your own email/password with verification.</p>
                   </div>
                   <ChevronDown
-                    className={cn('h-4 w-4', isSettingsSectionExpanded('users') ? 'rotate-0' : '-rotate-90')}
+                    className={cn('h-4 w-4', isSettingsSectionExpanded('account') ? 'rotate-0' : '-rotate-90')}
                   />
                 </button>
                 <div
                   className={cn(
                     'grid',
-                    isSettingsSectionExpanded('users') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
+                    isSettingsSectionExpanded('account') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
                   )}
                 >
                   <div className="min-h-0 overflow-hidden">
-                    <CardContent className="space-y-4 border-t border-border/70 pt-4">
-                      <form
-                        className="space-y-3 rounded-lg border border-border/70 bg-muted/20 p-3"
-                        onSubmit={handleCreateUser}
-                      >
-                        <p className="text-sm font-semibold">Create User</p>
-                        <div className="grid gap-3 md:grid-cols-3">
-                          <div className="space-y-2">
-                            <Label htmlFor="new-user-username">Username</Label>
-                            <Input
-                              id="new-user-username"
-                              value={newUserForm.username}
-                              onChange={(event) => {
-                                setNewUserForm((previous) => ({ ...previous, username: event.target.value }));
-                              }}
-                              placeholder="operator"
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label htmlFor="new-user-email">Email</Label>
-                            <Input
-                              id="new-user-email"
-                              type="email"
-                              value={newUserForm.email}
-                              onChange={(event) => {
-                                setNewUserForm((previous) => ({ ...previous, email: event.target.value }));
-                              }}
-                              placeholder="operator@example.com"
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label htmlFor="new-user-password">Password</Label>
-                            <Input
-                              id="new-user-password"
-                              type="password"
-                              value={newUserForm.password}
-                              onChange={(event) => {
-                                setNewUserForm((previous) => ({ ...previous, password: event.target.value }));
-                              }}
-                              placeholder="Minimum 8 characters"
-                              required
-                            />
-                          </div>
-                        </div>
-
-                        <label className="inline-flex items-center gap-2 text-sm font-medium">
-                          <input
-                            type="checkbox"
-                            checked={newUserForm.isAdmin}
+                    <CardContent className="grid gap-4 border-t border-border/70 pt-4 lg:grid-cols-2">
+                      <form className="space-y-3" onSubmit={handleChangeOwnEmail}>
+                        <p className="text-sm font-semibold">Change Email</p>
+                        <div className="space-y-2">
+                          <Label htmlFor="account-current-email">Current Email</Label>
+                          <Input
+                            id="account-current-email"
+                            type="email"
+                            value={emailForm.currentEmail}
                             onChange={(event) => {
-                              setNewUserForm((previous) => ({
-                                ...previous,
-                                isAdmin: event.target.checked,
-                              }));
+                              setEmailForm((previous) => ({ ...previous, currentEmail: event.target.value }));
                             }}
+                            placeholder={hasCurrentEmail ? undefined : 'No current email on this account'}
+                            required={hasCurrentEmail}
+                            disabled={!hasCurrentEmail}
                           />
-                          Make admin
-                        </label>
-
-                        {!newUserForm.isAdmin ? (
-                          <div className="grid gap-2 md:grid-cols-2">
-                            {PERMISSION_OPTIONS.map((permission) => (
-                              <label
-                                key={`new-user-permission-${permission.key}`}
-                                className="rounded-md border border-border/70 bg-background px-3 py-2 text-xs"
-                              >
-                                <span className="flex items-center justify-between gap-2">
-                                  <span className="font-medium">{permission.label}</span>
-                                  <input
-                                    type="checkbox"
-                                    checked={newUserForm.permissions[permission.key]}
-                                    onChange={(event) => {
-                                      const checked = event.target.checked;
-                                      setNewUserForm((previous) => ({
-                                        ...previous,
-                                        permissions: {
-                                          ...previous.permissions,
-                                          [permission.key]: checked,
-                                        },
-                                      }));
-                                    }}
-                                  />
-                                </span>
-                                <span className="mt-1 block text-muted-foreground">{permission.help}</span>
-                              </label>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-xs text-muted-foreground">Admins always get full access.</p>
-                        )}
-
-                        <Button size="sm" type="submit" disabled={isBusy}>
-                          <Plus className="mr-2 h-4 w-4" />
-                          Create user
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="account-new-email">New Email</Label>
+                          <Input
+                            id="account-new-email"
+                            type="email"
+                            value={emailForm.newEmail}
+                            onChange={(event) => {
+                              setEmailForm((previous) => ({ ...previous, newEmail: event.target.value }));
+                            }}
+                            required
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="account-email-password">Current Password</Label>
+                          <Input
+                            id="account-email-password"
+                            type="password"
+                            value={emailForm.password}
+                            onChange={(event) => {
+                              setEmailForm((previous) => ({ ...previous, password: event.target.value }));
+                            }}
+                            required
+                          />
+                        </div>
+                        <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
+                          <Save className="mr-2 h-4 w-4" />
+                          Save Email
                         </Button>
                       </form>
 
-                      {managedUsers.length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
-                          No user accounts created yet.
-                        </div>
-                      ) : (
+                      <form className="space-y-3" onSubmit={handleChangeOwnPassword}>
+                        <p className="text-sm font-semibold">Change Password</p>
                         <div className="space-y-2">
-                          {managedUsers.map((user) => {
-                            const isEditing = editingUserId === user.id;
-                            const displayName = user.username || user.email || user.id;
-                            return (
-                              <div
-                                key={`managed-user-${user.id}`}
-                                className="rounded-lg border border-border/70 bg-card/60 p-3"
-                              >
-                                {isEditing ? (
-                                  <div className="space-y-3">
-                                    <div className="grid gap-3 md:grid-cols-2">
-                                      <div className="space-y-1">
-                                        <Label htmlFor={`edit-user-username-${user.id}`}>Username</Label>
-                                        <Input
-                                          id={`edit-user-username-${user.id}`}
-                                          value={editingUserForm.username}
-                                          onChange={(event) => {
-                                            setEditingUserForm((previous) => ({
-                                              ...previous,
-                                              username: event.target.value,
-                                            }));
-                                          }}
-                                        />
-                                      </div>
-                                      <div className="space-y-1">
-                                        <Label htmlFor={`edit-user-email-${user.id}`}>Email</Label>
-                                        <Input
-                                          id={`edit-user-email-${user.id}`}
-                                          type="email"
-                                          value={editingUserForm.email}
-                                          onChange={(event) => {
-                                            setEditingUserForm((previous) => ({
-                                              ...previous,
-                                              email: event.target.value,
-                                            }));
-                                          }}
-                                        />
-                                      </div>
-                                    </div>
+                          <Label htmlFor="account-current-password">Current Password</Label>
+                          <Input
+                            id="account-current-password"
+                            type="password"
+                            value={passwordForm.currentPassword}
+                            onChange={(event) => {
+                              setPasswordForm((previous) => ({ ...previous, currentPassword: event.target.value }));
+                            }}
+                            required
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="account-new-password">New Password</Label>
+                          <Input
+                            id="account-new-password"
+                            type="password"
+                            value={passwordForm.newPassword}
+                            onChange={(event) => {
+                              setPasswordForm((previous) => ({ ...previous, newPassword: event.target.value }));
+                            }}
+                            required
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="account-confirm-password">Confirm New Password</Label>
+                          <Input
+                            id="account-confirm-password"
+                            type="password"
+                            value={passwordForm.confirmPassword}
+                            onChange={(event) => {
+                              setPasswordForm((previous) => ({ ...previous, confirmPassword: event.target.value }));
+                            }}
+                            required
+                          />
+                        </div>
+                        <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
+                          <Save className="mr-2 h-4 w-4" />
+                          Save Password
+                        </Button>
+                      </form>
+                    </CardContent>
+                  </div>
+                </div>
+              </Card>
 
-                                    <label className="inline-flex items-center gap-2 text-sm font-medium">
+              {isAdmin ? (
+                <>
+                  <Card className="">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2">
+                        <Settings2 className="h-4 w-4" />
+                        Admin Settings
+                      </CardTitle>
+                      <CardDescription>
+                        Configured sections stay collapsed so adding accounts is one click.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4 pt-0">
+                      <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="space-y-1">
+                            <p className="text-sm font-semibold">Running Version</p>
+                            <p className="font-mono text-sm text-foreground">{runtimeVersionLabel}</p>
+                            {runtimeBranchLabel ? (
+                              <p className="text-xs text-muted-foreground">{runtimeBranchLabel}</p>
+                            ) : null}
+                            <p className="text-xs text-muted-foreground">{updateStateLabel}</p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              variant="outline"
+                              onClick={() => {
+                                void handleRunUpdate();
+                              }}
+                              disabled={isUpdateBusy || updateStatus?.running}
+                            >
+                              {isUpdateBusy || updateStatus?.running ? (
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                              ) : (
+                                <RefreshCw className="mr-2 h-4 w-4" />
+                              )}
+                              {updateStatus?.running ? 'Updating...' : 'Update'}
+                            </Button>
+                            {canCreateMappings ? (
+                              <Button className="w-full sm:w-auto" onClick={openAddAccountSheet}>
+                                <Plus className="mr-2 h-4 w-4" />
+                                Add Account
+                              </Button>
+                            ) : null}
+                          </div>
+                        </div>
+                        {updateStatus?.logTail && updateStatus.logTail.length > 0 ? (
+                          <details className="mt-3">
+                            <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
+                              Update log
+                            </summary>
+                            <pre className="mt-2 max-h-44 overflow-auto rounded-md bg-background p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                              {updateStatus.logTail.join('\n')}
+                            </pre>
+                          </details>
+                        ) : null}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="">
+                    <button
+                      className="flex w-full items-center justify-between px-5 py-4 text-left"
+                      onClick={() => toggleSettingsSection('users')}
+                      type="button"
+                    >
+                      <div>
+                        <p className="text-sm font-semibold">User Access Manager</p>
+                        <p className="text-xs text-muted-foreground">
+                          Create users and control what they can see/manage.
+                        </p>
+                      </div>
+                      <ChevronDown
+                        className={cn('h-4 w-4', isSettingsSectionExpanded('users') ? 'rotate-0' : '-rotate-90')}
+                      />
+                    </button>
+                    <div
+                      className={cn(
+                        'grid',
+                        isSettingsSectionExpanded('users')
+                          ? 'grid-rows-[1fr] opacity-100'
+                          : 'grid-rows-[0fr] opacity-0',
+                      )}
+                    >
+                      <div className="min-h-0 overflow-hidden">
+                        <CardContent className="space-y-4 border-t border-border/70 pt-4">
+                          <form
+                            className="space-y-3 rounded-lg border border-border/70 bg-muted/20 p-3"
+                            onSubmit={handleCreateUser}
+                          >
+                            <p className="text-sm font-semibold">Create User</p>
+                            <div className="grid gap-3 md:grid-cols-3">
+                              <div className="space-y-2">
+                                <Label htmlFor="new-user-username">Username</Label>
+                                <Input
+                                  id="new-user-username"
+                                  value={newUserForm.username}
+                                  onChange={(event) => {
+                                    setNewUserForm((previous) => ({ ...previous, username: event.target.value }));
+                                  }}
+                                  placeholder="operator"
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <Label htmlFor="new-user-email">Email</Label>
+                                <Input
+                                  id="new-user-email"
+                                  type="email"
+                                  value={newUserForm.email}
+                                  onChange={(event) => {
+                                    setNewUserForm((previous) => ({ ...previous, email: event.target.value }));
+                                  }}
+                                  placeholder="operator@example.com"
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <Label htmlFor="new-user-password">Password</Label>
+                                <Input
+                                  id="new-user-password"
+                                  type="password"
+                                  value={newUserForm.password}
+                                  onChange={(event) => {
+                                    setNewUserForm((previous) => ({ ...previous, password: event.target.value }));
+                                  }}
+                                  placeholder="Minimum 8 characters"
+                                  required
+                                />
+                              </div>
+                            </div>
+
+                            <label className="inline-flex items-center gap-2 text-sm font-medium">
+                              <input
+                                type="checkbox"
+                                checked={newUserForm.isAdmin}
+                                onChange={(event) => {
+                                  setNewUserForm((previous) => ({
+                                    ...previous,
+                                    isAdmin: event.target.checked,
+                                  }));
+                                }}
+                              />
+                              Make admin
+                            </label>
+
+                            {!newUserForm.isAdmin ? (
+                              <div className="grid gap-2 md:grid-cols-2">
+                                {PERMISSION_OPTIONS.map((permission) => (
+                                  <label
+                                    key={`new-user-permission-${permission.key}`}
+                                    className="rounded-md border border-border/70 bg-background px-3 py-2 text-xs"
+                                  >
+                                    <span className="flex items-center justify-between gap-2">
+                                      <span className="font-medium">{permission.label}</span>
                                       <input
                                         type="checkbox"
-                                        checked={editingUserForm.isAdmin}
+                                        checked={newUserForm.permissions[permission.key]}
                                         onChange={(event) => {
-                                          setEditingUserForm((previous) => ({
+                                          const checked = event.target.checked;
+                                          setNewUserForm((previous) => ({
                                             ...previous,
-                                            isAdmin: event.target.checked,
+                                            permissions: {
+                                              ...previous.permissions,
+                                              [permission.key]: checked,
+                                            },
                                           }));
                                         }}
                                       />
-                                      Admin access
-                                    </label>
-
-                                    {!editingUserForm.isAdmin ? (
-                                      <div className="grid gap-2 md:grid-cols-2">
-                                        {PERMISSION_OPTIONS.map((permission) => (
-                                          <label
-                                            key={`edit-user-permission-${user.id}-${permission.key}`}
-                                            className="rounded-md border border-border/70 bg-background px-3 py-2 text-xs"
-                                          >
-                                            <span className="flex items-center justify-between gap-2">
-                                              <span className="font-medium">{permission.label}</span>
-                                              <input
-                                                type="checkbox"
-                                                checked={editingUserForm.permissions[permission.key]}
-                                                onChange={(event) => {
-                                                  const checked = event.target.checked;
-                                                  setEditingUserForm((previous) => ({
-                                                    ...previous,
-                                                    permissions: {
-                                                      ...previous.permissions,
-                                                      [permission.key]: checked,
-                                                    },
-                                                  }));
-                                                }}
-                                              />
-                                            </span>
-                                            <span className="mt-1 block text-muted-foreground">{permission.help}</span>
-                                          </label>
-                                        ))}
-                                      </div>
-                                    ) : null}
-
-                                    <div className="flex flex-wrap justify-end gap-2">
-                                      <Button size="sm" variant="ghost" onClick={resetEditingUser} type="button">
-                                        Cancel
-                                      </Button>
-                                      <Button
-                                        size="sm"
-                                        onClick={() => {
-                                          void handleSaveEditedUser(user.id);
-                                        }}
-                                        type="button"
-                                        disabled={isBusy}
-                                      >
-                                        Save user
-                                      </Button>
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div className="space-y-3">
-                                    <div className="flex flex-wrap items-start justify-between gap-3">
-                                      <div className="space-y-1">
-                                        <p className="text-sm font-semibold">{displayName}</p>
-                                        <p className="text-xs text-muted-foreground">
-                                          {user.email ? `Email: ${user.email}` : 'No email set'}
-                                        </p>
-                                        <p className="text-xs text-muted-foreground">
-                                          {user.mappingCount} mappings ({user.activeMappingCount} active)
-                                        </p>
-                                      </div>
-                                      <div className="flex flex-wrap gap-2">
-                                        <Badge variant={user.isAdmin ? 'success' : 'outline'}>
-                                          {user.isAdmin ? 'Admin' : 'User'}
-                                        </Badge>
-                                        {user.id === me?.id ? <Badge variant="secondary">You</Badge> : null}
-                                      </div>
-                                    </div>
-
-                                    {!user.isAdmin ? (
-                                      <div className="flex flex-wrap gap-2">
-                                        {PERMISSION_OPTIONS.filter(
-                                          (permission) => user.permissions[permission.key],
-                                        ).map((permission) => (
-                                          <Badge key={`user-perm-${user.id}-${permission.key}`} variant="outline">
-                                            {permission.label}
-                                          </Badge>
-                                        ))}
-                                      </div>
-                                    ) : null}
-
-                                    <div className="flex flex-wrap gap-2">
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => {
-                                          setAccountsCreatorFilter(user.id);
-                                          setActiveTab('accounts');
-                                        }}
-                                      >
-                                        View Accounts
-                                      </Button>
-                                      <Button size="sm" variant="outline" onClick={() => beginEditUser(user)}>
-                                        Edit
-                                      </Button>
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => {
-                                          void handleResetUserPassword(user.id);
-                                        }}
-                                      >
-                                        Reset Password
-                                      </Button>
-                                      {user.id !== me?.id ? (
-                                        <Button
-                                          size="sm"
-                                          variant="ghost"
-                                          className="text-red-600 hover:text-red-500 dark:text-red-300 dark:hover:text-red-200"
-                                          onClick={() => {
-                                            void handleDeleteUser(user);
-                                          }}
-                                        >
-                                          Delete
-                                        </Button>
-                                      ) : null}
-                                    </div>
-                                  </div>
-                                )}
+                                    </span>
+                                    <span className="mt-1 block text-muted-foreground">{permission.help}</span>
+                                  </label>
+                                ))}
                               </div>
-                            );
-                          })}
-                        </div>
+                            ) : (
+                              <p className="text-xs text-muted-foreground">Admins always get full access.</p>
+                            )}
+
+                            <Button size="sm" type="submit" disabled={isBusy}>
+                              <Plus className="mr-2 h-4 w-4" />
+                              Create user
+                            </Button>
+                          </form>
+
+                          {managedUsers.length === 0 ? (
+                            <div className="rounded-lg border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
+                              No user accounts created yet.
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              {managedUsers.map((user) => {
+                                const isEditing = editingUserId === user.id;
+                                const displayName = user.username || user.email || user.id;
+                                return (
+                                  <div
+                                    key={`managed-user-${user.id}`}
+                                    className="rounded-lg border border-border/70 bg-card/60 p-3"
+                                  >
+                                    {isEditing ? (
+                                      <div className="space-y-3">
+                                        <div className="grid gap-3 md:grid-cols-2">
+                                          <div className="space-y-1">
+                                            <Label htmlFor={`edit-user-username-${user.id}`}>Username</Label>
+                                            <Input
+                                              id={`edit-user-username-${user.id}`}
+                                              value={editingUserForm.username}
+                                              onChange={(event) => {
+                                                setEditingUserForm((previous) => ({
+                                                  ...previous,
+                                                  username: event.target.value,
+                                                }));
+                                              }}
+                                            />
+                                          </div>
+                                          <div className="space-y-1">
+                                            <Label htmlFor={`edit-user-email-${user.id}`}>Email</Label>
+                                            <Input
+                                              id={`edit-user-email-${user.id}`}
+                                              type="email"
+                                              value={editingUserForm.email}
+                                              onChange={(event) => {
+                                                setEditingUserForm((previous) => ({
+                                                  ...previous,
+                                                  email: event.target.value,
+                                                }));
+                                              }}
+                                            />
+                                          </div>
+                                        </div>
+
+                                        <label className="inline-flex items-center gap-2 text-sm font-medium">
+                                          <input
+                                            type="checkbox"
+                                            checked={editingUserForm.isAdmin}
+                                            onChange={(event) => {
+                                              setEditingUserForm((previous) => ({
+                                                ...previous,
+                                                isAdmin: event.target.checked,
+                                              }));
+                                            }}
+                                          />
+                                          Admin access
+                                        </label>
+
+                                        {!editingUserForm.isAdmin ? (
+                                          <div className="grid gap-2 md:grid-cols-2">
+                                            {PERMISSION_OPTIONS.map((permission) => (
+                                              <label
+                                                key={`edit-user-permission-${user.id}-${permission.key}`}
+                                                className="rounded-md border border-border/70 bg-background px-3 py-2 text-xs"
+                                              >
+                                                <span className="flex items-center justify-between gap-2">
+                                                  <span className="font-medium">{permission.label}</span>
+                                                  <input
+                                                    type="checkbox"
+                                                    checked={editingUserForm.permissions[permission.key]}
+                                                    onChange={(event) => {
+                                                      const checked = event.target.checked;
+                                                      setEditingUserForm((previous) => ({
+                                                        ...previous,
+                                                        permissions: {
+                                                          ...previous.permissions,
+                                                          [permission.key]: checked,
+                                                        },
+                                                      }));
+                                                    }}
+                                                  />
+                                                </span>
+                                                <span className="mt-1 block text-muted-foreground">
+                                                  {permission.help}
+                                                </span>
+                                              </label>
+                                            ))}
+                                          </div>
+                                        ) : null}
+
+                                        <div className="flex flex-wrap justify-end gap-2">
+                                          <Button size="sm" variant="ghost" onClick={resetEditingUser} type="button">
+                                            Cancel
+                                          </Button>
+                                          <Button
+                                            size="sm"
+                                            onClick={() => {
+                                              void handleSaveEditedUser(user.id);
+                                            }}
+                                            type="button"
+                                            disabled={isBusy}
+                                          >
+                                            Save user
+                                          </Button>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="space-y-3">
+                                        <div className="flex flex-wrap items-start justify-between gap-3">
+                                          <div className="space-y-1">
+                                            <p className="text-sm font-semibold">{displayName}</p>
+                                            <p className="text-xs text-muted-foreground">
+                                              {user.email ? `Email: ${user.email}` : 'No email set'}
+                                            </p>
+                                            <p className="text-xs text-muted-foreground">
+                                              {user.mappingCount} mappings ({user.activeMappingCount} active)
+                                            </p>
+                                          </div>
+                                          <div className="flex flex-wrap gap-2">
+                                            <Badge variant={user.isAdmin ? 'success' : 'outline'}>
+                                              {user.isAdmin ? 'Admin' : 'User'}
+                                            </Badge>
+                                            {user.id === me?.id ? <Badge variant="secondary">You</Badge> : null}
+                                          </div>
+                                        </div>
+
+                                        {!user.isAdmin ? (
+                                          <div className="flex flex-wrap gap-2">
+                                            {PERMISSION_OPTIONS.filter(
+                                              (permission) => user.permissions[permission.key],
+                                            ).map((permission) => (
+                                              <Badge key={`user-perm-${user.id}-${permission.key}`} variant="outline">
+                                                {permission.label}
+                                              </Badge>
+                                            ))}
+                                          </div>
+                                        ) : null}
+
+                                        <div className="flex flex-wrap gap-2">
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => {
+                                              setAccountsCreatorFilter(user.id);
+                                              setActiveTab('accounts');
+                                            }}
+                                          >
+                                            View Accounts
+                                          </Button>
+                                          <Button size="sm" variant="outline" onClick={() => beginEditUser(user)}>
+                                            Edit
+                                          </Button>
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => {
+                                              void handleResetUserPassword(user.id);
+                                            }}
+                                          >
+                                            Reset Password
+                                          </Button>
+                                          {user.id !== me?.id ? (
+                                            <Button
+                                              size="sm"
+                                              variant="ghost"
+                                              className="text-red-600 hover:text-red-500 dark:text-red-300 dark:hover:text-red-200"
+                                              onClick={() => {
+                                                void handleDeleteUser(user);
+                                              }}
+                                            >
+                                              Delete
+                                            </Button>
+                                          ) : null}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </CardContent>
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="">
+                    <button
+                      className="flex w-full items-center justify-between px-5 py-4 text-left"
+                      onClick={() => toggleSettingsSection('twitter')}
+                      type="button"
+                    >
+                      <div>
+                        <p className="text-sm font-semibold">Twitter Credentials</p>
+                        <p className="text-xs text-muted-foreground">Primary and backup cookie values.</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={twitterConfigured ? 'success' : 'outline'}>
+                          {twitterConfigured ? 'Configured' : 'Missing'}
+                        </Badge>
+                        <ChevronDown
+                          className={cn('h-4 w-4', isSettingsSectionExpanded('twitter') ? 'rotate-0' : '-rotate-90')}
+                        />
+                      </div>
+                    </button>
+                    <div
+                      className={cn(
+                        'grid',
+                        isSettingsSectionExpanded('twitter')
+                          ? 'grid-rows-[1fr] opacity-100'
+                          : 'grid-rows-[0fr] opacity-0',
                       )}
-                    </CardContent>
-                  </div>
-                </div>
-              </Card>
+                    >
+                      <div className="min-h-0 overflow-hidden">
+                        <CardContent className="space-y-3 border-t border-border/70 pt-4">
+                          <form className="space-y-3" onSubmit={handleSaveTwitterConfig}>
+                            <div className="space-y-2">
+                              <Label htmlFor="authToken">Primary Auth Token</Label>
+                              <Input
+                                id="authToken"
+                                value={twitterConfig.authToken}
+                                onChange={(event) => {
+                                  setTwitterConfig((prev) => ({ ...prev, authToken: event.target.value }));
+                                }}
+                                required
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="ct0">Primary CT0</Label>
+                              <Input
+                                id="ct0"
+                                value={twitterConfig.ct0}
+                                onChange={(event) => {
+                                  setTwitterConfig((prev) => ({ ...prev, ct0: event.target.value }));
+                                }}
+                                required
+                              />
+                            </div>
 
-              <Card className="">
-                <button
-                  className="flex w-full items-center justify-between px-5 py-4 text-left"
-                  onClick={() => toggleSettingsSection('twitter')}
-                  type="button"
-                >
-                  <div>
-                    <p className="text-sm font-semibold">Twitter Credentials</p>
-                    <p className="text-xs text-muted-foreground">Primary and backup cookie values.</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant={twitterConfigured ? 'success' : 'outline'}>
-                      {twitterConfigured ? 'Configured' : 'Missing'}
-                    </Badge>
-                    <ChevronDown
-                      className={cn('h-4 w-4', isSettingsSectionExpanded('twitter') ? 'rotate-0' : '-rotate-90')}
-                    />
-                  </div>
-                </button>
-                <div
-                  className={cn(
-                    'grid',
-                    isSettingsSectionExpanded('twitter') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-                  )}
-                >
-                  <div className="min-h-0 overflow-hidden">
-                    <CardContent className="space-y-3 border-t border-border/70 pt-4">
-                      <form className="space-y-3" onSubmit={handleSaveTwitterConfig}>
-                        <div className="space-y-2">
-                          <Label htmlFor="authToken">Primary Auth Token</Label>
-                          <Input
-                            id="authToken"
-                            value={twitterConfig.authToken}
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              <div className="space-y-2">
+                                <Label htmlFor="backupAuthToken">Backup Auth Token</Label>
+                                <Input
+                                  id="backupAuthToken"
+                                  value={twitterConfig.backupAuthToken || ''}
+                                  onChange={(event) => {
+                                    setTwitterConfig((prev) => ({ ...prev, backupAuthToken: event.target.value }));
+                                  }}
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <Label htmlFor="backupCt0">Backup CT0</Label>
+                                <Input
+                                  id="backupCt0"
+                                  value={twitterConfig.backupCt0 || ''}
+                                  onChange={(event) => {
+                                    setTwitterConfig((prev) => ({ ...prev, backupCt0: event.target.value }));
+                                  }}
+                                />
+                              </div>
+                            </div>
+
+                            <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
+                              <Save className="mr-2 h-4 w-4" />
+                              Save Twitter Credentials
+                            </Button>
+                          </form>
+                        </CardContent>
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="">
+                    <button
+                      className="flex w-full items-center justify-between px-5 py-4 text-left"
+                      onClick={() => toggleSettingsSection('ai')}
+                      type="button"
+                    >
+                      <div>
+                        <p className="text-sm font-semibold">AI Settings</p>
+                        <p className="text-xs text-muted-foreground">
+                          Optional enrichment and rewrite provider config.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={aiConfigured ? 'success' : 'outline'}>
+                          {aiConfigured ? 'Configured' : 'Optional'}
+                        </Badge>
+                        <ChevronDown
+                          className={cn('h-4 w-4', isSettingsSectionExpanded('ai') ? 'rotate-0' : '-rotate-90')}
+                        />
+                      </div>
+                    </button>
+                    <div
+                      className={cn(
+                        'grid',
+                        isSettingsSectionExpanded('ai') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
+                      )}
+                    >
+                      <div className="min-h-0 overflow-hidden">
+                        <CardContent className="space-y-3 border-t border-border/70 pt-4">
+                          <form className="space-y-3" onSubmit={handleSaveAiConfig}>
+                            <div className="space-y-2">
+                              <Label htmlFor="provider">Provider</Label>
+                              <select
+                                className={selectClassName}
+                                id="provider"
+                                value={aiConfig.provider}
+                                onChange={(event) => {
+                                  setAiConfig((prev) => ({
+                                    ...prev,
+                                    provider: event.target.value as AIConfig['provider'],
+                                  }));
+                                }}
+                              >
+                                <option value="gemini">Google Gemini</option>
+                                <option value="openai">OpenAI / OpenRouter</option>
+                                <option value="anthropic">Anthropic</option>
+                                <option value="custom">Custom</option>
+                              </select>
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="apiKey">API Key</Label>
+                              <Input
+                                id="apiKey"
+                                type="password"
+                                value={aiConfig.apiKey || ''}
+                                onChange={(event) => {
+                                  setAiConfig((prev) => ({ ...prev, apiKey: event.target.value }));
+                                }}
+                              />
+                            </div>
+                            {aiConfig.provider !== 'gemini' ? (
+                              <>
+                                <div className="space-y-2">
+                                  <Label htmlFor="model">Model ID</Label>
+                                  <Input
+                                    id="model"
+                                    value={aiConfig.model || ''}
+                                    onChange={(event) => {
+                                      setAiConfig((prev) => ({ ...prev, model: event.target.value }));
+                                    }}
+                                    placeholder="gpt-4o"
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <Label htmlFor="baseUrl">Base URL</Label>
+                                  <Input
+                                    id="baseUrl"
+                                    value={aiConfig.baseUrl || ''}
+                                    onChange={(event) => {
+                                      setAiConfig((prev) => ({ ...prev, baseUrl: event.target.value }));
+                                    }}
+                                    placeholder="https://api.example.com/v1"
+                                  />
+                                </div>
+                              </>
+                            ) : null}
+
+                            <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
+                              <Bot className="mr-2 h-4 w-4" />
+                              Save AI Settings
+                            </Button>
+                          </form>
+                        </CardContent>
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card className="">
+                    <button
+                      className="flex w-full items-center justify-between px-5 py-4 text-left"
+                      onClick={() => toggleSettingsSection('data')}
+                      type="button"
+                    >
+                      <div>
+                        <p className="text-sm font-semibold">Data Management</p>
+                        <p className="text-xs text-muted-foreground">Export/import mappings and provider settings.</p>
+                      </div>
+                      <ChevronDown
+                        className={cn('h-4 w-4', isSettingsSectionExpanded('data') ? 'rotate-0' : '-rotate-90')}
+                      />
+                    </button>
+                    <div
+                      className={cn(
+                        'grid',
+                        isSettingsSectionExpanded('data') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
+                      )}
+                    >
+                      <div className="min-h-0 overflow-hidden">
+                        <CardContent className="space-y-3 border-t border-border/70 pt-4">
+                          <Button className="w-full sm:w-auto" variant="outline" onClick={handleExportConfig}>
+                            <Download className="mr-2 h-4 w-4" />
+                            Export configuration
+                          </Button>
+                          <input
+                            ref={importInputRef}
+                            className="hidden"
+                            type="file"
+                            accept="application/json,.json"
                             onChange={(event) => {
-                              setTwitterConfig((prev) => ({ ...prev, authToken: event.target.value }));
+                              void handleImportConfig(event);
                             }}
-                            required
                           />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="ct0">Primary CT0</Label>
-                          <Input
-                            id="ct0"
-                            value={twitterConfig.ct0}
-                            onChange={(event) => {
-                              setTwitterConfig((prev) => ({ ...prev, ct0: event.target.value }));
-                            }}
-                            required
-                          />
-                        </div>
-
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          <div className="space-y-2">
-                            <Label htmlFor="backupAuthToken">Backup Auth Token</Label>
-                            <Input
-                              id="backupAuthToken"
-                              value={twitterConfig.backupAuthToken || ''}
-                              onChange={(event) => {
-                                setTwitterConfig((prev) => ({ ...prev, backupAuthToken: event.target.value }));
-                              }}
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label htmlFor="backupCt0">Backup CT0</Label>
-                            <Input
-                              id="backupCt0"
-                              value={twitterConfig.backupCt0 || ''}
-                              onChange={(event) => {
-                                setTwitterConfig((prev) => ({ ...prev, backupCt0: event.target.value }));
-                              }}
-                            />
-                          </div>
-                        </div>
-
-                        <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
-                          <Save className="mr-2 h-4 w-4" />
-                          Save Twitter Credentials
-                        </Button>
-                      </form>
-                    </CardContent>
-                  </div>
-                </div>
-              </Card>
-
-              <Card className="">
-                <button
-                  className="flex w-full items-center justify-between px-5 py-4 text-left"
-                  onClick={() => toggleSettingsSection('ai')}
-                  type="button"
-                >
-                  <div>
-                    <p className="text-sm font-semibold">AI Settings</p>
-                    <p className="text-xs text-muted-foreground">Optional enrichment and rewrite provider config.</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant={aiConfigured ? 'success' : 'outline'}>
-                      {aiConfigured ? 'Configured' : 'Optional'}
-                    </Badge>
-                    <ChevronDown
-                      className={cn('h-4 w-4', isSettingsSectionExpanded('ai') ? 'rotate-0' : '-rotate-90')}
-                    />
-                  </div>
-                </button>
-                <div
-                  className={cn(
-                    'grid',
-                    isSettingsSectionExpanded('ai') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-                  )}
-                >
-                  <div className="min-h-0 overflow-hidden">
-                    <CardContent className="space-y-3 border-t border-border/70 pt-4">
-                      <form className="space-y-3" onSubmit={handleSaveAiConfig}>
-                        <div className="space-y-2">
-                          <Label htmlFor="provider">Provider</Label>
-                          <select
-                            className={selectClassName}
-                            id="provider"
-                            value={aiConfig.provider}
-                            onChange={(event) => {
-                              setAiConfig((prev) => ({
-                                ...prev,
-                                provider: event.target.value as AIConfig['provider'],
-                              }));
+                          <Button
+                            className="w-full sm:w-auto"
+                            variant="outline"
+                            onClick={() => {
+                              importInputRef.current?.click();
                             }}
                           >
-                            <option value="gemini">Google Gemini</option>
-                            <option value="openai">OpenAI / OpenRouter</option>
-                            <option value="anthropic">Anthropic</option>
-                            <option value="custom">Custom</option>
-                          </select>
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="apiKey">API Key</Label>
-                          <Input
-                            id="apiKey"
-                            type="password"
-                            value={aiConfig.apiKey || ''}
-                            onChange={(event) => {
-                              setAiConfig((prev) => ({ ...prev, apiKey: event.target.value }));
-                            }}
-                          />
-                        </div>
-                        {aiConfig.provider !== 'gemini' ? (
-                          <>
-                            <div className="space-y-2">
-                              <Label htmlFor="model">Model ID</Label>
-                              <Input
-                                id="model"
-                                value={aiConfig.model || ''}
-                                onChange={(event) => {
-                                  setAiConfig((prev) => ({ ...prev, model: event.target.value }));
-                                }}
-                                placeholder="gpt-4o"
-                              />
-                            </div>
-                            <div className="space-y-2">
-                              <Label htmlFor="baseUrl">Base URL</Label>
-                              <Input
-                                id="baseUrl"
-                                value={aiConfig.baseUrl || ''}
-                                onChange={(event) => {
-                                  setAiConfig((prev) => ({ ...prev, baseUrl: event.target.value }));
-                                }}
-                                placeholder="https://api.example.com/v1"
-                              />
-                            </div>
-                          </>
-                        ) : null}
-
-                        <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
-                          <Bot className="mr-2 h-4 w-4" />
-                          Save AI Settings
-                        </Button>
-                      </form>
-                    </CardContent>
-                  </div>
-                </div>
-              </Card>
-
-              <Card className="">
-                <button
-                  className="flex w-full items-center justify-between px-5 py-4 text-left"
-                  onClick={() => toggleSettingsSection('data')}
-                  type="button"
-                >
-                  <div>
-                    <p className="text-sm font-semibold">Data Management</p>
-                    <p className="text-xs text-muted-foreground">Export/import mappings and provider settings.</p>
-                  </div>
-                  <ChevronDown
-                    className={cn('h-4 w-4', isSettingsSectionExpanded('data') ? 'rotate-0' : '-rotate-90')}
-                  />
-                </button>
-                <div
-                  className={cn(
-                    'grid',
-                    isSettingsSectionExpanded('data') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-                  )}
-                >
-                  <div className="min-h-0 overflow-hidden">
-                    <CardContent className="space-y-3 border-t border-border/70 pt-4">
-                      <Button className="w-full sm:w-auto" variant="outline" onClick={handleExportConfig}>
-                        <Download className="mr-2 h-4 w-4" />
-                        Export configuration
-                      </Button>
-                      <input
-                        ref={importInputRef}
-                        className="hidden"
-                        type="file"
-                        accept="application/json,.json"
-                        onChange={(event) => {
-                          void handleImportConfig(event);
-                        }}
-                      />
-                      <Button
-                        className="w-full sm:w-auto"
-                        variant="outline"
-                        onClick={() => {
-                          importInputRef.current?.click();
-                        }}
-                      >
-                        <Upload className="mr-2 h-4 w-4" />
-                        Import configuration
-                      </Button>
-                      <p className="text-xs text-muted-foreground">
-                        Imports preserve dashboard users and passwords while replacing mappings, provider keys, and
-                        scheduler settings.
-                      </p>
-                    </CardContent>
-                  </div>
-                </div>
-              </Card>
-            </>
-          ) : (
-            <Card className="">
-              <CardHeader>
-                <CardTitle>Access Scope</CardTitle>
-                <CardDescription>Your current account permissions.</CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-wrap gap-2 pt-0">
-                {PERMISSION_OPTIONS.filter((permission) => effectivePermissions[permission.key]).map((permission) => (
-                  <Badge key={`self-perm-${permission.key}`} variant="outline">
-                    {permission.label}
-                  </Badge>
-                ))}
-              </CardContent>
-            </Card>
-          )}
+                            <Upload className="mr-2 h-4 w-4" />
+                            Import configuration
+                          </Button>
+                          <p className="text-xs text-muted-foreground">
+                            Imports preserve dashboard users and passwords while replacing mappings, provider keys, and
+                            scheduler settings.
+                          </p>
+                        </CardContent>
+                      </div>
+                    </div>
+                  </Card>
+                </>
+              ) : (
+                <Card className="">
+                  <CardHeader>
+                    <CardTitle>Access Scope</CardTitle>
+                    <CardDescription>Your current account permissions.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-wrap gap-2 pt-0">
+                    {PERMISSION_OPTIONS.filter((permission) => effectivePermissions[permission.key]).map(
+                      (permission) => (
+                        <Badge key={`self-perm-${permission.key}`} variant="outline">
+                          {permission.label}
+                        </Badge>
+                      ),
+                    )}
+                  </CardContent>
+                </Card>
+              )}
             </div>
           </div>
         </section>
