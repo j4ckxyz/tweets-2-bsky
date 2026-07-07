@@ -1680,6 +1680,10 @@ function App() {
     }
     return mappings.filter((mapping) => mapping.createdByUserId === accountsCreatorFilter);
   }, [accountsCreatorFilter, isAdmin, mappings]);
+  const botLabeledMappingsForView = useMemo(
+    () => accountMappingsForView.filter((mapping) => mapping.hasBotLabel === true),
+    [accountMappingsForView],
+  );
   const isAnyBulkAccountsActionBusy =
     isSyncAllProfilesBusy ||
     isPullBioAllBusy ||
@@ -4697,6 +4701,9 @@ function App() {
                             Showing {currentAccountsPageStart}-{currentAccountsPageEnd} of {accountMatchesCount} account
                             {accountMatchesCount === 1 ? '' : 's'}
                           </span>
+                          {botLabeledMappingsForView.length > 0 ? (
+                            <span>{botLabeledMappingsForView.length} bot-labeled</span>
+                          ) : null}
                           {selectedManageableMappingsCount > 0 ? (
                             <button
                               type="button"
