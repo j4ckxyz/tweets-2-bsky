@@ -16,6 +16,7 @@ import {
   LogOut,
   MessageCircle,
   Moon,
+  MoreHorizontal,
   Newspaper,
   Pin,
   Play,
@@ -37,14 +38,21 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } f
 import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
+import {
+  DropdownMenu,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+} from './components/ui/dropdown-menu';
 import { Input } from './components/ui/input';
 import { Label } from './components/ui/label';
+import { NavList } from './components/ui/nav-list';
 import { cn } from './lib/utils';
 
 type ThemeMode = 'system' | 'light' | 'dark';
 type AuthView = 'login' | 'register';
 type DashboardTab = 'overview' | 'accounts' | 'posts' | 'activity' | 'settings';
-type SettingsSection = 'account' | 'users' | 'twitter' | 'ai' | 'data';
+type SettingsSection = 'account' | 'system' | 'users' | 'twitter' | 'ai' | 'data';
 type BulkAccountsAction =
   | 'sync_profiles'
   | 'pull_twitter_bio'
@@ -448,7 +456,6 @@ const TAB_PATHS: Record<DashboardTab, string> = {
 const ADD_ACCOUNT_STEPS = ['Sources', 'Create', 'Bluesky', 'Verify & Create'] as const;
 const ADD_ACCOUNT_STEP_COUNT = ADD_ACCOUNT_STEPS.length;
 const ACCOUNT_SEARCH_MIN_SCORE = 22;
-const ACCOUNT_ROWS_BATCH_SIZE = 40;
 const ACCOUNT_PAGE_SIZE_DEFAULT = 50;
 const DEFAULT_BACKFILL_LIMIT = 15;
 const FEDIVERSE_BRIDGE_MIN_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -871,27 +878,12 @@ function App() {
   const [newGroupEmoji, setNewGroupEmoji] = useState(DEFAULT_GROUP_EMOJI);
   const [isAddAccountSheetOpen, setIsAddAccountSheetOpen] = useState(false);
   const [addAccountStep, setAddAccountStep] = useState(1);
-  const [settingsSectionOverrides, setSettingsSectionOverrides] = useState<Partial<Record<SettingsSection, boolean>>>(
-    {},
-  );
-  const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<Record<string, boolean>>(() => {
-    const raw = localStorage.getItem('accounts-collapsed-groups');
-    if (!raw) return {};
-    try {
-      const parsed = JSON.parse(raw) as Record<string, boolean>;
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {};
-    }
-  });
-  const [accountsViewMode, setAccountsViewMode] = useState<'grouped' | 'global'>('grouped');
+  const [settingsActiveSection, setSettingsActiveSection] = useState<SettingsSection>('account');
+  const [selectedFolderKey, setSelectedFolderKey] = useState('__all__');
   const [accountsSearchQuery, setAccountsSearchQuery] = useState('');
   const [accountsPage, setAccountsPage] = useState(1);
   const [accountsPageSize, setAccountsPageSize] = useState(ACCOUNT_PAGE_SIZE_DEFAULT);
-  const [accountsBulkAction, setAccountsBulkAction] = useState<BulkAccountsAction>('sync_profiles');
-  const [accountsBulkScope, setAccountsBulkScope] = useState<'all' | 'selected'>('all');
   const [selectedAccountMappingIds, setSelectedAccountMappingIds] = useState<string[]>([]);
-  const [visibleRowsByGroupKey, setVisibleRowsByGroupKey] = useState<Record<string, number>>({});
   const [showAccountAvatars, setShowAccountAvatars] = useState(false);
   const [showAccountBios, setShowAccountBios] = useState(false);
   const [postsGroupFilter, setPostsGroupFilter] = useState('all');
@@ -1028,8 +1020,7 @@ function App() {
     setNewGroupEmoji(DEFAULT_GROUP_EMOJI);
     setIsAddAccountSheetOpen(false);
     setAddAccountStep(1);
-    setSettingsSectionOverrides({});
-    setAccountsViewMode('grouped');
+    setSettingsActiveSection('account');
     setAccountsSearchQuery('');
     setPostsSearchQuery('');
     setLocalPostSearchResults([]);
@@ -1381,10 +1372,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('accounts-collapsed-groups', JSON.stringify(collapsedGroupKeys));
-  }, [collapsedGroupKeys]);
-
-  useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
 
     const applyTheme = () => {
@@ -1594,11 +1581,31 @@ function App() {
     : undefined;
   const dashboardTabs = useMemo(
     () => [
-      { id: 'overview' as DashboardTab, label: 'Overview', icon: LayoutDashboard },
-      { id: 'accounts' as DashboardTab, label: 'Accounts', icon: Users },
-      { id: 'posts' as DashboardTab, label: 'Posts', icon: Newspaper },
-      { id: 'activity' as DashboardTab, label: 'Activity', icon: History },
-      { id: 'settings' as DashboardTab, label: 'Settings', icon: Settings2 },
+      {
+        id: 'overview' as DashboardTab,
+        label: 'Overview',
+        icon: LayoutDashboard,
+        description: 'Status, recent activity, and top performers.',
+      },
+      {
+        id: 'accounts' as DashboardTab,
+        label: 'Accounts',
+        icon: Users,
+        description: 'Manage Twitter-to-Bluesky mappings and folders.',
+      },
+      {
+        id: 'posts' as DashboardTab,
+        label: 'Posts',
+        icon: Newspaper,
+        description: 'Search and browse crossposted content.',
+      },
+      { id: 'activity' as DashboardTab, label: 'Activity', icon: History, description: 'Recent migration log.' },
+      {
+        id: 'settings' as DashboardTab,
+        label: 'Settings',
+        icon: Settings2,
+        description: 'Account, credentials, users, and data management.',
+      },
     ],
     [],
   );
@@ -1673,10 +1680,6 @@ function App() {
     }
     return mappings.filter((mapping) => mapping.createdByUserId === accountsCreatorFilter);
   }, [accountsCreatorFilter, isAdmin, mappings]);
-  const botLabeledMappingsForView = useMemo(
-    () => accountMappingsForView.filter((mapping) => mapping.hasBotLabel === true),
-    [accountMappingsForView],
-  );
   const isAnyBulkAccountsActionBusy =
     isSyncAllProfilesBusy ||
     isPullBioAllBusy ||
@@ -1800,8 +1803,9 @@ function App() {
       })
       .filter((group) => !hasQuery || group.mappings.length > 0);
 
-    if (accountsViewMode === 'grouped') {
-      return withSearch;
+    if (selectedFolderKey !== '__all__') {
+      const match = withSearch.find((group) => group.key === selectedFolderKey);
+      return match ? [match] : [];
     }
 
     const allMappings = sortByScore(
@@ -1824,7 +1828,7 @@ function App() {
         mappings: allMappings,
       },
     ];
-  }, [accountMappingsForView, accountSearchScores, accountsViewMode, groupedMappings, normalizedAccountsQuery]);
+  }, [accountMappingsForView, accountSearchScores, selectedFolderKey, groupedMappings, normalizedAccountsQuery]);
   const accountMatchesCount = useMemo(
     () => filteredGroupedMappings.reduce((total, group) => total + group.mappings.length, 0),
     [filteredGroupedMappings],
@@ -1839,7 +1843,7 @@ function App() {
   );
   useEffect(() => {
     setAccountsPage(1);
-  }, [accountsPageSize, accountsSearchQuery, accountsViewMode, accountsCreatorFilter]);
+  }, [accountsPageSize, accountsSearchQuery, selectedFolderKey, accountsCreatorFilter]);
   useEffect(() => {
     if (accountsPage > accountsPageCount) {
       setAccountsPage(accountsPageCount);
@@ -1865,33 +1869,6 @@ function App() {
     accountMatchesCount === 0 ? 0 : (accountsPage - 1) * Math.max(1, accountsPageSize) + 1;
   const currentAccountsPageEnd =
     accountMatchesCount === 0 ? 0 : Math.min(accountMatchesCount, accountsPage * Math.max(1, accountsPageSize));
-  useEffect(() => {
-    setVisibleRowsByGroupKey((previous) => {
-      const validGroupKeys = new Set(pagedGroupedMappings.map((group) => group.key));
-      const next: Record<string, number> = {};
-
-      for (const [groupKey, count] of Object.entries(previous)) {
-        if (validGroupKeys.has(groupKey)) {
-          next[groupKey] = count;
-        }
-      }
-
-      for (const group of pagedGroupedMappings) {
-        const defaultVisible = Math.min(group.mappings.length, ACCOUNT_ROWS_BATCH_SIZE);
-        const existing = next[group.key] || 0;
-        next[group.key] = Math.max(existing, defaultVisible);
-      }
-
-      return next;
-    });
-  }, [pagedGroupedMappings]);
-  const groupKeysForCollapse = useMemo(() => groupedMappings.map((group) => group.key), [groupedMappings]);
-  const allGroupsCollapsed = useMemo(
-    () =>
-      groupKeysForCollapse.length > 0 &&
-      groupKeysForCollapse.every((groupKey) => collapsedGroupKeys[groupKey] === true),
-    [collapsedGroupKeys, groupKeysForCollapse],
-  );
   const resolveMappingForLocalPost = useCallback(
     (post: LocalPostSearchResult) =>
       mappingsByBskyIdentifier.get(normalizeTwitterUsername(post.bskyIdentifier)) ||
@@ -1983,26 +1960,39 @@ function App() {
   }, [manageableMappingIdsForView]);
   const twitterConfigured = Boolean(twitterConfig.authToken && twitterConfig.ct0);
   const aiConfigured = Boolean(aiConfig.apiKey);
-  const sectionDefaultExpanded = useMemo<Record<SettingsSection, boolean>>(
-    () => ({
-      account: true,
-      users: true,
-      twitter: !twitterConfigured,
-      ai: !aiConfigured,
-      data: false,
-    }),
-    [aiConfigured, twitterConfigured],
+  const settingsNavItems = useMemo(
+    () => [
+      { id: 'account' as SettingsSection, label: 'Account', icon: UserRound },
+      ...(isAdmin
+        ? [
+            { id: 'system' as SettingsSection, label: 'System', icon: Settings2 },
+            { id: 'users' as SettingsSection, label: 'Users', icon: Users },
+            {
+              id: 'twitter' as SettingsSection,
+              label: 'Twitter',
+              icon: Bot,
+              badge: (
+                <Badge variant={twitterConfigured ? 'success' : 'outline'} className="ml-auto">
+                  {twitterConfigured ? 'On' : 'Off'}
+                </Badge>
+              ),
+            },
+            {
+              id: 'ai' as SettingsSection,
+              label: 'AI',
+              icon: SunMoon,
+              badge: (
+                <Badge variant={aiConfigured ? 'success' : 'outline'} className="ml-auto">
+                  {aiConfigured ? 'On' : 'Off'}
+                </Badge>
+              ),
+            },
+            { id: 'data' as SettingsSection, label: 'Data', icon: Download },
+          ]
+        : []),
+    ],
+    [aiConfigured, isAdmin, twitterConfigured],
   );
-  const isSettingsSectionExpanded = useCallback(
-    (section: SettingsSection) => settingsSectionOverrides[section] ?? sectionDefaultExpanded[section],
-    [sectionDefaultExpanded, settingsSectionOverrides],
-  );
-  const toggleSettingsSection = (section: SettingsSection) => {
-    setSettingsSectionOverrides((previous) => ({
-      ...previous,
-      [section]: !(previous[section] ?? sectionDefaultExpanded[section]),
-    }));
-  };
 
   useEffect(() => {
     if (postsGroupFilter !== 'all' && !groupOptions.some((group) => group.key === postsGroupFilter)) {
@@ -2629,18 +2619,11 @@ function App() {
     });
   };
 
-  const resolveBulkAccountTargets = (actionLabel: string): AccountMapping[] => {
-    const fallbackTargets = manageableAccountMappingsForView;
-    if (accountsBulkScope !== 'selected') {
-      return fallbackTargets;
-    }
-
+  const resolveBulkAccountTargets = (_actionLabel: string): AccountMapping[] => {
     if (selectedManageableMappingsForView.length > 0) {
       return selectedManageableMappingsForView;
     }
-
-    showNotice('info', `No selected accounts available for ${actionLabel}.`);
-    return [];
+    return manageableAccountMappingsForView;
   };
 
   const handleSyncAllProfilesFromTwitter = async (targetsOverride?: AccountMapping[]) => {
@@ -2878,17 +2861,17 @@ function App() {
     await fetchStatus();
   };
 
-  const handleApplyAllAccountsAction = async () => {
+  const handleApplyAllAccountsAction = async (action: BulkAccountsAction) => {
     const actionLabel =
-      accountsBulkAction === 'sync_profiles'
+      action === 'sync_profiles'
         ? 'profile sync'
-        : accountsBulkAction === 'pull_twitter_bio'
+        : action === 'pull_twitter_bio'
           ? 'Twitter bio pull'
-          : accountsBulkAction === 'bridge_all'
+          : action === 'bridge_all'
             ? 'fediverse bridge'
-            : accountsBulkAction === 'apply_bot_label'
+            : action === 'apply_bot_label'
               ? 'bot label update'
-              : accountsBulkAction === 'sync_pins'
+              : action === 'sync_pins'
                 ? 'pinned tweet sync'
                 : 'display-name suffix update';
     const targets = resolveBulkAccountTargets(actionLabel);
@@ -2896,23 +2879,23 @@ function App() {
       return;
     }
 
-    if (accountsBulkAction === 'sync_profiles') {
+    if (action === 'sync_profiles') {
       await handleSyncAllProfilesFromTwitter(targets);
       return;
     }
-    if (accountsBulkAction === 'pull_twitter_bio') {
+    if (action === 'pull_twitter_bio') {
       await handlePullTwitterBioForAccounts(targets);
       return;
     }
-    if (accountsBulkAction === 'bridge_all') {
+    if (action === 'bridge_all') {
       await handleBridgeAllEligible(targets);
       return;
     }
-    if (accountsBulkAction === 'apply_bot_label') {
+    if (action === 'apply_bot_label') {
       await handleAddBotLabelToAllAccounts(targets);
       return;
     }
-    if (accountsBulkAction === 'sync_pins') {
+    if (action === 'sync_pins') {
       await handleSyncPinsForAccounts(targets);
       return;
     }
@@ -2947,13 +2930,6 @@ function App() {
   const clearSelectedAccountMappings = () => {
     setSelectedAccountMappingIds([]);
   };
-
-  const showMoreRowsForGroup = useCallback((groupKey: string) => {
-    setVisibleRowsByGroupKey((previous) => ({
-      ...previous,
-      [groupKey]: (previous[groupKey] || ACCOUNT_ROWS_BATCH_SIZE) + ACCOUNT_ROWS_BATCH_SIZE,
-    }));
-  }, []);
 
   const handleUpdateProfileSyncSource = async (mapping: AccountMapping, selectedSource: string) => {
     if (!authHeaders) {
@@ -3220,24 +3196,6 @@ function App() {
     setEditTwitterUsers((previous) =>
       previous.filter((existing) => normalizeTwitterUsername(existing) !== normalizeTwitterUsername(username)),
     );
-  };
-
-  const toggleGroupCollapsed = (groupKey: string) => {
-    setCollapsedGroupKeys((previous) => ({
-      ...previous,
-      [groupKey]: !previous[groupKey],
-    }));
-  };
-
-  const toggleCollapseAllGroups = () => {
-    const shouldCollapse = !allGroupsCollapsed;
-    setCollapsedGroupKeys((previous) => {
-      const next = { ...previous };
-      for (const groupKey of groupKeysForCollapse) {
-        next[groupKey] = shouldCollapse;
-      }
-      return next;
-    });
   };
 
   const handleCreateGroup = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -4206,2863 +4164,2798 @@ function App() {
     );
   }
 
+  const activeTabMeta = dashboardTabs.find((tab) => tab.id === activeTab);
+
   return (
-    <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-      <div className="mb-6">
-        <Card className="border-border/80 bg-card">
-          <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4 sm:p-5">
-            <div className="space-y-1">
-              <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">Dashboard</p>
-              <h1 className="text-xl font-semibold sm:text-2xl">Tweets-2-Bsky Control Panel</h1>
-              <p className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Clock3 className="h-4 w-4" />
-                Next run in <span className="font-mono text-foreground">{countdown}</span>
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Version <span className="font-mono text-foreground">{runtimeVersionLabel}</span>
-                {runtimeBranchLabel ? <span className="ml-2">{runtimeBranchLabel}</span> : null}
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" onClick={cycleThemeMode} title={themeLabel}>
-                {themeIcon}
-                <span className="ml-2 hidden sm:inline">{themeLabel}</span>
-              </Button>
-              {canCreateMappings ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setActiveTab('settings');
-                    openAddAccountSheet();
-                  }}
-                >
-                  <Plus className="mr-2 h-4 w-4" />
-                  Add account
-                </Button>
-              ) : null}
-              <Button size="sm" onClick={runNow} disabled={!canRunNowPermission}>
-                <Play className="mr-2 h-4 w-4" />
-                Run now
-              </Button>
-              {isAdmin && pendingBackfills.length > 0 ? (
-                <Button size="sm" variant="destructive" onClick={clearAllBackfills}>
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Clear queue
-                </Button>
-              ) : null}
-              <Button size="sm" variant="ghost" onClick={handleLogout}>
-                <LogOut className="mr-2 h-4 w-4" />
-                Logout
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {notice ? (
-        <div
-          className={cn(
-            'mb-5 rounded-md border px-4 py-2 text-sm',
-            notice.tone === 'success' &&
-              'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:border-emerald-500/30 dark:text-emerald-300',
-            notice.tone === 'error' &&
-              'border-red-500/40 bg-red-500/10 text-red-700 dark:border-red-500/30 dark:text-red-300',
-            notice.tone === 'info' && 'border-border bg-muted text-muted-foreground',
-          )}
-        >
-          {notice.message}
+    <div className="flex min-h-screen">
+      <aside className="hidden w-56 shrink-0 flex-col border-r border-border bg-card/40 lg:flex">
+        <div className="flex items-center gap-2 px-4 py-4">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-foreground text-xs font-bold text-background">
+            T2B
+          </div>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold leading-tight">Tweets-2-Bsky</p>
+            <p className="truncate text-xs text-muted-foreground">Control panel</p>
+          </div>
         </div>
-      ) : null}
 
-      {activeJobs.length > 0 || (currentStatus && currentStatus.state !== 'idle') ? (
-        <Card className="mb-6">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
-            <p className="text-sm font-semibold">
-              {activeJobs.length > 0
-                ? `${activeJobs.length} job${activeJobs.length === 1 ? '' : 's'} running`
-                : `${formatState(currentStatus?.state || 'processing')} in progress`}
+        <div className="flex-1 overflow-y-auto px-3 py-2">
+          <NavList items={dashboardTabs} activeId={activeTab} onSelect={setActiveTab} />
+        </div>
+
+        <div className="space-y-3 border-t border-border p-3">
+          <div className="space-y-1 px-1 text-xs text-muted-foreground">
+            <p className="flex items-center gap-1.5">
+              <Clock3 className="h-3.5 w-3.5 shrink-0" />
+              Next run <span className="font-mono text-foreground">{countdown}</span>
             </p>
-            {pendingBackfills.length > 0 ? (
-              <p className="text-xs text-muted-foreground">{pendingBackfills.length} backfill(s) queued</p>
-            ) : null}
+            <p
+              className="truncate"
+              title={`${runtimeVersionLabel}${runtimeBranchLabel ? ` ${runtimeBranchLabel}` : ''}`}
+            >
+              <span className="font-mono text-foreground">{runtimeVersionLabel}</span>
+              {runtimeBranchLabel ? <span className="ml-1.5">{runtimeBranchLabel}</span> : null}
+            </p>
           </div>
-          {activeJobs.length > 0 ? (
-            <ul className="divide-y divide-border">
-              {activeJobs.map((job) => (
-                <li key={job.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-4 py-2 text-sm">
-                  <span
-                    className={cn(
-                      'inline-block h-2 w-2 shrink-0 self-center rounded-full',
-                      JOB_KIND_DOT[job.kind] || 'bg-muted-foreground',
-                    )}
-                  />
-                  <span className="font-medium">{JOB_KIND_LABEL[job.kind] || job.kind}</span>
-                  {job.account ? <span className="font-mono text-xs">@{job.account}</span> : null}
-                  {job.target ? <span className="text-xs text-muted-foreground">→ {job.target}</span> : null}
-                  <span className="min-w-0 flex-1 truncate text-muted-foreground">{job.message}</span>
-                  {typeof job.totalCount === 'number' && job.totalCount > 0 ? (
-                    <span className="font-mono text-xs text-muted-foreground">
-                      {job.processedCount ?? 0}/{job.totalCount}
-                    </span>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : currentStatus ? (
-            <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5">
-              <p className="text-sm text-muted-foreground">
-                {currentStatus.currentAccount ? `@${currentStatus.currentAccount} • ` : ''}
-                {currentStatus.message || 'Working through account queue.'}
-              </p>
-              {currentStatus.totalCount ? (
-                <p className="font-mono text-xs text-muted-foreground">
-                  {(currentStatus.processedCount || 0).toLocaleString()} /{' '}
-                  {(currentStatus.totalCount || 0).toLocaleString()} ({progressPercent || 0}%)
-                </p>
-              ) : null}
-            </div>
-          ) : null}
-        </Card>
-      ) : null}
-
-      <div className="mb-6 overflow-x-auto pb-1">
-        <div className="inline-flex min-w-full gap-2 rounded-lg border border-border/70 bg-card p-2 sm:min-w-0">
-          {dashboardTabs.map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                className={cn(
-                  'inline-flex h-11 min-w-[8rem] touch-manipulation items-center justify-center gap-2 rounded-lg px-4 text-sm font-medium',
-                  isActive
-                    ? 'bg-foreground text-background'
-                    : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground',
-                )}
-                onClick={() => setActiveTab(tab.id)}
-                type="button"
-              >
-                <Icon className="h-4 w-4" />
-                {tab.label}
-              </button>
-            );
-          })}
+          <Button variant="outline" size="sm" className="w-full justify-start" onClick={cycleThemeMode}>
+            {themeIcon}
+            <span className="ml-2 truncate">{themeLabel}</span>
+          </Button>
+          <Button variant="ghost" size="sm" className="w-full justify-start" onClick={handleLogout}>
+            <LogOut className="mr-2 h-4 w-4" />
+            Logout
+          </Button>
         </div>
-      </div>
+      </aside>
 
-      {activeTab === 'overview' ? (
-        <section className="space-y-6">
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-            <Card className="">
-              <CardContent className="p-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Mapped Accounts</p>
-                <p className="mt-2 text-2xl font-semibold">{mappings.length}</p>
-              </CardContent>
-            </Card>
-            <Card className="">
-              <CardContent className="p-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Bot-Labeled</p>
-                <p className="mt-2 text-2xl font-semibold">
-                  {mappings.filter((mapping) => mapping.hasBotLabel === true).length}
-                </p>
-              </CardContent>
-            </Card>
-            <Card className="">
-              <CardContent className="p-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Backfill Queue</p>
-                <p className="mt-2 text-2xl font-semibold">{pendingBackfills.length}</p>
-              </CardContent>
-            </Card>
-            <Card className="">
-              <CardContent className="p-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Current State</p>
-                <p className="mt-2 text-2xl font-semibold">{formatState(currentStatus?.state || 'idle')}</p>
-              </CardContent>
-            </Card>
-            <Card className="">
-              <CardContent className="p-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Latest Activity</p>
-                <p className="mt-2 text-sm font-medium text-foreground">
-                  {latestActivity?.created_at
-                    ? new Date(latestActivity.created_at).toLocaleString()
-                    : 'No activity yet'}
-                </p>
-              </CardContent>
-            </Card>
-            <Card className="">
-              <CardContent className="p-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Top Account (Engagement)</p>
-                {topAccount ? (
-                  <div className="mt-2 flex items-center gap-3">
-                    {topAccountProfile?.avatar ? (
-                      <img
-                        className="h-9 w-9 rounded-full border border-border/70 object-cover"
-                        src={topAccountProfile.avatar}
-                        alt={topAccountProfile.handle || topAccount.identifier}
-                        loading="lazy"
-                      />
-                    ) : (
-                      <div className="flex h-9 w-9 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
-                        <UserRound className="h-4 w-4" />
-                      </div>
-                    )}
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold">
-                        @{topAccountProfile?.handle || topAccount.identifier}
-                      </p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {formatCompactNumber(topAccount.score)} interactions • {topAccount.posts} posts
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="mt-2 text-sm text-muted-foreground">No engagement data yet.</p>
-                )}
-              </CardContent>
-            </Card>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="border-b border-border bg-card/60 px-3 py-2 lg:hidden">
+          <div className="mb-2 flex items-center gap-2">
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-foreground text-[10px] font-bold text-background">
+              T2B
+            </div>
+            <p className="text-sm font-semibold">Tweets-2-Bsky</p>
           </div>
-
-          <Card className="">
-            <CardHeader>
-              <CardTitle>Quick Navigation</CardTitle>
-              <CardDescription>Use tabs to focus one workflow at a time, especially on mobile.</CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-wrap gap-2 pt-0">
-              {dashboardTabs
-                .filter((tab) => tab.id !== 'overview')
-                .map((tab) => {
-                  const Icon = tab.icon;
-                  return (
-                    <Button key={`overview-${tab.id}`} variant="outline" onClick={() => setActiveTab(tab.id)}>
-                      <Icon className="mr-2 h-4 w-4" />
-                      Open {tab.label}
-                    </Button>
-                  );
-                })}
-            </CardContent>
-          </Card>
-        </section>
-      ) : null}
-
-      {activeTab === 'accounts' ? (
-        <section className="space-y-6">
-          <Card className="">
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <CardTitle>Active Accounts</CardTitle>
-                  <CardDescription>Organize mappings into folders and collapse/expand groups.</CardDescription>
-                </div>
-                <div className="flex items-center gap-2">
-                  {canCreateMappings ? (
-                    <Button size="sm" variant="outline" onClick={openAddAccountSheet}>
-                      <Plus className="mr-2 h-4 w-4" />
-                      Add account
-                    </Button>
-                  ) : null}
-                  <select
-                    className={cn(selectClassName, 'h-9 w-[260px] px-2 py-1 text-xs')}
-                    value={accountsBulkAction}
-                    disabled={isAnyBulkAccountsActionBusy}
-                    onChange={(event) => setAccountsBulkAction(event.target.value as BulkAccountsAction)}
-                  >
-                    <option value="sync_profiles">Apply profile sync to accounts</option>
-                    <option value="pull_twitter_bio">Pull Twitter bio to accounts</option>
-                    <option value="bridge_all">Apply fediverse bridge to eligible accounts</option>
-                    <option value="apply_bot_label">Apply automated-account label to accounts</option>
-                    <option value="append_bot_name">Apply {'{bot}'} display-name suffix to accounts</option>
-                    <option value="sync_pins">Sync pinned tweets to accounts</option>
-                  </select>
-                  <select
-                    className={cn(selectClassName, 'h-9 w-[200px] px-2 py-1 text-xs')}
-                    value={accountsBulkScope}
-                    disabled={isAnyBulkAccountsActionBusy}
-                    onChange={(event) => setAccountsBulkScope(event.target.value as 'all' | 'selected')}
-                  >
-                    <option value="all">Target all manageable</option>
-                    <option value="selected">Target selected only</option>
-                  </select>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={
-                      isAnyBulkAccountsActionBusy ||
-                      (accountsBulkScope === 'selected' && selectedManageableMappingsCount === 0)
-                    }
-                    onClick={() => {
-                      void handleApplyAllAccountsAction();
-                    }}
-                  >
-                    {isAnyBulkAccountsActionBusy ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : accountsBulkAction === 'pull_twitter_bio' ? (
-                      <Download className="mr-2 h-4 w-4" />
-                    ) : accountsBulkAction === 'bridge_all' ? (
-                      <Link2 className="mr-2 h-4 w-4" />
-                    ) : accountsBulkAction === 'sync_profiles' ? (
-                      <RefreshCw className="mr-2 h-4 w-4" />
-                    ) : accountsBulkAction === 'sync_pins' ? (
-                      <Pin className="mr-2 h-4 w-4" />
-                    ) : (
-                      <Bot className="mr-2 h-4 w-4" />
+          <div className="overflow-x-auto pb-0.5">
+            <div className="inline-flex min-w-full gap-1.5 sm:min-w-0">
+              {dashboardTabs.map((tab) => {
+                const Icon = tab.icon;
+                const isActive = activeTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    className={cn(
+                      'inline-flex h-9 touch-manipulation items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm font-medium',
+                      isActive
+                        ? 'bg-foreground text-background'
+                        : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground',
                     )}
-                    {accountsBulkAction === 'sync_profiles'
-                      ? 'Apply sync all'
-                      : accountsBulkAction === 'pull_twitter_bio'
-                        ? 'Apply pull bio'
-                        : accountsBulkAction === 'bridge_all'
-                          ? 'Apply bridge all'
-                          : accountsBulkAction === 'apply_bot_label'
-                            ? 'Apply bot label all'
-                            : accountsBulkAction === 'sync_pins'
-                              ? 'Apply pin sync all'
-                              : 'Apply append {bot} all'}
-                  </Button>
-                  {isBridgeAllBusy && bridgeAllProgress ? (
-                    <Badge variant="outline" className="max-w-[280px] truncate">
-                      {bridgeAllProgress.currentHandle
-                        ? `Now bridging ${bridgeAllProgress.currentHandle}`
-                        : 'Preparing bridge-all...'}
-                    </Badge>
-                  ) : null}
-                  <Badge variant="outline">{accountMappingsForView.length} configured</Badge>
-                  <Badge variant={selectedManageableMappingsCount > 0 ? 'success' : 'outline'}>
-                    {selectedManageableMappingsCount} selected
-                  </Badge>
-                  <Badge variant="outline">{botLabeledMappingsForView.length} bot-labeled</Badge>
-                </div>
+                    onClick={() => setActiveTab(tab.id)}
+                    type="button"
+                  >
+                    <Icon className="h-4 w-4" />
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        <main className="flex-1">
+          <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+            <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h1 className="text-xl font-semibold sm:text-2xl">{activeTabMeta?.label ?? 'Dashboard'}</h1>
+                <p className="text-sm text-muted-foreground">{activeTabMeta?.description}</p>
               </div>
-            </CardHeader>
-            <CardContent className="space-y-4 pt-0">
-              {canManageGroupsPermission ? (
-                <form
-                  className="rounded-lg border border-border/70 bg-muted/30 p-3"
-                  onSubmit={(event) => {
-                    void handleCreateGroup(event);
-                  }}
-                >
-                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Create Folder
+              <div className="flex flex-wrap items-center gap-2">
+                {canCreateMappings ? (
+                  <Button size="sm" variant="outline" onClick={openAddAccountSheet}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Add account
+                  </Button>
+                ) : null}
+                <Button size="sm" onClick={runNow} disabled={!canRunNowPermission}>
+                  <Play className="mr-2 h-4 w-4" />
+                  Run now
+                </Button>
+                {isAdmin && pendingBackfills.length > 0 ? (
+                  <Button size="sm" variant="destructive" onClick={clearAllBackfills}>
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Clear queue
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+
+            {notice ? (
+              <div
+                className={cn(
+                  'mb-5 rounded-md border px-4 py-2 text-sm',
+                  notice.tone === 'success' &&
+                    'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:border-emerald-500/30 dark:text-emerald-300',
+                  notice.tone === 'error' &&
+                    'border-red-500/40 bg-red-500/10 text-red-700 dark:border-red-500/30 dark:text-red-300',
+                  notice.tone === 'info' && 'border-border bg-muted text-muted-foreground',
+                )}
+              >
+                {notice.message}
+              </div>
+            ) : null}
+
+            {activeJobs.length > 0 || (currentStatus && currentStatus.state !== 'idle') ? (
+              <Card className="mb-6">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
+                  <p className="text-sm font-semibold">
+                    {activeJobs.length > 0
+                      ? `${activeJobs.length} job${activeJobs.length === 1 ? '' : 's'} running`
+                      : `${formatState(currentStatus?.state || 'processing')} in progress`}
                   </p>
-                  <div className="flex flex-wrap items-end gap-2">
-                    <div className="min-w-[180px] flex-1 space-y-1">
-                      <Label htmlFor="accounts-group-name">Folder name</Label>
-                      <Input
-                        id="accounts-group-name"
-                        value={newGroupName}
-                        onChange={(event) => setNewGroupName(event.target.value)}
-                        placeholder="Gaming, News, Sports..."
-                      />
-                    </div>
-                    <div className="w-20 space-y-1">
-                      <Label htmlFor="accounts-group-emoji">Emoji</Label>
-                      <Input
-                        id="accounts-group-emoji"
-                        value={newGroupEmoji}
-                        onChange={(event) => setNewGroupEmoji(event.target.value)}
-                        placeholder="📁"
-                        maxLength={8}
-                      />
-                    </div>
-                    <Button type="submit" size="sm" disabled={isBusy || newGroupName.trim().length === 0}>
-                      <Plus className="mr-2 h-4 w-4" />
-                      Create
-                    </Button>
-                  </div>
-                </form>
-              ) : null}
-
-              <div className="grid gap-2 md:grid-cols-[1fr_auto]">
-                <div className="space-y-1">
-                  <Label htmlFor="accounts-search">Search accounts</Label>
-                  <Input
-                    id="accounts-search"
-                    value={accountsSearchQuery}
-                    onChange={(event) => setAccountsSearchQuery(event.target.value)}
-                    placeholder="Find by @username, owner, Bluesky handle, or folder"
-                  />
-                  {normalizedAccountsQuery ? (
-                    <p className="text-xs text-muted-foreground">
-                      {accountMatchesCount} result{accountMatchesCount === 1 ? '' : 's'} ranked by relevance
-                    </p>
-                  ) : null}
-                  {isAdmin ? (
-                    <div className="mt-2 space-y-1">
-                      <Label htmlFor="accounts-creator-filter">Created by user</Label>
-                      <select
-                        id="accounts-creator-filter"
-                        className={cn(selectClassName, 'h-9 text-xs')}
-                        value={accountsCreatorFilter}
-                        onChange={(event) => setAccountsCreatorFilter(event.target.value)}
-                      >
-                        <option value="all">All users</option>
-                        {managedUsers.map((user) => (
-                          <option key={`creator-filter-${user.id}`} value={user.id}>
-                            {user.username || user.email || user.id}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                  {pendingBackfills.length > 0 ? (
+                    <p className="text-xs text-muted-foreground">{pendingBackfills.length} backfill(s) queued</p>
                   ) : null}
                 </div>
-                <div className="flex flex-wrap items-end justify-end gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={filteredManageableMappingIds.length === 0}
-                    onClick={() => toggleSelectAllFilteredManageable(!allFilteredManageableSelected)}
-                  >
-                    {allFilteredManageableSelected
-                      ? `Unselect page (${filteredManageableMappingIds.length})`
-                      : `Select page (${filteredManageableMappingIds.length})`}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={selectedManageableMappingsCount === 0}
-                    onClick={clearSelectedAccountMappings}
-                  >
-                    Clear selected
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setShowAccountAvatars((previous) => !previous)}>
-                    {showAccountAvatars ? 'Hide avatars (faster)' : 'Show avatars'}
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setShowAccountBios((previous) => !previous)}>
-                    {showAccountBios ? 'Hide bios (faster)' : 'Show bios'}
-                  </Button>
-                  {accountsViewMode === 'grouped' ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={toggleCollapseAllGroups}
-                      disabled={groupKeysForCollapse.length === 0}
-                    >
-                      {allGroupsCollapsed ? 'Expand all' : 'Collapse all'}
-                    </Button>
-                  ) : null}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setAccountsViewMode((previous) => (previous === 'grouped' ? 'global' : 'grouped'))}
-                  >
-                    {accountsViewMode === 'grouped' ? 'View all' : 'Grouped view'}
-                  </Button>
-                </div>
-              </div>
-
-              <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                      Fediverse Bridge
-                    </p>
+                {activeJobs.length > 0 ? (
+                  <ul className="divide-y divide-border">
+                    {activeJobs.map((job) => (
+                      <li key={job.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-4 py-2 text-sm">
+                        <span
+                          className={cn(
+                            'inline-block h-2 w-2 shrink-0 self-center rounded-full',
+                            JOB_KIND_DOT[job.kind] || 'bg-muted-foreground',
+                          )}
+                        />
+                        <span className="font-medium">{JOB_KIND_LABEL[job.kind] || job.kind}</span>
+                        {job.account ? <span className="font-mono text-xs">@{job.account}</span> : null}
+                        {job.target ? <span className="text-xs text-muted-foreground">→ {job.target}</span> : null}
+                        <span className="min-w-0 flex-1 truncate text-muted-foreground">{job.message}</span>
+                        {typeof job.totalCount === 'number' && job.totalCount > 0 ? (
+                          <span className="font-mono text-xs text-muted-foreground">
+                            {job.processedCount ?? 0}/{job.totalCount}
+                          </span>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : currentStatus ? (
+                  <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5">
                     <p className="text-sm text-muted-foreground">
-                      {bridgedMappingsForView.length} bridged - {bridgeEligibleUnbridgedMappings.length} eligible to
-                      bridge now
+                      {currentStatus.currentAccount ? `@${currentStatus.currentAccount} • ` : ''}
+                      {currentStatus.message || 'Working through account queue.'}
                     </p>
-                  </div>
-                  <Badge variant="outline">{bridgedMappingsForView.length} bridged</Badge>
-                </div>
-                {bridgedMappingsForView.length > 0 ? (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {bridgedMappingsForView.slice(0, 24).map((mapping) => {
-                      const profile = getProfileForActor(mapping.bskyIdentifier);
-                      const handle = profile?.handle || mapping.bskyIdentifier;
-                      return (
-                        <Badge key={`bridged-list-${mapping.id}`} variant="success">
-                          <Link2 className="mr-1 h-3 w-3" />@{handle}
-                        </Badge>
-                      );
-                    })}
-                    {bridgedMappingsForView.length > 24 ? (
-                      <Badge variant="outline">+{bridgedMappingsForView.length - 24} more</Badge>
+                    {currentStatus.totalCount ? (
+                      <p className="font-mono text-xs text-muted-foreground">
+                        {(currentStatus.processedCount || 0).toLocaleString()} /{' '}
+                        {(currentStatus.totalCount || 0).toLocaleString()} ({progressPercent || 0}%)
+                      </p>
                     ) : null}
                   </div>
-                ) : (
-                  <p className="mt-2 text-xs text-muted-foreground">No bridged accounts yet.</p>
-                )}
-              </div>
+                ) : null}
+              </Card>
+            ) : null}
 
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
-                <p className="text-xs text-muted-foreground">
-                  Showing {currentAccountsPageStart}-{currentAccountsPageEnd} of {accountMatchesCount} account
-                  {accountMatchesCount === 1 ? '' : 's'}
-                </p>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">Per page</span>
-                  <select
-                    className={cn(selectClassName, 'h-8 w-24 px-2 py-1 text-xs')}
-                    value={accountsPageSize}
-                    onChange={(event) => setAccountsPageSize(Number(event.target.value) || ACCOUNT_PAGE_SIZE_DEFAULT)}
-                  >
-                    <option value={25}>25</option>
-                    <option value={50}>50</option>
-                    <option value={100}>100</option>
-                    <option value={200}>200</option>
-                  </select>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={accountsPage <= 1}
-                    onClick={() => setAccountsPage((previous) => Math.max(1, previous - 1))}
-                  >
-                    <ChevronLeft className="h-4 w-4" />
-                  </Button>
-                  <span className="w-24 text-center text-xs text-muted-foreground">
-                    Page {accountsPage}/{accountsPageCount}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={accountsPage >= accountsPageCount}
-                    onClick={() => setAccountsPage((previous) => Math.min(accountsPageCount, previous + 1))}
-                  >
-                    <ChevronRight className="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
-
-              {accountMatchesCount === 0 ? (
-                <div className="rounded-lg border border-dashed border-border/70 p-6 text-center text-sm text-muted-foreground">
-                  {normalizedAccountsQuery ? 'No accounts matched this search.' : 'No mappings yet.'}
-                  {canCreateMappings ? (
-                    <div className="mt-3">
-                      <Button size="sm" variant="outline" onClick={openAddAccountSheet}>
-                        <Plus className="mr-2 h-4 w-4" />
-                        Create your first account
-                      </Button>
-                    </div>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {pagedGroupedMappings.map((group, groupIndex) => {
-                    const canCollapseGroup = accountsViewMode === 'grouped';
-                    const collapsed = canCollapseGroup ? collapsedGroupKeys[group.key] === true : false;
-                    const visibleRows = visibleRowsByGroupKey[group.key] || ACCOUNT_ROWS_BATCH_SIZE;
-                    const renderedMappings = group.mappings.slice(0, visibleRows);
-                    const remainingMappingsCount = Math.max(0, group.mappings.length - renderedMappings.length);
-
-                    return (
-                      <div key={group.key} className="cv-auto overflow-hidden rounded-lg border border-border bg-card">
-                        <button
-                          className={cn(
-                            'group flex w-full items-center justify-between bg-muted/40 px-3 py-2 text-left',
-                            canCollapseGroup ? 'hover:bg-muted/70' : '',
+            {activeTab === 'overview' ? (
+              <section className="space-y-6">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+                  <Card className="">
+                    <CardContent className="p-4">
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Mapped Accounts</p>
+                      <p className="mt-2 text-2xl font-semibold">{mappings.length}</p>
+                    </CardContent>
+                  </Card>
+                  <Card className="">
+                    <CardContent className="p-4">
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Bot-Labeled</p>
+                      <p className="mt-2 text-2xl font-semibold">
+                        {mappings.filter((mapping) => mapping.hasBotLabel === true).length}
+                      </p>
+                    </CardContent>
+                  </Card>
+                  <Card className="">
+                    <CardContent className="p-4">
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Backfill Queue</p>
+                      <p className="mt-2 text-2xl font-semibold">{pendingBackfills.length}</p>
+                    </CardContent>
+                  </Card>
+                  <Card className="">
+                    <CardContent className="p-4">
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Current State</p>
+                      <p className="mt-2 text-2xl font-semibold">{formatState(currentStatus?.state || 'idle')}</p>
+                    </CardContent>
+                  </Card>
+                  <Card className="">
+                    <CardContent className="p-4">
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Latest Activity</p>
+                      <p className="mt-2 text-sm font-medium text-foreground">
+                        {latestActivity?.created_at
+                          ? new Date(latestActivity.created_at).toLocaleString()
+                          : 'No activity yet'}
+                      </p>
+                    </CardContent>
+                  </Card>
+                  <Card className="">
+                    <CardContent className="p-4">
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Top Account (Engagement)</p>
+                      {topAccount ? (
+                        <div className="mt-2 flex items-center gap-3">
+                          {topAccountProfile?.avatar ? (
+                            <img
+                              className="h-9 w-9 rounded-full border border-border/70 object-cover"
+                              src={topAccountProfile.avatar}
+                              alt={topAccountProfile.handle || topAccount.identifier}
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div className="flex h-9 w-9 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
+                              <UserRound className="h-4 w-4" />
+                            </div>
                           )}
-                          onClick={() => {
-                            if (canCollapseGroup) {
-                              toggleGroupCollapsed(group.key);
-                            }
-                          }}
-                          type="button"
-                        >
-                          <div className="flex items-center gap-2">
-                            <Folder className="h-4 w-4 text-muted-foreground" />
-                            <span className="text-base">{group.emoji}</span>
-                            <span className="font-medium">{group.name}</span>
-                            <Badge variant="outline">{group.mappings.length}</Badge>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold">
+                              @{topAccountProfile?.handle || topAccount.identifier}
+                            </p>
+                            <p className="truncate text-xs text-muted-foreground">
+                              {formatCompactNumber(topAccount.score)} interactions • {topAccount.posts} posts
+                            </p>
                           </div>
-                          {canCollapseGroup ? (
-                            <ChevronDown className={cn('h-4 w-4', collapsed ? '-rotate-90' : 'rotate-0')} />
-                          ) : null}
-                        </button>
+                        </div>
+                      ) : (
+                        <p className="mt-2 text-sm text-muted-foreground">No engagement data yet.</p>
+                      )}
+                    </CardContent>
+                  </Card>
+                </div>
 
-                        <div
+                <Card className="">
+                  <CardHeader>
+                    <CardTitle>Quick Navigation</CardTitle>
+                    <CardDescription>Use tabs to focus one workflow at a time, especially on mobile.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-wrap gap-2 pt-0">
+                    {dashboardTabs
+                      .filter((tab) => tab.id !== 'overview')
+                      .map((tab) => {
+                        const Icon = tab.icon;
+                        return (
+                          <Button key={`overview-${tab.id}`} variant="outline" onClick={() => setActiveTab(tab.id)}>
+                            <Icon className="mr-2 h-4 w-4" />
+                            Open {tab.label}
+                          </Button>
+                        );
+                      })}
+                  </CardContent>
+                </Card>
+              </section>
+            ) : null}
+
+            {activeTab === 'accounts' ? (
+              <section className="grid gap-6 lg:grid-cols-[240px_1fr]">
+                <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
+                  <Card>
+                    <CardContent className="space-y-0.5 p-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedFolderKey('__all__')}
+                        className={cn(
+                          'flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors',
+                          selectedFolderKey === '__all__'
+                            ? 'bg-foreground text-background'
+                            : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                        )}
+                      >
+                        <Folder className="h-4 w-4 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">All accounts</span>
+                        <span className="text-xs opacity-70">{accountMappingsForView.length}</span>
+                      </button>
+                      {groupedMappings.map((group) => (
+                        <button
+                          key={group.key}
+                          type="button"
+                          onClick={() => setSelectedFolderKey(group.key)}
                           className={cn(
-                            'grid',
-                            collapsed ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100',
+                            'flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors',
+                            selectedFolderKey === group.key
+                              ? 'bg-foreground text-background'
+                              : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                           )}
                         >
-                          <div className="min-h-0 overflow-hidden">
-                            {group.mappings.length === 0 ? (
-                              <div className="border-t border-border/60 p-4 text-sm text-muted-foreground">
-                                No accounts in this folder yet.
-                              </div>
-                            ) : (
-                              <>
-                                <div className="overflow-x-auto">
-                                  <table className="min-w-full text-left text-sm">
-                                    <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
-                                      <tr>
-                                        <th className="px-2 py-3">Owner</th>
-                                        {isAdmin ? <th className="px-2 py-3">Created By</th> : null}
-                                        <th className="px-2 py-3">Twitter Sources</th>
-                                        <th className="px-2 py-3">Bluesky Target</th>
-                                        <th className="px-2 py-3">Status</th>
-                                        <th className="px-2 py-3 text-right">Actions</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {renderedMappings.map((mapping) => {
-                                        const queued = isBackfillQueued(mapping.id);
-                                        const active = isBackfillActive(mapping.id);
-                                        const queuePosition = getBackfillEntry(mapping.id)?.position;
-                                        const profile = getProfileForActor(mapping.bskyIdentifier);
-                                        const profileHandle = profile?.handle || mapping.bskyIdentifier;
-                                        const profileName = profile?.displayName || profileHandle;
-                                        const profileBio = showAccountBios ? profile?.description?.trim() || '' : '';
-                                        const profileUrl = `https://bsky.app/profile/${profileHandle}`;
-                                        const canManageThisMapping = canManageMapping(mapping);
-                                        const canUseFediverseBridge = canBridgeToFediverse(profile?.createdAt);
-                                        const bridgeStatus = fediverseBridgeStatusByMappingId[mapping.id];
-                                        const isFediverseBridged = bridgeStatus?.bridged === true;
-                                        const bridging = bridgingMappingId === mapping.id;
-                                        const mappingGroup = getMappingGroupMeta(mapping);
-                                        const syncingProfile = syncingProfileMappingId === mapping.id;
-                                        const pullingBio = pullingBioMappingId === mapping.id;
-                                        const isSelectedForBulk = selectedAccountMappingIdSet.has(mapping.id);
+                          <span className="shrink-0">{group.emoji}</span>
+                          <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                          <span className="text-xs opacity-70">{group.mappings.length}</span>
+                        </button>
+                      ))}
+                    </CardContent>
+                  </Card>
 
-                                        return (
-                                          <tr
-                                            key={mapping.id}
-                                            className="interactive-row border-b border-border/60 last:border-0"
-                                          >
-                                            <td className="px-2 py-3 align-top">
-                                              <div className="flex items-center gap-2 font-medium">
-                                                <UserRound className="h-4 w-4 text-muted-foreground" />
-                                                {mapping.owner || 'System'}
-                                              </div>
-                                            </td>
-                                            {isAdmin ? (
-                                              <td className="px-2 py-3 align-top text-xs text-muted-foreground">
-                                                {mapping.createdByLabel ||
-                                                  mapping.createdByUser?.username ||
-                                                  mapping.createdByUser?.email ||
-                                                  '--'}
-                                              </td>
-                                            ) : null}
-                                            <td className="px-2 py-3 align-top">
-                                              <div className="flex flex-wrap gap-2">
-                                                {mapping.twitterUsernames.map((username) => (
-                                                  <Badge key={username} variant="secondary">
-                                                    @{username}
-                                                  </Badge>
-                                                ))}
-                                              </div>
-                                            </td>
-                                            <td className="px-2 py-3 align-top">
-                                              <div className="flex items-center gap-2">
-                                                {showAccountAvatars && profile?.avatar ? (
-                                                  <img
-                                                    className="h-8 w-8 rounded-full border border-border/70 object-cover"
-                                                    src={profile.avatar}
-                                                    alt={profileName}
-                                                    loading="lazy"
-                                                    decoding="async"
-                                                    fetchPriority="low"
-                                                  />
-                                                ) : (
-                                                  <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
-                                                    <UserRound className="h-4 w-4" />
-                                                  </div>
-                                                )}
-                                                <div className="min-w-0">
-                                                  <p className="truncate text-sm font-medium">{profileName}</p>
-                                                  <a
-                                                    className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-                                                    href={profileUrl}
-                                                    target="_blank"
-                                                    rel="noreferrer"
-                                                    title={`Open @${profileHandle} on Bluesky`}
-                                                  >
-                                                    {profileHandle}
-                                                    <ArrowUpRight className="ml-1 h-3 w-3 shrink-0" />
-                                                  </a>
-                                                  {profileBio ? (
-                                                    <p
-                                                      className="mt-1 overflow-hidden text-xs text-muted-foreground"
-                                                      style={{
-                                                        display: '-webkit-box',
-                                                        WebkitLineClamp: 2,
-                                                        WebkitBoxOrient: 'vertical',
-                                                      }}
-                                                      title={profileBio}
-                                                    >
-                                                      {profileBio}
-                                                    </p>
-                                                  ) : null}
-                                                </div>
-                                              </div>
-                                            </td>
-                                            <td className="px-2 py-3 align-top">
-                                              <div className="flex flex-wrap items-center gap-1.5">
-                                                {active ? (
-                                                  <Badge variant="warning">Backfilling</Badge>
-                                                ) : queued ? (
-                                                  <Badge variant="warning">
-                                                    Queued {queuePosition ? `#${queuePosition}` : ''}
-                                                  </Badge>
-                                                ) : (
-                                                  <Badge variant="success">Active</Badge>
-                                                )}
-                                                {isFediverseBridged ? (
-                                                  <Badge variant="success">
-                                                    <Link2 className="mr-1 h-3 w-3" />
-                                                    Bridged
-                                                  </Badge>
-                                                ) : null}
-                                                {mapping.hasBotLabel ? (
-                                                  <Badge variant="outline">
-                                                    <Bot className="mr-1 h-3 w-3" />
-                                                    Bot
-                                                  </Badge>
-                                                ) : null}
-                                              </div>
-                                            </td>
-                                            <td className="px-2 py-3 align-top">
-                                              <div className="flex flex-wrap justify-end gap-1">
-                                                {canManageThisMapping ? (
-                                                  <label className="inline-flex items-center gap-1 rounded border border-border/70 px-2 py-1 text-xs text-muted-foreground">
-                                                    <input
-                                                      type="checkbox"
-                                                      className="h-3.5 w-3.5 rounded border-border"
-                                                      checked={isSelectedForBulk}
-                                                      disabled={isAnyBulkAccountsActionBusy}
-                                                      onChange={(event) =>
-                                                        toggleAccountMappingSelection(mapping.id, event.target.checked)
-                                                      }
-                                                    />
-                                                    Select
-                                                  </label>
-                                                ) : null}
-                                                <select
-                                                  className={cn(selectClassName, 'h-9 w-44 px-2 py-1 text-xs')}
-                                                  value={mappingGroup.key}
-                                                  disabled={
-                                                    !canManageThisMapping ||
-                                                    !canManageGroupsPermission ||
-                                                    isBridgeAllBusy ||
-                                                    isAnyBulkAccountsActionBusy ||
-                                                    isSyncAllProfilesBusy ||
-                                                    Boolean(syncingProfileMappingId)
-                                                  }
-                                                  onChange={(event) => {
-                                                    void handleAssignMappingGroup(mapping, event.target.value);
-                                                  }}
-                                                >
-                                                  <option value={DEFAULT_GROUP_KEY}>
-                                                    {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
-                                                  </option>
-                                                  {groupOptions
-                                                    .filter((option) => option.key !== DEFAULT_GROUP_KEY)
-                                                    .map((option) => (
-                                                      <option
-                                                        key={`group-move-${mapping.id}-${option.key}`}
-                                                        value={option.key}
-                                                      >
-                                                        {option.emoji} {option.name}
-                                                      </option>
-                                                    ))}
-                                                </select>
-                                                {canManageThisMapping ? (
-                                                  <>
-                                                    {mapping.twitterUsernames.length > 1 ? (
-                                                      <select
-                                                        className={cn(selectClassName, 'h-9 w-44 px-2 py-1 text-xs')}
-                                                        value={mapping.profileSyncSourceUsername || ''}
-                                                        disabled={
-                                                          isBridgeAllBusy ||
-                                                          isAnyBulkAccountsActionBusy ||
-                                                          isSyncAllProfilesBusy ||
-                                                          Boolean(syncingProfileMappingId) ||
-                                                          Boolean(bridgingMappingId)
-                                                        }
-                                                        onChange={(event) => {
-                                                          void handleUpdateProfileSyncSource(
-                                                            mapping,
-                                                            event.target.value,
-                                                          );
-                                                        }}
-                                                      >
-                                                        <option value="">Select sync source</option>
-                                                        {mapping.twitterUsernames.map((username) => (
-                                                          <option
-                                                            key={`sync-source-${mapping.id}-${username}`}
-                                                            value={username}
-                                                          >
-                                                            @{username}
-                                                          </option>
-                                                        ))}
-                                                      </select>
-                                                    ) : null}
-                                                    <Button
-                                                      variant="outline"
-                                                      size="sm"
-                                                      disabled={
-                                                        isBridgeAllBusy ||
-                                                        isAnyBulkAccountsActionBusy ||
-                                                        Boolean(syncingProfileMappingId)
-                                                      }
-                                                      onClick={() => startEditMapping(mapping)}
-                                                    >
-                                                      Edit
-                                                    </Button>
-                                                    <Button
-                                                      variant="outline"
-                                                      size="sm"
-                                                      disabled={
-                                                        isBridgeAllBusy ||
-                                                        isAnyBulkAccountsActionBusy ||
-                                                        Boolean(syncingProfileMappingId) ||
-                                                        Boolean(pullingBioMappingId) ||
-                                                        isSyncAllProfilesBusy ||
-                                                        Boolean(bridgingMappingId)
-                                                      }
-                                                      onClick={() => {
-                                                        void handleSyncProfileFromTwitter(mapping);
-                                                      }}
-                                                    >
-                                                      {syncingProfile ? (
-                                                        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                                                      ) : (
-                                                        <RefreshCw className="mr-1 h-4 w-4" />
-                                                      )}
-                                                      Sync Profile
-                                                    </Button>
-                                                    <Button
-                                                      variant="outline"
-                                                      size="sm"
-                                                      disabled={
-                                                        isBridgeAllBusy ||
-                                                        isAnyBulkAccountsActionBusy ||
-                                                        Boolean(syncingProfileMappingId) ||
-                                                        Boolean(pullingBioMappingId) ||
-                                                        isSyncAllProfilesBusy ||
-                                                        Boolean(bridgingMappingId)
-                                                      }
-                                                      onClick={() => {
-                                                        void handlePullTwitterBio(mapping);
-                                                      }}
-                                                    >
-                                                      {pullingBio ? (
-                                                        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                                                      ) : (
-                                                        <Download className="mr-1 h-4 w-4" />
-                                                      )}
-                                                      Pull Twitter Bio
-                                                    </Button>
-                                                    {canUseFediverseBridge && !isFediverseBridged ? (
-                                                      <Button
-                                                        variant="outline"
-                                                        size="sm"
-                                                        disabled={
-                                                          isBridgeAllBusy ||
-                                                          isAnyBulkAccountsActionBusy ||
-                                                          Boolean(bridgingMappingId) ||
-                                                          Boolean(syncingProfileMappingId) ||
-                                                          isSyncAllProfilesBusy
-                                                        }
-                                                        onClick={() => {
-                                                          void handleBridgeToFediverse(mapping);
-                                                        }}
-                                                      >
-                                                        {bridging ? (
-                                                          <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                                                        ) : (
-                                                          <Repeat2 className="mr-1 h-4 w-4" />
-                                                        )}
-                                                        Bridge to Fediverse
-                                                      </Button>
-                                                    ) : null}
-                                                    {canQueueBackfillsPermission ? (
-                                                      <>
-                                                        <Button
-                                                          variant="outline"
-                                                          size="sm"
-                                                          disabled={
-                                                            isBridgeAllBusy ||
-                                                            isAnyBulkAccountsActionBusy ||
-                                                            Boolean(syncingProfileMappingId) ||
-                                                            isSyncAllProfilesBusy
-                                                          }
-                                                          onClick={() => {
-                                                            void requestBackfill(mapping.id, 'normal');
-                                                          }}
-                                                        >
-                                                          Add to queue
-                                                        </Button>
-                                                        <Button
-                                                          variant="outline"
-                                                          size="sm"
-                                                          disabled={
-                                                            isBridgeAllBusy ||
-                                                            isAnyBulkAccountsActionBusy ||
-                                                            Boolean(syncingProfileMappingId) ||
-                                                            isSyncAllProfilesBusy
-                                                          }
-                                                          onClick={() => {
-                                                            void requestPinSync(mapping.id);
-                                                          }}
-                                                        >
-                                                          Sync Pin
-                                                        </Button>
-                                                        {queued && !active ? (
-                                                          <Button
-                                                            variant="ghost"
-                                                            size="sm"
-                                                            disabled={
-                                                              isBridgeAllBusy ||
-                                                              isAnyBulkAccountsActionBusy ||
-                                                              Boolean(syncingProfileMappingId) ||
-                                                              isSyncAllProfilesBusy
-                                                            }
-                                                            onClick={() => {
-                                                              void cancelQueuedBackfill(mapping.id);
-                                                            }}
-                                                          >
-                                                            Cancel queue
-                                                          </Button>
-                                                        ) : null}
-                                                        {isAdmin ? (
-                                                          <Button
-                                                            variant="subtle"
-                                                            size="sm"
-                                                            disabled={
-                                                              isBridgeAllBusy ||
-                                                              isAnyBulkAccountsActionBusy ||
-                                                              Boolean(syncingProfileMappingId) ||
-                                                              isSyncAllProfilesBusy
-                                                            }
-                                                            onClick={() => {
-                                                              void requestBackfill(mapping.id, 'reset');
-                                                            }}
-                                                          >
-                                                            Reset + Backfill
-                                                          </Button>
-                                                        ) : null}
-                                                      </>
-                                                    ) : null}
-                                                    {isAdmin ? (
-                                                      <Button
-                                                        variant="destructive"
-                                                        size="sm"
-                                                        disabled={
-                                                          isBridgeAllBusy ||
-                                                          isAnyBulkAccountsActionBusy ||
-                                                          Boolean(syncingProfileMappingId) ||
-                                                          isSyncAllProfilesBusy
-                                                        }
-                                                        onClick={() => {
-                                                          void handleDeleteAllPosts(mapping.id);
-                                                        }}
-                                                      >
-                                                        Delete Posts
-                                                      </Button>
-                                                    ) : null}
-                                                  </>
-                                                ) : null}
-                                                {canManageThisMapping ? (
-                                                  <Button
-                                                    variant="ghost"
-                                                    size="sm"
-                                                    disabled={
-                                                      isBridgeAllBusy ||
-                                                      isAnyBulkAccountsActionBusy ||
-                                                      Boolean(syncingProfileMappingId) ||
-                                                      isSyncAllProfilesBusy
-                                                    }
-                                                    onClick={() => {
-                                                      void handleDeleteMapping(mapping.id);
-                                                    }}
-                                                  >
-                                                    <Trash2 className="mr-1 h-4 w-4" />
-                                                    Remove
-                                                  </Button>
-                                                ) : null}
-                                              </div>
-                                            </td>
-                                          </tr>
-                                        );
-                                      })}
-                                    </tbody>
-                                  </table>
-                                </div>
-                                {remainingMappingsCount > 0 ? (
-                                  <div className="border-t border-border/60 px-3 py-2">
-                                    <Button size="sm" variant="outline" onClick={() => showMoreRowsForGroup(group.key)}>
-                                      Show {Math.min(ACCOUNT_ROWS_BATCH_SIZE, remainingMappingsCount)} more (
-                                      {remainingMappingsCount} remaining)
+                  {canManageGroupsPermission ? (
+                    <Card>
+                      <details>
+                        <summary className="cursor-pointer list-none px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground">
+                          Manage folders
+                        </summary>
+                        <div className="space-y-3 border-t border-border/70 p-3">
+                          <form
+                            className="space-y-2"
+                            onSubmit={(event) => {
+                              void handleCreateGroup(event);
+                            }}
+                          >
+                            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                              New folder
+                            </p>
+                            <div className="flex items-end gap-2">
+                              <div className="w-16 space-y-1">
+                                <Label htmlFor="accounts-group-emoji">Emoji</Label>
+                                <Input
+                                  id="accounts-group-emoji"
+                                  value={newGroupEmoji}
+                                  onChange={(event) => setNewGroupEmoji(event.target.value)}
+                                  placeholder="📁"
+                                  maxLength={8}
+                                />
+                              </div>
+                              <div className="flex-1 space-y-1">
+                                <Label htmlFor="accounts-group-name">Name</Label>
+                                <Input
+                                  id="accounts-group-name"
+                                  value={newGroupName}
+                                  onChange={(event) => setNewGroupName(event.target.value)}
+                                  placeholder="Gaming, News..."
+                                />
+                              </div>
+                              <Button
+                                type="submit"
+                                size="icon"
+                                variant="outline"
+                                disabled={isBusy || newGroupName.trim().length === 0}
+                                aria-label="Create folder"
+                              >
+                                <Plus className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </form>
+
+                          {reusableGroupOptions.length > 0 ? (
+                            <div className="space-y-2 border-t border-border/70 pt-3">
+                              {reusableGroupOptions.map((group) => {
+                                const draft = groupDraftsByKey[group.key] || { name: group.name, emoji: group.emoji };
+                                return (
+                                  <div key={`group-manager-${group.key}`} className="flex items-end gap-1.5">
+                                    <div className="w-14">
+                                      <Input
+                                        aria-label="Folder emoji"
+                                        value={draft.emoji}
+                                        onChange={(event) => updateGroupDraft(group.key, 'emoji', event.target.value)}
+                                        maxLength={8}
+                                        className="px-2"
+                                      />
+                                    </div>
+                                    <Input
+                                      aria-label="Folder name"
+                                      className="min-w-0 flex-1"
+                                      value={draft.name}
+                                      onChange={(event) => updateGroupDraft(group.key, 'name', event.target.value)}
+                                    />
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      disabled={isGroupActionBusy || !draft.name.trim()}
+                                      title="Save folder"
+                                      onClick={() => {
+                                        void handleRenameGroup(group.key);
+                                      }}
+                                    >
+                                      <Save className="h-4 w-4" />
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="text-red-600 hover:text-red-500 dark:text-red-300 dark:hover:text-red-200"
+                                      disabled={isGroupActionBusy}
+                                      title="Delete folder"
+                                      onClick={() => {
+                                        void handleDeleteGroup(group.key);
+                                      }}
+                                    >
+                                      <Trash2 className="h-4 w-4" />
                                     </Button>
                                   </div>
-                                ) : null}
+                                );
+                              })}
+                              <p className="text-xs text-muted-foreground">
+                                Deleting a folder moves its mappings to {DEFAULT_GROUP_NAME}.
+                              </p>
+                            </div>
+                          ) : null}
+                        </div>
+                      </details>
+                    </Card>
+                  ) : null}
+                </div>
+
+                <div className="min-w-0 space-y-4">
+                  <Card>
+                    <CardContent className="space-y-3 p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Input
+                          className="max-w-xs"
+                          value={accountsSearchQuery}
+                          onChange={(event) => setAccountsSearchQuery(event.target.value)}
+                          placeholder="Search @username, owner, handle..."
+                        />
+                        {isAdmin ? (
+                          <select
+                            className={cn(selectClassName, 'h-10 w-44 text-sm')}
+                            value={accountsCreatorFilter}
+                            onChange={(event) => setAccountsCreatorFilter(event.target.value)}
+                            aria-label="Created by user"
+                          >
+                            <option value="all">All users</option>
+                            {managedUsers.map((user) => (
+                              <option key={`creator-filter-${user.id}`} value={user.id}>
+                                {user.username || user.email || user.id}
+                              </option>
+                            ))}
+                          </select>
+                        ) : null}
+
+                        <div className="ml-auto flex flex-wrap items-center gap-2">
+                          {canCreateMappings ? (
+                            <Button size="sm" variant="outline" onClick={openAddAccountSheet}>
+                              <Plus className="mr-2 h-4 w-4" />
+                              Add account
+                            </Button>
+                          ) : null}
+                          <DropdownMenu
+                            align="end"
+                            trigger={
+                              <>
+                                View
+                                <ChevronDown className="h-3.5 w-3.5" />
                               </>
-                            )}
-                          </div>
+                            }
+                          >
+                            <DropdownMenuItem
+                              data-keep-open="true"
+                              onClick={() => setShowAccountAvatars((previous) => !previous)}
+                            >
+                              {showAccountAvatars ? 'Hide avatars' : 'Show avatars'}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              data-keep-open="true"
+                              onClick={() => setShowAccountBios((previous) => !previous)}
+                            >
+                              {showAccountBios ? 'Hide bios' : 'Show bios'}
+                            </DropdownMenuItem>
+                          </DropdownMenu>
+                          <DropdownMenu
+                            align="end"
+                            disabled={isAnyBulkAccountsActionBusy}
+                            trigger={
+                              isAnyBulkAccountsActionBusy ? (
+                                <>
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  Working...
+                                </>
+                              ) : (
+                                <>
+                                  Bulk actions
+                                  <ChevronDown className="h-3.5 w-3.5" />
+                                </>
+                              )
+                            }
+                          >
+                            <DropdownMenuLabel>
+                              {selectedManageableMappingsCount > 0
+                                ? `Apply to ${selectedManageableMappingsCount} selected`
+                                : 'Apply to all manageable'}
+                            </DropdownMenuLabel>
+                            <DropdownMenuItem
+                              icon={<RefreshCw className="h-4 w-4" />}
+                              onClick={() => void handleApplyAllAccountsAction('sync_profiles')}
+                            >
+                              Sync profiles from Twitter
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              icon={<Download className="h-4 w-4" />}
+                              onClick={() => void handleApplyAllAccountsAction('pull_twitter_bio')}
+                            >
+                              Pull Twitter bio
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              icon={<Link2 className="h-4 w-4" />}
+                              onClick={() => void handleApplyAllAccountsAction('bridge_all')}
+                            >
+                              Bridge to fediverse
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              icon={<Pin className="h-4 w-4" />}
+                              onClick={() => void handleApplyAllAccountsAction('sync_pins')}
+                            >
+                              Sync pinned tweets
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              icon={<Bot className="h-4 w-4" />}
+                              onClick={() => void handleApplyAllAccountsAction('apply_bot_label')}
+                            >
+                              Apply bot label
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              icon={<Bot className="h-4 w-4" />}
+                              onClick={() => void handleApplyAllAccountsAction('append_bot_name')}
+                            >
+                              Append {'{bot}'} to display name
+                            </DropdownMenuItem>
+                          </DropdownMenu>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
 
-          {canManageGroupsPermission ? (
-            <Card className="">
-              <CardHeader className="pb-3">
-                <CardTitle>Group Manager</CardTitle>
-                <CardDescription>Edit folder names/emojis or delete a group.</CardDescription>
-              </CardHeader>
-              <CardContent className="pt-0">
-                {reusableGroupOptions.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
-                    No custom folders yet.
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {reusableGroupOptions.map((group) => {
-                      const draft = groupDraftsByKey[group.key] || { name: group.name, emoji: group.emoji };
-                      return (
-                        <div
-                          key={`group-manager-${group.key}`}
-                          className="grid gap-2 rounded-lg border border-border/70 bg-muted/20 p-3 md:grid-cols-[90px_minmax(0,1fr)_auto_auto]"
-                        >
-                          <div className="space-y-1">
-                            <Label htmlFor={`group-manager-emoji-${group.key}`}>Emoji</Label>
-                            <Input
-                              id={`group-manager-emoji-${group.key}`}
-                              value={draft.emoji}
-                              onChange={(event) => updateGroupDraft(group.key, 'emoji', event.target.value)}
-                              maxLength={8}
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <Label htmlFor={`group-manager-name-${group.key}`}>Name</Label>
-                            <Input
-                              id={`group-manager-name-${group.key}`}
-                              value={draft.name}
-                              onChange={(event) => updateGroupDraft(group.key, 'name', event.target.value)}
-                            />
-                          </div>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="self-end"
-                            disabled={isGroupActionBusy || !draft.name.trim()}
-                            onClick={() => {
-                              void handleRenameGroup(group.key);
-                            }}
-                          >
-                            Save
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="self-end text-red-600 hover:text-red-500 dark:text-red-300 dark:hover:text-red-200"
-                            disabled={isGroupActionBusy}
-                            onClick={() => {
-                              void handleDeleteGroup(group.key);
-                            }}
-                          >
-                            Delete
-                          </Button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                <p className="mt-3 text-xs text-muted-foreground">
-                  Deleting a folder keeps mappings intact and moves them to {DEFAULT_GROUP_NAME}.
-                </p>
-              </CardContent>
-            </Card>
-          ) : null}
-        </section>
-      ) : null}
-
-      {activeTab === 'posts' ? (
-        <section className="space-y-6">
-          <Card className="">
-            <CardHeader className="pb-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="space-y-1">
-                  <CardTitle>Already Posted</CardTitle>
-                  <CardDescription>
-                    Native-styled feed plus local SQLite search across all crossposted history.
-                  </CardDescription>
-                </div>
-                <div className="grid w-full gap-2 md:max-w-2xl md:grid-cols-[1fr_240px]">
-                  <div className="space-y-1">
-                    <Label htmlFor="posts-search">Search crossposted posts</Label>
-                    <div className="relative">
-                      <Input
-                        id="posts-search"
-                        value={postsSearchQuery}
-                        onChange={(event) => setPostsSearchQuery(event.target.value)}
-                        placeholder="Search by text, @username, tweet id, or Bluesky handle"
-                      />
-                      {isSearchingLocalPosts ? (
-                        <Loader2 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground" />
-                      ) : null}
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="posts-group-filter">Filter group</Label>
-                    <select
-                      id="posts-group-filter"
-                      className={selectClassName}
-                      value={postsGroupFilter}
-                      onChange={(event) => setPostsGroupFilter(event.target.value)}
-                    >
-                      <option value="all">All folders</option>
-                      {groupOptions.map((group) => (
-                        <option key={`posts-filter-${group.key}`} value={group.key}>
-                          {group.emoji} {group.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent className="pt-0">
-              {postsSearchQuery.trim() ? (
-                filteredLocalPostSearchResults.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-border/70 p-6 text-center text-sm text-muted-foreground">
-                    {isSearchingLocalPosts ? 'Searching local history...' : 'No local crossposted posts matched.'}
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {filteredLocalPostSearchResults.map((post) => {
-                      const mapping = resolveMappingForLocalPost(post);
-                      const groupMeta = getMappingGroupMeta(mapping);
-                      const sourceTweetUrl = post.twitterUrl || getTwitterPostUrl(post.twitterUsername, post.twitterId);
-                      const postUrl =
-                        post.postUrl ||
-                        (post.bskyUri
-                          ? `https://bsky.app/profile/${post.bskyIdentifier}/post/${
-                              post.bskyUri.split('/').filter(Boolean).pop() || ''
-                            }`
-                          : undefined);
-
-                      return (
-                        <article
-                          key={`${post.twitterId}-${post.bskyIdentifier}-${post.bskyCid || post.createdAt || 'result'}`}
-                          className="rounded-lg border border-border/70 bg-background p-4"
-                        >
-                          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                            <div className="min-w-0">
-                              <p className="truncate text-sm font-semibold">
-                                @{post.bskyIdentifier}{' '}
-                                <span className="text-muted-foreground">from @{post.twitterUsername}</span>
-                              </p>
-                              <p className="text-xs text-muted-foreground">
-                                {post.createdAt ? new Date(post.createdAt).toLocaleString() : 'Unknown time'}
-                              </p>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <Badge variant="outline">
-                                {groupMeta.emoji} {groupMeta.name}
-                              </Badge>
-                              <Badge variant="secondary">Relevance {Math.round(post.score)}</Badge>
-                            </div>
-                          </div>
-                          <p className="mb-2 whitespace-pre-wrap break-words text-sm leading-relaxed">
-                            {post.tweetText || 'No local tweet text stored for this record.'}
-                          </p>
-                          <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                            <span className="font-mono">Tweet ID: {post.twitterId}</span>
-                            {sourceTweetUrl ? (
-                              <a
-                                className="inline-flex items-center text-foreground underline-offset-4 hover:underline"
-                                href={sourceTweetUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                Source
-                                <ArrowUpRight className="ml-1 h-3 w-3" />
-                              </a>
-                            ) : null}
-                            {postUrl ? (
-                              <a
-                                className="inline-flex items-center text-foreground underline-offset-4 hover:underline"
-                                href={postUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                Bluesky
-                                <ArrowUpRight className="ml-1 h-3 w-3" />
-                              </a>
-                            ) : null}
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                )
-              ) : filteredPostedActivity.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-border/70 p-6 text-center text-sm text-muted-foreground">
-                  No posted entries yet.
-                </div>
-              ) : (
-                <div className="grid gap-3 md:grid-cols-2">
-                  {filteredPostedActivity.map((post, index) => {
-                    const postUrl =
-                      post.postUrl ||
-                      (post.bskyUri
-                        ? `https://bsky.app/profile/${post.bskyIdentifier}/post/${
-                            post.bskyUri.split('/').filter(Boolean).pop() || ''
-                          }`
-                        : undefined);
-                    const sourceTweetUrl = post.twitterUrl || getTwitterPostUrl(post.twitterUsername, post.twitterId);
-                    const segments = buildFacetSegments(post.text, post.facets || []);
-                    const mapping = resolveMappingForPost(post);
-                    const groupMeta = getMappingGroupMeta(mapping);
-                    const statItems: Array<{
-                      key: 'likes' | 'reposts' | 'replies' | 'quotes';
-                      value: number;
-                      icon: typeof Heart;
-                    }> = [
-                      { key: 'likes', value: post.stats.likes, icon: Heart },
-                      { key: 'reposts', value: post.stats.reposts, icon: Repeat2 },
-                      { key: 'replies', value: post.stats.replies, icon: MessageCircle },
-                      { key: 'quotes', value: post.stats.quotes, icon: Quote },
-                    ].filter((item) => item.value > 0);
-                    const authorAvatar = post.author.avatar || getProfileForActor(post.author.handle)?.avatar;
-                    const authorHandle = post.author.handle || post.bskyIdentifier;
-                    const authorName = post.author.displayName || authorHandle;
-
-                    return (
-                      <article
-                        key={post.bskyUri || `${post.bskyCid || 'post'}-${post.createdAt || index}`}
-                        className="cv-auto rounded-lg border border-border bg-background p-4"
-                      >
-                        <div className="mb-3 flex items-start justify-between gap-3">
-                          <div className="flex items-center gap-2">
-                            {authorAvatar ? (
-                              <img
-                                className="h-9 w-9 rounded-full border border-border/70 object-cover"
-                                src={authorAvatar}
-                                alt={authorName}
-                                loading="lazy"
-                              />
-                            ) : (
-                              <div className="flex h-9 w-9 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
-                                <UserRound className="h-4 w-4" />
-                              </div>
-                            )}
-                            <div>
-                              <p className="text-sm font-semibold">{authorName}</p>
-                              <p className="text-xs text-muted-foreground">
-                                @{authorHandle} • from @{post.twitterUsername}
-                              </p>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <Badge variant="outline">
-                              {groupMeta.emoji} {groupMeta.name}
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <span>
+                            Showing {currentAccountsPageStart}-{currentAccountsPageEnd} of {accountMatchesCount} account
+                            {accountMatchesCount === 1 ? '' : 's'}
+                          </span>
+                          {selectedManageableMappingsCount > 0 ? (
+                            <button
+                              type="button"
+                              className="text-foreground underline-offset-2 hover:underline"
+                              onClick={clearSelectedAccountMappings}
+                              title="Clear selection"
+                            >
+                              {selectedManageableMappingsCount} selected ×
+                            </button>
+                          ) : null}
+                          {isBridgeAllBusy && bridgeAllProgress ? (
+                            <Badge variant="outline" className="max-w-[240px] truncate">
+                              {bridgeAllProgress.currentHandle
+                                ? `Bridging ${bridgeAllProgress.currentHandle}`
+                                : 'Preparing bridge-all...'}
                             </Badge>
-                            <Badge variant="success">Posted</Badge>
-                          </div>
+                          ) : null}
                         </div>
-
-                        <p className="mb-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
-                          {segments.map((segment, segmentIndex) => {
-                            if (segment.type === 'text') {
-                              return <span key={`${post.bskyUri}-segment-${segmentIndex}`}>{segment.text}</span>;
+                        <div className="flex items-center gap-2">
+                          <select
+                            className={cn(selectClassName, 'h-8 w-20 px-2 py-1 text-xs')}
+                            value={accountsPageSize}
+                            onChange={(event) =>
+                              setAccountsPageSize(Number(event.target.value) || ACCOUNT_PAGE_SIZE_DEFAULT)
                             }
+                            aria-label="Accounts per page"
+                          >
+                            <option value={25}>25</option>
+                            <option value={50}>50</option>
+                            <option value={100}>100</option>
+                            <option value={200}>200</option>
+                          </select>
+                          <Button
+                            size="icon"
+                            variant="outline"
+                            disabled={accountsPage <= 1}
+                            onClick={() => setAccountsPage((previous) => Math.max(1, previous - 1))}
+                          >
+                            <ChevronLeft className="h-4 w-4" />
+                          </Button>
+                          <span className="w-16 text-center">
+                            {accountsPage}/{accountsPageCount}
+                          </span>
+                          <Button
+                            size="icon"
+                            variant="outline"
+                            disabled={accountsPage >= accountsPageCount}
+                            onClick={() => setAccountsPage((previous) => Math.min(accountsPageCount, previous + 1))}
+                          >
+                            <ChevronRight className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
 
-                            const linkTone =
-                              segment.type === 'mention'
-                                ? 'text-cyan-600 hover:text-cyan-500 dark:text-cyan-300 dark:hover:text-cyan-200'
-                                : segment.type === 'tag'
-                                  ? 'text-indigo-600 hover:text-indigo-500 dark:text-indigo-300 dark:hover:text-indigo-200'
-                                  : 'text-sky-600 hover:text-sky-500 dark:text-sky-300 dark:hover:text-sky-200';
+                  {bridgedMappingsForView.length > 0 || bridgeEligibleUnbridgedMappings.length > 0 ? (
+                    <details className="rounded-lg border border-border/70 bg-muted/20 text-sm">
+                      <summary className="cursor-pointer list-none px-3 py-2.5 text-xs text-muted-foreground">
+                        <span className="font-medium uppercase tracking-wide">Fediverse Bridge</span> —{' '}
+                        {bridgedMappingsForView.length} bridged, {bridgeEligibleUnbridgedMappings.length} eligible now
+                      </summary>
+                      <div className="flex flex-wrap gap-1.5 border-t border-border/60 p-3 pt-2.5">
+                        {bridgedMappingsForView.slice(0, 24).map((mapping) => {
+                          const profile = getProfileForActor(mapping.bskyIdentifier);
+                          const handle = profile?.handle || mapping.bskyIdentifier;
+                          return (
+                            <Badge key={`bridged-list-${mapping.id}`} variant="success">
+                              <Link2 className="h-3 w-3" />@{handle}
+                            </Badge>
+                          );
+                        })}
+                        {bridgedMappingsForView.length > 24 ? (
+                          <Badge variant="outline">+{bridgedMappingsForView.length - 24} more</Badge>
+                        ) : null}
+                      </div>
+                    </details>
+                  ) : null}
 
-                            return (
-                              <a
-                                key={`${post.bskyUri}-segment-${segmentIndex}`}
-                                className={cn('hover:underline', linkTone)}
-                                href={segment.href}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                {segment.text}
-                              </a>
-                            );
-                          })}
-                        </p>
+                  {accountMatchesCount === 0 ? (
+                    <Card>
+                      <CardContent className="p-6 text-center text-sm text-muted-foreground">
+                        {normalizedAccountsQuery
+                          ? 'No accounts matched this search.'
+                          : 'No mappings in this folder yet.'}
+                        {canCreateMappings ? (
+                          <div className="mt-3">
+                            <Button size="sm" variant="outline" onClick={openAddAccountSheet}>
+                              <Plus className="mr-2 h-4 w-4" />
+                              Create your first account
+                            </Button>
+                          </div>
+                        ) : null}
+                      </CardContent>
+                    </Card>
+                  ) : (
+                    <Card className="cv-auto overflow-hidden">
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-left text-sm">
+                          <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+                            <tr>
+                              <th className="w-9 px-2 py-3">
+                                <input
+                                  type="checkbox"
+                                  className="h-3.5 w-3.5 rounded border-border"
+                                  checked={allFilteredManageableSelected}
+                                  disabled={filteredManageableMappingIds.length === 0}
+                                  onChange={(event) => toggleSelectAllFilteredManageable(event.target.checked)}
+                                  aria-label="Select all accounts on this page"
+                                />
+                              </th>
+                              <th className="px-2 py-3">Owner</th>
+                              {isAdmin ? <th className="px-2 py-3">Created By</th> : null}
+                              <th className="px-2 py-3">Twitter Sources</th>
+                              <th className="px-2 py-3">Bluesky Target</th>
+                              <th className="px-2 py-3">Status</th>
+                              <th className="px-2 py-3 text-right">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(pagedGroupedMappings[0]?.mappings ?? []).map((mapping) => {
+                              const queued = isBackfillQueued(mapping.id);
+                              const active = isBackfillActive(mapping.id);
+                              const queuePosition = getBackfillEntry(mapping.id)?.position;
+                              const profile = getProfileForActor(mapping.bskyIdentifier);
+                              const profileHandle = profile?.handle || mapping.bskyIdentifier;
+                              const profileName = profile?.displayName || profileHandle;
+                              const profileBio = showAccountBios ? profile?.description?.trim() || '' : '';
+                              const profileUrl = `https://bsky.app/profile/${profileHandle}`;
+                              const canManageThisMapping = canManageMapping(mapping);
+                              const canUseFediverseBridge = canBridgeToFediverse(profile?.createdAt);
+                              const bridgeStatus = fediverseBridgeStatusByMappingId[mapping.id];
+                              const isFediverseBridged = bridgeStatus?.bridged === true;
+                              const bridging = bridgingMappingId === mapping.id;
+                              const mappingGroup = getMappingGroupMeta(mapping);
+                              const syncingProfile = syncingProfileMappingId === mapping.id;
+                              const pullingBio = pullingBioMappingId === mapping.id;
+                              const isSelectedForBulk = selectedAccountMappingIdSet.has(mapping.id);
 
-                        {post.media.length > 0 ? (
-                          <div className="mb-3 space-y-2">
-                            {post.media.map((media, mediaIndex) => {
-                              if (media.type === 'image') {
-                                const imageSrc = media.url || media.thumb;
-                                if (!imageSrc) return null;
-                                return (
-                                  <a
-                                    key={`${post.bskyUri}-media-${mediaIndex}`}
-                                    className="group block overflow-hidden rounded-lg border border-border/70 bg-muted"
-                                    href={imageSrc}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                  >
-                                    <img
-                                      className="h-56 w-full object-cover"
-                                      src={imageSrc}
-                                      alt={media.alt || 'Bluesky media'}
-                                      loading="lazy"
-                                    />
-                                  </a>
-                                );
-                              }
-
-                              if (media.type === 'video') {
-                                const videoHref = media.url || media.thumb;
-                                return (
-                                  <div
-                                    key={`${post.bskyUri}-media-${mediaIndex}`}
-                                    className="group overflow-hidden rounded-lg border border-border/70 bg-muted"
-                                  >
-                                    {media.thumb ? (
-                                      <img
-                                        className="h-56 w-full object-cover"
-                                        src={media.thumb}
-                                        alt={media.alt || 'Video thumbnail'}
-                                        loading="lazy"
+                              return (
+                                <tr
+                                  key={mapping.id}
+                                  className="interactive-row border-b border-border/60 last:border-0"
+                                >
+                                  <td className="px-2 py-3 align-top">
+                                    {canManageThisMapping ? (
+                                      <input
+                                        type="checkbox"
+                                        className="h-3.5 w-3.5 rounded border-border"
+                                        checked={isSelectedForBulk}
+                                        disabled={isAnyBulkAccountsActionBusy}
+                                        onChange={(event) =>
+                                          toggleAccountMappingSelection(mapping.id, event.target.checked)
+                                        }
+                                        aria-label={`Select ${mapping.bskyIdentifier}`}
                                       />
-                                    ) : (
-                                      <div className="flex h-44 items-center justify-center text-sm text-muted-foreground">
-                                        Video attachment
-                                      </div>
-                                    )}
-                                    {videoHref ? (
-                                      <div className="border-t border-border/70 p-2 text-right">
+                                    ) : null}
+                                  </td>
+                                  <td className="px-2 py-3 align-top">
+                                    <div className="flex items-center gap-2 font-medium">
+                                      <UserRound className="h-4 w-4 text-muted-foreground" />
+                                      {mapping.owner || 'System'}
+                                    </div>
+                                  </td>
+                                  {isAdmin ? (
+                                    <td className="px-2 py-3 align-top text-xs text-muted-foreground">
+                                      {mapping.createdByLabel ||
+                                        mapping.createdByUser?.username ||
+                                        mapping.createdByUser?.email ||
+                                        '--'}
+                                    </td>
+                                  ) : null}
+                                  <td className="px-2 py-3 align-top">
+                                    <div className="flex flex-wrap gap-2">
+                                      {mapping.twitterUsernames.map((username) => (
+                                        <Badge key={username} variant="secondary">
+                                          @{username}
+                                        </Badge>
+                                      ))}
+                                    </div>
+                                  </td>
+                                  <td className="px-2 py-3 align-top">
+                                    <div className="flex items-center gap-2">
+                                      {showAccountAvatars && profile?.avatar ? (
+                                        <img
+                                          className="h-8 w-8 rounded-full border border-border/70 object-cover"
+                                          src={profile.avatar}
+                                          alt={profileName}
+                                          loading="lazy"
+                                          decoding="async"
+                                          fetchPriority="low"
+                                        />
+                                      ) : (
+                                        <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
+                                          <UserRound className="h-4 w-4" />
+                                        </div>
+                                      )}
+                                      <div className="min-w-0">
+                                        <p className="truncate text-sm font-medium">{profileName}</p>
                                         <a
-                                          className="inline-flex items-center text-xs text-foreground underline-offset-4 hover:underline"
-                                          href={videoHref}
+                                          className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                                          href={profileUrl}
                                           target="_blank"
                                           rel="noreferrer"
+                                          title={`Open @${profileHandle} on Bluesky`}
                                         >
-                                          Open video
-                                          <ArrowUpRight className="ml-1 h-3 w-3" />
+                                          {profileHandle}
+                                          <ArrowUpRight className="ml-1 h-3 w-3 shrink-0" />
                                         </a>
+                                        {profileBio ? (
+                                          <p
+                                            className="mt-1 overflow-hidden text-xs text-muted-foreground"
+                                            style={{
+                                              display: '-webkit-box',
+                                              WebkitLineClamp: 2,
+                                              WebkitBoxOrient: 'vertical',
+                                            }}
+                                            title={profileBio}
+                                          >
+                                            {profileBio}
+                                          </p>
+                                        ) : null}
                                       </div>
-                                    ) : null}
-                                  </div>
-                                );
-                              }
-
-                              if (media.type === 'external') {
-                                if (!media.url) return null;
-                                return (
-                                  <a
-                                    key={`${post.bskyUri}-media-${mediaIndex}`}
-                                    className="group block overflow-hidden rounded-lg border border-border/70 bg-background transition-colors hover:bg-muted/60"
-                                    href={media.url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                  >
-                                    {media.thumb ? (
-                                      <img
-                                        className="h-40 w-full object-cover"
-                                        src={media.thumb}
-                                        alt={media.title || media.url}
-                                        loading="lazy"
-                                      />
-                                    ) : null}
-                                    <div className="space-y-1 p-3">
-                                      <p className="truncate text-sm font-medium">{media.title || media.url}</p>
-                                      {media.description ? (
-                                        <p className="max-h-10 overflow-hidden text-xs text-muted-foreground">
-                                          {media.description}
-                                        </p>
+                                    </div>
+                                  </td>
+                                  <td className="px-2 py-3 align-top">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      {active ? (
+                                        <Badge variant="warning">Backfilling</Badge>
+                                      ) : queued ? (
+                                        <Badge variant="warning">
+                                          Queued {queuePosition ? `#${queuePosition}` : ''}
+                                        </Badge>
+                                      ) : (
+                                        <Badge variant="success">Active</Badge>
+                                      )}
+                                      {isFediverseBridged ? (
+                                        <Badge variant="success">
+                                          <Link2 className="h-3 w-3" />
+                                          Bridged
+                                        </Badge>
+                                      ) : null}
+                                      {mapping.hasBotLabel ? (
+                                        <Badge variant="outline">
+                                          <Bot className="h-3 w-3" />
+                                          Bot
+                                        </Badge>
                                       ) : null}
                                     </div>
-                                  </a>
-                                );
-                              }
-
-                              return null;
-                            })}
-                          </div>
-                        ) : null}
-
-                        {statItems.length > 0 ? (
-                          <div className="mb-3 flex flex-wrap gap-2">
-                            {statItems.map((stat) => {
-                              const Icon = stat.icon;
-                              return (
-                                <span
-                                  key={`${post.bskyUri}-stat-${stat.key}`}
-                                  className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted px-2 py-1 text-xs text-muted-foreground"
-                                >
-                                  <Icon className="h-3.5 w-3.5" />
-                                  {formatCompactNumber(stat.value)}
-                                </span>
+                                  </td>
+                                  <td className="px-2 py-3 align-top">
+                                    <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                      {canManageThisMapping && canManageGroupsPermission ? (
+                                        <select
+                                          className={cn(selectClassName, 'h-8 w-28 px-1.5 py-1 text-xs')}
+                                          value={mappingGroup.key}
+                                          disabled={
+                                            isBridgeAllBusy ||
+                                            isAnyBulkAccountsActionBusy ||
+                                            isSyncAllProfilesBusy ||
+                                            Boolean(syncingProfileMappingId)
+                                          }
+                                          title="Move to folder"
+                                          onChange={(event) => {
+                                            void handleAssignMappingGroup(mapping, event.target.value);
+                                          }}
+                                        >
+                                          <option value={DEFAULT_GROUP_KEY}>
+                                            {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
+                                          </option>
+                                          {groupOptions
+                                            .filter((option) => option.key !== DEFAULT_GROUP_KEY)
+                                            .map((option) => (
+                                              <option key={`group-move-${mapping.id}-${option.key}`} value={option.key}>
+                                                {option.emoji} {option.name}
+                                              </option>
+                                            ))}
+                                        </select>
+                                      ) : null}
+                                      {canManageThisMapping ? (
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          disabled={
+                                            isBridgeAllBusy ||
+                                            isAnyBulkAccountsActionBusy ||
+                                            Boolean(syncingProfileMappingId)
+                                          }
+                                          onClick={() => startEditMapping(mapping)}
+                                        >
+                                          Edit
+                                        </Button>
+                                      ) : null}
+                                      {canManageThisMapping ? (
+                                        <DropdownMenu
+                                          align="end"
+                                          triggerClassName="h-9 w-9 px-0"
+                                          trigger={<MoreHorizontal className="h-4 w-4" />}
+                                        >
+                                          {mapping.twitterUsernames.length > 1 ? (
+                                            <div className="space-y-1 px-3 py-2" data-keep-open="true">
+                                              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                                Profile sync source
+                                              </p>
+                                              <select
+                                                className={cn(selectClassName, 'h-8 text-xs')}
+                                                value={mapping.profileSyncSourceUsername || ''}
+                                                disabled={
+                                                  isBridgeAllBusy ||
+                                                  isAnyBulkAccountsActionBusy ||
+                                                  isSyncAllProfilesBusy ||
+                                                  Boolean(syncingProfileMappingId) ||
+                                                  Boolean(bridgingMappingId)
+                                                }
+                                                onChange={(event) => {
+                                                  void handleUpdateProfileSyncSource(mapping, event.target.value);
+                                                }}
+                                              >
+                                                <option value="">Select sync source</option>
+                                                {mapping.twitterUsernames.map((username) => (
+                                                  <option
+                                                    key={`sync-source-${mapping.id}-${username}`}
+                                                    value={username}
+                                                  >
+                                                    @{username}
+                                                  </option>
+                                                ))}
+                                              </select>
+                                              <DropdownMenuSeparator />
+                                            </div>
+                                          ) : null}
+                                          <DropdownMenuItem
+                                            icon={
+                                              syncingProfile ? (
+                                                <Loader2 className="h-4 w-4 animate-spin" />
+                                              ) : (
+                                                <RefreshCw className="h-4 w-4" />
+                                              )
+                                            }
+                                            disabled={
+                                              isBridgeAllBusy ||
+                                              isAnyBulkAccountsActionBusy ||
+                                              Boolean(syncingProfileMappingId) ||
+                                              Boolean(pullingBioMappingId) ||
+                                              isSyncAllProfilesBusy ||
+                                              Boolean(bridgingMappingId)
+                                            }
+                                            onClick={() => {
+                                              void handleSyncProfileFromTwitter(mapping);
+                                            }}
+                                          >
+                                            Sync Profile
+                                          </DropdownMenuItem>
+                                          <DropdownMenuItem
+                                            icon={
+                                              pullingBio ? (
+                                                <Loader2 className="h-4 w-4 animate-spin" />
+                                              ) : (
+                                                <Download className="h-4 w-4" />
+                                              )
+                                            }
+                                            disabled={
+                                              isBridgeAllBusy ||
+                                              isAnyBulkAccountsActionBusy ||
+                                              Boolean(syncingProfileMappingId) ||
+                                              Boolean(pullingBioMappingId) ||
+                                              isSyncAllProfilesBusy ||
+                                              Boolean(bridgingMappingId)
+                                            }
+                                            onClick={() => {
+                                              void handlePullTwitterBio(mapping);
+                                            }}
+                                          >
+                                            Pull Twitter Bio
+                                          </DropdownMenuItem>
+                                          {canUseFediverseBridge && !isFediverseBridged ? (
+                                            <DropdownMenuItem
+                                              icon={
+                                                bridging ? (
+                                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                                ) : (
+                                                  <Repeat2 className="h-4 w-4" />
+                                                )
+                                              }
+                                              disabled={
+                                                isBridgeAllBusy ||
+                                                isAnyBulkAccountsActionBusy ||
+                                                Boolean(bridgingMappingId) ||
+                                                Boolean(syncingProfileMappingId) ||
+                                                isSyncAllProfilesBusy
+                                              }
+                                              onClick={() => {
+                                                void handleBridgeToFediverse(mapping);
+                                              }}
+                                            >
+                                              Bridge to Fediverse
+                                            </DropdownMenuItem>
+                                          ) : null}
+                                          {canQueueBackfillsPermission ? (
+                                            <>
+                                              <DropdownMenuSeparator />
+                                              <DropdownMenuItem
+                                                icon={<Plus className="h-4 w-4" />}
+                                                disabled={
+                                                  isBridgeAllBusy ||
+                                                  isAnyBulkAccountsActionBusy ||
+                                                  Boolean(syncingProfileMappingId) ||
+                                                  isSyncAllProfilesBusy
+                                                }
+                                                onClick={() => {
+                                                  void requestBackfill(mapping.id, 'normal');
+                                                }}
+                                              >
+                                                Add to queue
+                                              </DropdownMenuItem>
+                                              <DropdownMenuItem
+                                                icon={<Pin className="h-4 w-4" />}
+                                                disabled={
+                                                  isBridgeAllBusy ||
+                                                  isAnyBulkAccountsActionBusy ||
+                                                  Boolean(syncingProfileMappingId) ||
+                                                  isSyncAllProfilesBusy
+                                                }
+                                                onClick={() => {
+                                                  void requestPinSync(mapping.id);
+                                                }}
+                                              >
+                                                Sync Pin
+                                              </DropdownMenuItem>
+                                              {queued && !active ? (
+                                                <DropdownMenuItem
+                                                  disabled={
+                                                    isBridgeAllBusy ||
+                                                    isAnyBulkAccountsActionBusy ||
+                                                    Boolean(syncingProfileMappingId) ||
+                                                    isSyncAllProfilesBusy
+                                                  }
+                                                  onClick={() => {
+                                                    void cancelQueuedBackfill(mapping.id);
+                                                  }}
+                                                >
+                                                  Cancel queue
+                                                </DropdownMenuItem>
+                                              ) : null}
+                                              {isAdmin ? (
+                                                <DropdownMenuItem
+                                                  disabled={
+                                                    isBridgeAllBusy ||
+                                                    isAnyBulkAccountsActionBusy ||
+                                                    Boolean(syncingProfileMappingId) ||
+                                                    isSyncAllProfilesBusy
+                                                  }
+                                                  onClick={() => {
+                                                    void requestBackfill(mapping.id, 'reset');
+                                                  }}
+                                                >
+                                                  Reset + Backfill
+                                                </DropdownMenuItem>
+                                              ) : null}
+                                            </>
+                                          ) : null}
+                                          {isAdmin ? (
+                                            <>
+                                              <DropdownMenuSeparator />
+                                              <DropdownMenuItem
+                                                destructive
+                                                icon={<Trash2 className="h-4 w-4" />}
+                                                disabled={
+                                                  isBridgeAllBusy ||
+                                                  isAnyBulkAccountsActionBusy ||
+                                                  Boolean(syncingProfileMappingId) ||
+                                                  isSyncAllProfilesBusy
+                                                }
+                                                onClick={() => {
+                                                  void handleDeleteAllPosts(mapping.id);
+                                                }}
+                                              >
+                                                Delete Posts
+                                              </DropdownMenuItem>
+                                            </>
+                                          ) : null}
+                                          <DropdownMenuSeparator />
+                                          <DropdownMenuItem
+                                            destructive
+                                            icon={<Trash2 className="h-4 w-4" />}
+                                            disabled={
+                                              isBridgeAllBusy ||
+                                              isAnyBulkAccountsActionBusy ||
+                                              Boolean(syncingProfileMappingId) ||
+                                              isSyncAllProfilesBusy
+                                            }
+                                            onClick={() => {
+                                              void handleDeleteMapping(mapping.id);
+                                            }}
+                                          >
+                                            Remove mapping
+                                          </DropdownMenuItem>
+                                        </DropdownMenu>
+                                      ) : null}
+                                    </div>
+                                  </td>
+                                </tr>
                               );
                             })}
-                          </div>
-                        ) : null}
-
-                        <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-                          <span>{post.createdAt ? new Date(post.createdAt).toLocaleString() : 'Unknown time'}</span>
-                          <div className="flex items-center gap-3">
-                            {sourceTweetUrl ? (
-                              <a
-                                className="inline-flex items-center text-foreground underline-offset-4 hover:underline"
-                                href={sourceTweetUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                Source
-                                <ArrowUpRight className="ml-1 h-3 w-3" />
-                              </a>
-                            ) : null}
-                            {postUrl ? (
-                              <a
-                                className="inline-flex items-center text-foreground underline-offset-4 hover:underline"
-                                href={postUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                Bluesky
-                                <ArrowUpRight className="ml-1 h-3 w-3" />
-                              </a>
-                            ) : (
-                              <span>Missing URI</span>
-                            )}
-                          </div>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </section>
-      ) : null}
-
-      {activeTab === 'activity' ? (
-        <section className="space-y-6">
-          <Card className="">
-            <CardHeader className="pb-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="space-y-1">
-                  <CardTitle className="flex items-center gap-2">
-                    <History className="h-4 w-4" />
-                    Recent Activity
-                  </CardTitle>
-                  <CardDescription>Latest migration outcomes from the processing database.</CardDescription>
-                </div>
-                <div className="w-full max-w-xs">
-                  <Label htmlFor="activity-group-filter">Filter group</Label>
-                  <select
-                    id="activity-group-filter"
-                    className={selectClassName}
-                    value={activityGroupFilter}
-                    onChange={(event) => setActivityGroupFilter(event.target.value)}
-                  >
-                    <option value="all">All folders</option>
-                    {groupOptions.map((group) => (
-                      <option key={`activity-filter-${group.key}`} value={group.key}>
-                        {group.emoji} {group.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent className="pt-0">
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-left text-sm">
-                  <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
-                    <tr>
-                      <th className="px-2 py-3">Time</th>
-                      <th className="px-2 py-3">Twitter User</th>
-                      <th className="px-2 py-3">Group</th>
-                      <th className="px-2 py-3">Status</th>
-                      <th className="px-2 py-3">Details</th>
-                      <th className="px-2 py-3 text-right">Link</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredRecentActivity.map((activity, index) => {
-                      const href = getBskyPostUrl(activity);
-                      const sourceTweetUrl = getTwitterPostUrl(activity.twitter_username, activity.twitter_id);
-                      const mapping = resolveMappingForActivity(activity);
-                      const groupMeta = getMappingGroupMeta(mapping);
-
-                      return (
-                        <tr
-                          key={`${activity.twitter_id}-${activity.created_at || index}`}
-                          className="interactive-row border-b border-border/60 last:border-0"
-                        >
-                          <td className="px-2 py-3 align-top text-xs text-muted-foreground">
-                            {activity.created_at
-                              ? new Date(activity.created_at).toLocaleTimeString([], {
-                                  hour: '2-digit',
-                                  minute: '2-digit',
-                                })
-                              : '--'}
-                          </td>
-                          <td className="px-2 py-3 align-top font-medium">@{activity.twitter_username}</td>
-                          <td className="px-2 py-3 align-top">
-                            <Badge variant="outline">
-                              {groupMeta.emoji} {groupMeta.name}
-                            </Badge>
-                          </td>
-                          <td className="px-2 py-3 align-top">
-                            {activity.status === 'migrated' ? (
-                              <Badge variant="success">Migrated</Badge>
-                            ) : activity.status === 'skipped' ? (
-                              <Badge variant="outline">Skipped</Badge>
-                            ) : (
-                              <Badge variant="danger">Failed</Badge>
-                            )}
-                          </td>
-                          <td className="px-2 py-3 align-top text-xs text-muted-foreground">
-                            <div className="max-w-[340px] truncate">
-                              {activity.tweet_text || `Tweet ID: ${activity.twitter_id}`}
-                            </div>
-                          </td>
-                          <td className="px-2 py-3 align-top text-right">
-                            <div className="flex flex-col items-end gap-1">
-                              {sourceTweetUrl ? (
-                                <a
-                                  className="inline-flex items-center text-xs text-foreground underline-offset-4 hover:underline"
-                                  href={sourceTweetUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  Source
-                                  <ArrowUpRight className="ml-1 h-3 w-3" />
-                                </a>
-                              ) : null}
-                              {href ? (
-                                <a
-                                  className="inline-flex items-center text-xs text-foreground underline-offset-4 hover:underline"
-                                  href={href}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  Bluesky
-                                  <ArrowUpRight className="ml-1 h-3 w-3" />
-                                </a>
-                              ) : (
-                                <span className="text-xs text-muted-foreground">--</span>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                    {filteredRecentActivity.length === 0 ? (
-                      <tr>
-                        <td className="px-2 py-6 text-center text-sm text-muted-foreground" colSpan={6}>
-                          No activity for this filter.
-                        </td>
-                      </tr>
-                    ) : null}
-                  </tbody>
-                </table>
-              </div>
-            </CardContent>
-          </Card>
-        </section>
-      ) : null}
-
-      {activeTab === 'settings' ? (
-        <section className="space-y-6">
-          <Card className="">
-            <button
-              className="flex w-full items-center justify-between px-5 py-4 text-left"
-              onClick={() => toggleSettingsSection('account')}
-              type="button"
-            >
-              <div>
-                <p className="text-sm font-semibold">Account Security</p>
-                <p className="text-xs text-muted-foreground">Update your own email/password with verification.</p>
-              </div>
-              <ChevronDown
-                className={cn('h-4 w-4', isSettingsSectionExpanded('account') ? 'rotate-0' : '-rotate-90')}
-              />
-            </button>
-            <div
-              className={cn(
-                'grid',
-                isSettingsSectionExpanded('account') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-              )}
-            >
-              <div className="min-h-0 overflow-hidden">
-                <CardContent className="grid gap-4 border-t border-border/70 pt-4 lg:grid-cols-2">
-                  <form className="space-y-3" onSubmit={handleChangeOwnEmail}>
-                    <p className="text-sm font-semibold">Change Email</p>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-current-email">Current Email</Label>
-                      <Input
-                        id="account-current-email"
-                        type="email"
-                        value={emailForm.currentEmail}
-                        onChange={(event) => {
-                          setEmailForm((previous) => ({ ...previous, currentEmail: event.target.value }));
-                        }}
-                        placeholder={hasCurrentEmail ? undefined : 'No current email on this account'}
-                        required={hasCurrentEmail}
-                        disabled={!hasCurrentEmail}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-new-email">New Email</Label>
-                      <Input
-                        id="account-new-email"
-                        type="email"
-                        value={emailForm.newEmail}
-                        onChange={(event) => {
-                          setEmailForm((previous) => ({ ...previous, newEmail: event.target.value }));
-                        }}
-                        required
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-email-password">Current Password</Label>
-                      <Input
-                        id="account-email-password"
-                        type="password"
-                        value={emailForm.password}
-                        onChange={(event) => {
-                          setEmailForm((previous) => ({ ...previous, password: event.target.value }));
-                        }}
-                        required
-                      />
-                    </div>
-                    <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
-                      <Save className="mr-2 h-4 w-4" />
-                      Save Email
-                    </Button>
-                  </form>
-
-                  <form className="space-y-3" onSubmit={handleChangeOwnPassword}>
-                    <p className="text-sm font-semibold">Change Password</p>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-current-password">Current Password</Label>
-                      <Input
-                        id="account-current-password"
-                        type="password"
-                        value={passwordForm.currentPassword}
-                        onChange={(event) => {
-                          setPasswordForm((previous) => ({ ...previous, currentPassword: event.target.value }));
-                        }}
-                        required
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-new-password">New Password</Label>
-                      <Input
-                        id="account-new-password"
-                        type="password"
-                        value={passwordForm.newPassword}
-                        onChange={(event) => {
-                          setPasswordForm((previous) => ({ ...previous, newPassword: event.target.value }));
-                        }}
-                        required
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="account-confirm-password">Confirm New Password</Label>
-                      <Input
-                        id="account-confirm-password"
-                        type="password"
-                        value={passwordForm.confirmPassword}
-                        onChange={(event) => {
-                          setPasswordForm((previous) => ({ ...previous, confirmPassword: event.target.value }));
-                        }}
-                        required
-                      />
-                    </div>
-                    <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
-                      <Save className="mr-2 h-4 w-4" />
-                      Save Password
-                    </Button>
-                  </form>
-                </CardContent>
-              </div>
-            </div>
-          </Card>
-
-          {isAdmin ? (
-            <>
-              <Card className="">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Settings2 className="h-4 w-4" />
-                    Admin Settings
-                  </CardTitle>
-                  <CardDescription>Configured sections stay collapsed so adding accounts is one click.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4 pt-0">
-                  <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="space-y-1">
-                        <p className="text-sm font-semibold">Running Version</p>
-                        <p className="font-mono text-sm text-foreground">{runtimeVersionLabel}</p>
-                        {runtimeBranchLabel ? (
-                          <p className="text-xs text-muted-foreground">{runtimeBranchLabel}</p>
-                        ) : null}
-                        <p className="text-xs text-muted-foreground">{updateStateLabel}</p>
+                          </tbody>
+                        </table>
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="outline"
-                          onClick={() => {
-                            void handleRunUpdate();
-                          }}
-                          disabled={isUpdateBusy || updateStatus?.running}
-                        >
-                          {isUpdateBusy || updateStatus?.running ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <RefreshCw className="mr-2 h-4 w-4" />
-                          )}
-                          {updateStatus?.running ? 'Updating...' : 'Update'}
-                        </Button>
-                        {canCreateMappings ? (
-                          <Button className="w-full sm:w-auto" onClick={openAddAccountSheet}>
-                            <Plus className="mr-2 h-4 w-4" />
-                            Add Account
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-                    {updateStatus?.logTail && updateStatus.logTail.length > 0 ? (
-                      <details className="mt-3">
-                        <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
-                          Update log
-                        </summary>
-                        <pre className="mt-2 max-h-44 overflow-auto rounded-md bg-background p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                          {updateStatus.logTail.join('\n')}
-                        </pre>
-                      </details>
-                    ) : null}
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card className="">
-                <button
-                  className="flex w-full items-center justify-between px-5 py-4 text-left"
-                  onClick={() => toggleSettingsSection('users')}
-                  type="button"
-                >
-                  <div>
-                    <p className="text-sm font-semibold">User Access Manager</p>
-                    <p className="text-xs text-muted-foreground">Create users and control what they can see/manage.</p>
-                  </div>
-                  <ChevronDown
-                    className={cn('h-4 w-4', isSettingsSectionExpanded('users') ? 'rotate-0' : '-rotate-90')}
-                  />
-                </button>
-                <div
-                  className={cn(
-                    'grid',
-                    isSettingsSectionExpanded('users') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
+                    </Card>
                   )}
-                >
-                  <div className="min-h-0 overflow-hidden">
-                    <CardContent className="space-y-4 border-t border-border/70 pt-4">
-                      <form
-                        className="space-y-3 rounded-lg border border-border/70 bg-muted/20 p-3"
-                        onSubmit={handleCreateUser}
-                      >
-                        <p className="text-sm font-semibold">Create User</p>
-                        <div className="grid gap-3 md:grid-cols-3">
-                          <div className="space-y-2">
-                            <Label htmlFor="new-user-username">Username</Label>
+                </div>
+              </section>
+            ) : null}
+
+            {activeTab === 'posts' ? (
+              <section className="space-y-6">
+                <Card className="">
+                  <CardHeader className="pb-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <CardTitle>Already Posted</CardTitle>
+                        <CardDescription>
+                          Native-styled feed plus local SQLite search across all crossposted history.
+                        </CardDescription>
+                      </div>
+                      <div className="grid w-full gap-2 md:max-w-2xl md:grid-cols-[1fr_240px]">
+                        <div className="space-y-1">
+                          <Label htmlFor="posts-search">Search crossposted posts</Label>
+                          <div className="relative">
                             <Input
-                              id="new-user-username"
-                              value={newUserForm.username}
-                              onChange={(event) => {
-                                setNewUserForm((previous) => ({ ...previous, username: event.target.value }));
-                              }}
-                              placeholder="operator"
+                              id="posts-search"
+                              value={postsSearchQuery}
+                              onChange={(event) => setPostsSearchQuery(event.target.value)}
+                              placeholder="Search by text, @username, tweet id, or Bluesky handle"
                             />
-                          </div>
-                          <div className="space-y-2">
-                            <Label htmlFor="new-user-email">Email</Label>
-                            <Input
-                              id="new-user-email"
-                              type="email"
-                              value={newUserForm.email}
-                              onChange={(event) => {
-                                setNewUserForm((previous) => ({ ...previous, email: event.target.value }));
-                              }}
-                              placeholder="operator@example.com"
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label htmlFor="new-user-password">Password</Label>
-                            <Input
-                              id="new-user-password"
-                              type="password"
-                              value={newUserForm.password}
-                              onChange={(event) => {
-                                setNewUserForm((previous) => ({ ...previous, password: event.target.value }));
-                              }}
-                              placeholder="Minimum 8 characters"
-                              required
-                            />
+                            {isSearchingLocalPosts ? (
+                              <Loader2 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground" />
+                            ) : null}
                           </div>
                         </div>
-
-                        <label className="inline-flex items-center gap-2 text-sm font-medium">
-                          <input
-                            type="checkbox"
-                            checked={newUserForm.isAdmin}
-                            onChange={(event) => {
-                              setNewUserForm((previous) => ({
-                                ...previous,
-                                isAdmin: event.target.checked,
-                              }));
-                            }}
-                          />
-                          Make admin
-                        </label>
-
-                        {!newUserForm.isAdmin ? (
-                          <div className="grid gap-2 md:grid-cols-2">
-                            {PERMISSION_OPTIONS.map((permission) => (
-                              <label
-                                key={`new-user-permission-${permission.key}`}
-                                className="rounded-md border border-border/70 bg-background px-3 py-2 text-xs"
-                              >
-                                <span className="flex items-center justify-between gap-2">
-                                  <span className="font-medium">{permission.label}</span>
-                                  <input
-                                    type="checkbox"
-                                    checked={newUserForm.permissions[permission.key]}
-                                    onChange={(event) => {
-                                      const checked = event.target.checked;
-                                      setNewUserForm((previous) => ({
-                                        ...previous,
-                                        permissions: {
-                                          ...previous.permissions,
-                                          [permission.key]: checked,
-                                        },
-                                      }));
-                                    }}
-                                  />
-                                </span>
-                                <span className="mt-1 block text-muted-foreground">{permission.help}</span>
-                              </label>
+                        <div className="space-y-1">
+                          <Label htmlFor="posts-group-filter">Filter group</Label>
+                          <select
+                            id="posts-group-filter"
+                            className={selectClassName}
+                            value={postsGroupFilter}
+                            onChange={(event) => setPostsGroupFilter(event.target.value)}
+                          >
+                            <option value="all">All folders</option>
+                            {groupOptions.map((group) => (
+                              <option key={`posts-filter-${group.key}`} value={group.key}>
+                                {group.emoji} {group.name}
+                              </option>
                             ))}
-                          </div>
-                        ) : (
-                          <p className="text-xs text-muted-foreground">Admins always get full access.</p>
-                        )}
-
-                        <Button size="sm" type="submit" disabled={isBusy}>
-                          <Plus className="mr-2 h-4 w-4" />
-                          Create user
-                        </Button>
-                      </form>
-
-                      {managedUsers.length === 0 ? (
-                        <div className="rounded-lg border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
-                          No user accounts created yet.
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    {postsSearchQuery.trim() ? (
+                      filteredLocalPostSearchResults.length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-border/70 p-6 text-center text-sm text-muted-foreground">
+                          {isSearchingLocalPosts ? 'Searching local history...' : 'No local crossposted posts matched.'}
                         </div>
                       ) : (
                         <div className="space-y-2">
-                          {managedUsers.map((user) => {
-                            const isEditing = editingUserId === user.id;
-                            const displayName = user.username || user.email || user.id;
+                          {filteredLocalPostSearchResults.map((post) => {
+                            const mapping = resolveMappingForLocalPost(post);
+                            const groupMeta = getMappingGroupMeta(mapping);
+                            const sourceTweetUrl =
+                              post.twitterUrl || getTwitterPostUrl(post.twitterUsername, post.twitterId);
+                            const postUrl =
+                              post.postUrl ||
+                              (post.bskyUri
+                                ? `https://bsky.app/profile/${post.bskyIdentifier}/post/${
+                                    post.bskyUri.split('/').filter(Boolean).pop() || ''
+                                  }`
+                                : undefined);
+
                             return (
-                              <div
-                                key={`managed-user-${user.id}`}
-                                className="rounded-lg border border-border/70 bg-card/60 p-3"
+                              <article
+                                key={`${post.twitterId}-${post.bskyIdentifier}-${post.bskyCid || post.createdAt || 'result'}`}
+                                className="rounded-lg border border-border/70 bg-background p-4"
                               >
-                                {isEditing ? (
-                                  <div className="space-y-3">
-                                    <div className="grid gap-3 md:grid-cols-2">
-                                      <div className="space-y-1">
-                                        <Label htmlFor={`edit-user-username-${user.id}`}>Username</Label>
-                                        <Input
-                                          id={`edit-user-username-${user.id}`}
-                                          value={editingUserForm.username}
-                                          onChange={(event) => {
-                                            setEditingUserForm((previous) => ({
-                                              ...previous,
-                                              username: event.target.value,
-                                            }));
-                                          }}
-                                        />
-                                      </div>
-                                      <div className="space-y-1">
-                                        <Label htmlFor={`edit-user-email-${user.id}`}>Email</Label>
-                                        <Input
-                                          id={`edit-user-email-${user.id}`}
-                                          type="email"
-                                          value={editingUserForm.email}
-                                          onChange={(event) => {
-                                            setEditingUserForm((previous) => ({
-                                              ...previous,
-                                              email: event.target.value,
-                                            }));
-                                          }}
-                                        />
-                                      </div>
-                                    </div>
-
-                                    <label className="inline-flex items-center gap-2 text-sm font-medium">
-                                      <input
-                                        type="checkbox"
-                                        checked={editingUserForm.isAdmin}
-                                        onChange={(event) => {
-                                          setEditingUserForm((previous) => ({
-                                            ...previous,
-                                            isAdmin: event.target.checked,
-                                          }));
-                                        }}
-                                      />
-                                      Admin access
-                                    </label>
-
-                                    {!editingUserForm.isAdmin ? (
-                                      <div className="grid gap-2 md:grid-cols-2">
-                                        {PERMISSION_OPTIONS.map((permission) => (
-                                          <label
-                                            key={`edit-user-permission-${user.id}-${permission.key}`}
-                                            className="rounded-md border border-border/70 bg-background px-3 py-2 text-xs"
-                                          >
-                                            <span className="flex items-center justify-between gap-2">
-                                              <span className="font-medium">{permission.label}</span>
-                                              <input
-                                                type="checkbox"
-                                                checked={editingUserForm.permissions[permission.key]}
-                                                onChange={(event) => {
-                                                  const checked = event.target.checked;
-                                                  setEditingUserForm((previous) => ({
-                                                    ...previous,
-                                                    permissions: {
-                                                      ...previous.permissions,
-                                                      [permission.key]: checked,
-                                                    },
-                                                  }));
-                                                }}
-                                              />
-                                            </span>
-                                            <span className="mt-1 block text-muted-foreground">{permission.help}</span>
-                                          </label>
-                                        ))}
-                                      </div>
-                                    ) : null}
-
-                                    <div className="flex flex-wrap justify-end gap-2">
-                                      <Button size="sm" variant="ghost" onClick={resetEditingUser} type="button">
-                                        Cancel
-                                      </Button>
-                                      <Button
-                                        size="sm"
-                                        onClick={() => {
-                                          void handleSaveEditedUser(user.id);
-                                        }}
-                                        type="button"
-                                        disabled={isBusy}
-                                      >
-                                        Save user
-                                      </Button>
-                                    </div>
+                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-semibold">
+                                      @{post.bskyIdentifier}{' '}
+                                      <span className="text-muted-foreground">from @{post.twitterUsername}</span>
+                                    </p>
+                                    <p className="text-xs text-muted-foreground">
+                                      {post.createdAt ? new Date(post.createdAt).toLocaleString() : 'Unknown time'}
+                                    </p>
                                   </div>
-                                ) : (
-                                  <div className="space-y-3">
-                                    <div className="flex flex-wrap items-start justify-between gap-3">
-                                      <div className="space-y-1">
-                                        <p className="text-sm font-semibold">{displayName}</p>
-                                        <p className="text-xs text-muted-foreground">
-                                          {user.email ? `Email: ${user.email}` : 'No email set'}
-                                        </p>
-                                        <p className="text-xs text-muted-foreground">
-                                          {user.mappingCount} mappings ({user.activeMappingCount} active)
-                                        </p>
-                                      </div>
-                                      <div className="flex flex-wrap gap-2">
-                                        <Badge variant={user.isAdmin ? 'success' : 'outline'}>
-                                          {user.isAdmin ? 'Admin' : 'User'}
-                                        </Badge>
-                                        {user.id === me?.id ? <Badge variant="secondary">You</Badge> : null}
-                                      </div>
-                                    </div>
-
-                                    {!user.isAdmin ? (
-                                      <div className="flex flex-wrap gap-2">
-                                        {PERMISSION_OPTIONS.filter(
-                                          (permission) => user.permissions[permission.key],
-                                        ).map((permission) => (
-                                          <Badge key={`user-perm-${user.id}-${permission.key}`} variant="outline">
-                                            {permission.label}
-                                          </Badge>
-                                        ))}
-                                      </div>
-                                    ) : null}
-
-                                    <div className="flex flex-wrap gap-2">
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => {
-                                          setAccountsCreatorFilter(user.id);
-                                          setActiveTab('accounts');
-                                        }}
-                                      >
-                                        View Accounts
-                                      </Button>
-                                      <Button size="sm" variant="outline" onClick={() => beginEditUser(user)}>
-                                        Edit
-                                      </Button>
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => {
-                                          void handleResetUserPassword(user.id);
-                                        }}
-                                      >
-                                        Reset Password
-                                      </Button>
-                                      {user.id !== me?.id ? (
-                                        <Button
-                                          size="sm"
-                                          variant="ghost"
-                                          className="text-red-600 hover:text-red-500 dark:text-red-300 dark:hover:text-red-200"
-                                          onClick={() => {
-                                            void handleDeleteUser(user);
-                                          }}
-                                        >
-                                          Delete
-                                        </Button>
-                                      ) : null}
-                                    </div>
+                                  <div className="flex items-center gap-2">
+                                    <Badge variant="outline">
+                                      {groupMeta.emoji} {groupMeta.name}
+                                    </Badge>
+                                    <Badge variant="secondary">Relevance {Math.round(post.score)}</Badge>
                                   </div>
-                                )}
-                              </div>
+                                </div>
+                                <p className="mb-2 whitespace-pre-wrap break-words text-sm leading-relaxed">
+                                  {post.tweetText || 'No local tweet text stored for this record.'}
+                                </p>
+                                <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                                  <span className="font-mono">Tweet ID: {post.twitterId}</span>
+                                  {sourceTweetUrl ? (
+                                    <a
+                                      className="inline-flex items-center text-foreground underline-offset-4 hover:underline"
+                                      href={sourceTweetUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                    >
+                                      Source
+                                      <ArrowUpRight className="ml-1 h-3 w-3" />
+                                    </a>
+                                  ) : null}
+                                  {postUrl ? (
+                                    <a
+                                      className="inline-flex items-center text-foreground underline-offset-4 hover:underline"
+                                      href={postUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                    >
+                                      Bluesky
+                                      <ArrowUpRight className="ml-1 h-3 w-3" />
+                                    </a>
+                                  ) : null}
+                                </div>
+                              </article>
                             );
                           })}
                         </div>
-                      )}
-                    </CardContent>
-                  </div>
-                </div>
-              </Card>
-
-              <Card className="">
-                <button
-                  className="flex w-full items-center justify-between px-5 py-4 text-left"
-                  onClick={() => toggleSettingsSection('twitter')}
-                  type="button"
-                >
-                  <div>
-                    <p className="text-sm font-semibold">Twitter Credentials</p>
-                    <p className="text-xs text-muted-foreground">Primary and backup cookie values.</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant={twitterConfigured ? 'success' : 'outline'}>
-                      {twitterConfigured ? 'Configured' : 'Missing'}
-                    </Badge>
-                    <ChevronDown
-                      className={cn('h-4 w-4', isSettingsSectionExpanded('twitter') ? 'rotate-0' : '-rotate-90')}
-                    />
-                  </div>
-                </button>
-                <div
-                  className={cn(
-                    'grid',
-                    isSettingsSectionExpanded('twitter') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-                  )}
-                >
-                  <div className="min-h-0 overflow-hidden">
-                    <CardContent className="space-y-3 border-t border-border/70 pt-4">
-                      <form className="space-y-3" onSubmit={handleSaveTwitterConfig}>
-                        <div className="space-y-2">
-                          <Label htmlFor="authToken">Primary Auth Token</Label>
-                          <Input
-                            id="authToken"
-                            value={twitterConfig.authToken}
-                            onChange={(event) => {
-                              setTwitterConfig((prev) => ({ ...prev, authToken: event.target.value }));
-                            }}
-                            required
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="ct0">Primary CT0</Label>
-                          <Input
-                            id="ct0"
-                            value={twitterConfig.ct0}
-                            onChange={(event) => {
-                              setTwitterConfig((prev) => ({ ...prev, ct0: event.target.value }));
-                            }}
-                            required
-                          />
-                        </div>
-
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          <div className="space-y-2">
-                            <Label htmlFor="backupAuthToken">Backup Auth Token</Label>
-                            <Input
-                              id="backupAuthToken"
-                              value={twitterConfig.backupAuthToken || ''}
-                              onChange={(event) => {
-                                setTwitterConfig((prev) => ({ ...prev, backupAuthToken: event.target.value }));
-                              }}
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label htmlFor="backupCt0">Backup CT0</Label>
-                            <Input
-                              id="backupCt0"
-                              value={twitterConfig.backupCt0 || ''}
-                              onChange={(event) => {
-                                setTwitterConfig((prev) => ({ ...prev, backupCt0: event.target.value }));
-                              }}
-                            />
-                          </div>
-                        </div>
-
-                        <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
-                          <Save className="mr-2 h-4 w-4" />
-                          Save Twitter Credentials
-                        </Button>
-                      </form>
-                    </CardContent>
-                  </div>
-                </div>
-              </Card>
-
-              <Card className="">
-                <button
-                  className="flex w-full items-center justify-between px-5 py-4 text-left"
-                  onClick={() => toggleSettingsSection('ai')}
-                  type="button"
-                >
-                  <div>
-                    <p className="text-sm font-semibold">AI Settings</p>
-                    <p className="text-xs text-muted-foreground">Optional enrichment and rewrite provider config.</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant={aiConfigured ? 'success' : 'outline'}>
-                      {aiConfigured ? 'Configured' : 'Optional'}
-                    </Badge>
-                    <ChevronDown
-                      className={cn('h-4 w-4', isSettingsSectionExpanded('ai') ? 'rotate-0' : '-rotate-90')}
-                    />
-                  </div>
-                </button>
-                <div
-                  className={cn(
-                    'grid',
-                    isSettingsSectionExpanded('ai') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-                  )}
-                >
-                  <div className="min-h-0 overflow-hidden">
-                    <CardContent className="space-y-3 border-t border-border/70 pt-4">
-                      <form className="space-y-3" onSubmit={handleSaveAiConfig}>
-                        <div className="space-y-2">
-                          <Label htmlFor="provider">Provider</Label>
-                          <select
-                            className={selectClassName}
-                            id="provider"
-                            value={aiConfig.provider}
-                            onChange={(event) => {
-                              setAiConfig((prev) => ({
-                                ...prev,
-                                provider: event.target.value as AIConfig['provider'],
-                              }));
-                            }}
-                          >
-                            <option value="gemini">Google Gemini</option>
-                            <option value="openai">OpenAI / OpenRouter</option>
-                            <option value="anthropic">Anthropic</option>
-                            <option value="custom">Custom</option>
-                          </select>
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="apiKey">API Key</Label>
-                          <Input
-                            id="apiKey"
-                            type="password"
-                            value={aiConfig.apiKey || ''}
-                            onChange={(event) => {
-                              setAiConfig((prev) => ({ ...prev, apiKey: event.target.value }));
-                            }}
-                          />
-                        </div>
-                        {aiConfig.provider !== 'gemini' ? (
-                          <>
-                            <div className="space-y-2">
-                              <Label htmlFor="model">Model ID</Label>
-                              <Input
-                                id="model"
-                                value={aiConfig.model || ''}
-                                onChange={(event) => {
-                                  setAiConfig((prev) => ({ ...prev, model: event.target.value }));
-                                }}
-                                placeholder="gpt-4o"
-                              />
-                            </div>
-                            <div className="space-y-2">
-                              <Label htmlFor="baseUrl">Base URL</Label>
-                              <Input
-                                id="baseUrl"
-                                value={aiConfig.baseUrl || ''}
-                                onChange={(event) => {
-                                  setAiConfig((prev) => ({ ...prev, baseUrl: event.target.value }));
-                                }}
-                                placeholder="https://api.example.com/v1"
-                              />
-                            </div>
-                          </>
-                        ) : null}
-
-                        <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
-                          <Bot className="mr-2 h-4 w-4" />
-                          Save AI Settings
-                        </Button>
-                      </form>
-                    </CardContent>
-                  </div>
-                </div>
-              </Card>
-
-              <Card className="">
-                <button
-                  className="flex w-full items-center justify-between px-5 py-4 text-left"
-                  onClick={() => toggleSettingsSection('data')}
-                  type="button"
-                >
-                  <div>
-                    <p className="text-sm font-semibold">Data Management</p>
-                    <p className="text-xs text-muted-foreground">Export/import mappings and provider settings.</p>
-                  </div>
-                  <ChevronDown
-                    className={cn('h-4 w-4', isSettingsSectionExpanded('data') ? 'rotate-0' : '-rotate-90')}
-                  />
-                </button>
-                <div
-                  className={cn(
-                    'grid',
-                    isSettingsSectionExpanded('data') ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-                  )}
-                >
-                  <div className="min-h-0 overflow-hidden">
-                    <CardContent className="space-y-3 border-t border-border/70 pt-4">
-                      <Button className="w-full sm:w-auto" variant="outline" onClick={handleExportConfig}>
-                        <Download className="mr-2 h-4 w-4" />
-                        Export configuration
-                      </Button>
-                      <input
-                        ref={importInputRef}
-                        className="hidden"
-                        type="file"
-                        accept="application/json,.json"
-                        onChange={(event) => {
-                          void handleImportConfig(event);
-                        }}
-                      />
-                      <Button
-                        className="w-full sm:w-auto"
-                        variant="outline"
-                        onClick={() => {
-                          importInputRef.current?.click();
-                        }}
-                      >
-                        <Upload className="mr-2 h-4 w-4" />
-                        Import configuration
-                      </Button>
-                      <p className="text-xs text-muted-foreground">
-                        Imports preserve dashboard users and passwords while replacing mappings, provider keys, and
-                        scheduler settings.
-                      </p>
-                    </CardContent>
-                  </div>
-                </div>
-              </Card>
-            </>
-          ) : (
-            <Card className="">
-              <CardHeader>
-                <CardTitle>Access Scope</CardTitle>
-                <CardDescription>Your current account permissions.</CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-wrap gap-2 pt-0">
-                {PERMISSION_OPTIONS.filter((permission) => effectivePermissions[permission.key]).map((permission) => (
-                  <Badge key={`self-perm-${permission.key}`} variant="outline">
-                    {permission.label}
-                  </Badge>
-                ))}
-              </CardContent>
-            </Card>
-          )}
-        </section>
-      ) : null}
-      {isAddAccountSheetOpen ? (
-        <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-stretch sm:justify-end"
-          onClick={closeAddAccountSheet}
-        >
-          <aside
-            className="flex h-[95vh] w-full max-w-xl flex-col rounded-t-2xl border border-border/80 bg-card shadow-2xl sm:h-full sm:rounded-none sm:rounded-l-2xl"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="flex items-start justify-between border-b border-border/70 px-5 py-4">
-              <div>
-                <p className="text-xs uppercase tracking-[0.15em] text-muted-foreground">Add Account</p>
-                <h2 className="text-lg font-semibold">Create Crosspost Mapping</h2>
-              </div>
-              <Button variant="ghost" size="icon" onClick={closeAddAccountSheet} aria-label="Close add account flow">
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-
-            <div className="border-b border-border/70 px-5 py-3">
-              <div className="flex items-center gap-2">
-                {ADD_ACCOUNT_STEPS.map((label, index) => {
-                  const step = index + 1;
-                  const active = step === addAccountStep;
-                  const complete = step < addAccountStep;
-                  return (
-                    <div key={label} className="flex min-w-0 flex-1 items-center gap-2">
-                      <div
-                        className={cn(
-                          'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold',
-                          complete && 'border-foreground bg-foreground text-background',
-                          active && 'border-foreground text-foreground',
-                          !active && !complete && 'border-border text-muted-foreground',
-                        )}
-                      >
-                        {step}
+                      )
+                    ) : filteredPostedActivity.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-border/70 p-6 text-center text-sm text-muted-foreground">
+                        No posted entries yet.
                       </div>
-                      <span
-                        className={cn(
-                          'truncate text-xs',
-                          active ? 'text-foreground' : complete ? 'text-foreground/90' : 'text-muted-foreground',
-                        )}
-                      >
-                        {label}
-                      </span>
-                      {step < ADD_ACCOUNT_STEP_COUNT ? <div className="h-px flex-1 bg-border/70" /> : null}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto px-5 py-4">
-              {addAccountStep === 1 ? (
-                <div className="space-y-4">
-                  <div className="space-y-1">
-                    <p className="text-sm font-semibold">Add Twitter source account(s)</p>
-                    <p className="text-xs text-muted-foreground">
-                      Enter one or more usernames. We will preview metadata from your selected source.
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="add-account-twitter-usernames">Twitter Usernames</Label>
-                    <div className="flex gap-2">
-                      <Input
-                        id="add-account-twitter-usernames"
-                        value={newTwitterInput}
-                        onChange={(event) => {
-                          setNewTwitterInput(event.target.value);
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ',') {
-                            event.preventDefault();
-                            addNewTwitterUsername();
-                          }
-                        }}
-                        placeholder="@accountname"
-                      />
-                      <Button
-                        variant="outline"
-                        type="button"
-                        disabled={normalizeTwitterUsername(newTwitterInput).length === 0}
-                        onClick={addNewTwitterUsername}
-                      >
-                        Add
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="flex min-h-7 flex-wrap gap-2">
-                    {newTwitterUsers.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">No source usernames added yet.</p>
                     ) : (
-                      newTwitterUsers.map((username) => (
-                        <Badge key={`new-${username}`} variant="secondary" className="gap-1 pr-1">
-                          @{username}
-                          <button
-                            type="button"
-                            className="rounded-full px-1 text-muted-foreground transition hover:bg-background hover:text-foreground"
-                            onClick={() => removeNewTwitterUsername(username)}
-                            aria-label={`Remove @${username}`}
-                          >
-                            ×
-                          </button>
-                        </Badge>
-                      ))
-                    )}
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="add-account-source-select">Profile Mirror Source</Label>
-                    <select
-                      id="add-account-source-select"
-                      className={selectClassName}
-                      value={selectedMirrorSourceUsername}
-                      onChange={(event) => {
-                        setSelectedMirrorSourceUsername(event.target.value);
-                      }}
-                    >
-                      {newTwitterUsers.map((username) => (
-                        <option key={`source-${username}`} value={username}>
-                          @{username}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="font-medium">Twitter metadata preview</p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        type="button"
-                        disabled={!selectedMirrorSourceUsername || isMirrorPreviewLoading}
-                        onClick={() => {
-                          if (!selectedMirrorSourceUsername) return;
-                          void ensureTwitterMirrorProfileLoaded(selectedMirrorSourceUsername);
-                        }}
-                      >
-                        {isMirrorPreviewLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                        Refresh preview
-                      </Button>
-                    </div>
-                    {selectedMirrorPreview ? (
-                      <>
-                        <p>
-                          <span className="font-medium">Display name:</span> {selectedMirrorPreview.mirroredDisplayName}
-                        </p>
-                        <p className="whitespace-pre-wrap text-xs text-muted-foreground">
-                          {selectedMirrorPreview.mirroredDescription}
-                        </p>
-                      </>
-                    ) : (
-                      <p className="text-xs text-muted-foreground">
-                        Add a username and fetch preview to confirm the mirrored profile text.
-                      </p>
-                    )}
-                  </div>
-                </div>
-              ) : null}
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {filteredPostedActivity.map((post, index) => {
+                          const postUrl =
+                            post.postUrl ||
+                            (post.bskyUri
+                              ? `https://bsky.app/profile/${post.bskyIdentifier}/post/${
+                                  post.bskyUri.split('/').filter(Boolean).pop() || ''
+                                }`
+                              : undefined);
+                          const sourceTweetUrl =
+                            post.twitterUrl || getTwitterPostUrl(post.twitterUsername, post.twitterId);
+                          const segments = buildFacetSegments(post.text, post.facets || []);
+                          const mapping = resolveMappingForPost(post);
+                          const groupMeta = getMappingGroupMeta(mapping);
+                          const statItems: Array<{
+                            key: 'likes' | 'reposts' | 'replies' | 'quotes';
+                            value: number;
+                            icon: typeof Heart;
+                          }> = [
+                            { key: 'likes', value: post.stats.likes, icon: Heart },
+                            { key: 'reposts', value: post.stats.reposts, icon: Repeat2 },
+                            { key: 'replies', value: post.stats.replies, icon: MessageCircle },
+                            { key: 'quotes', value: post.stats.quotes, icon: Quote },
+                          ].filter((item) => item.value > 0);
+                          const authorAvatar = post.author.avatar || getProfileForActor(post.author.handle)?.avatar;
+                          const authorHandle = post.author.handle || post.bskyIdentifier;
+                          const authorName = post.author.displayName || authorHandle;
 
-              {addAccountStep === 2 ? (
-                <div className="space-y-4">
-                  <div className="space-y-1">
-                    <p className="text-sm font-semibold">Create Bluesky account (or use existing)</p>
-                    <p className="text-xs text-muted-foreground">
-                      Open Bluesky in a new tab, create account if needed, then generate an app password.
-                    </p>
-                  </div>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <Button asChild variant="outline">
-                      <a href="https://bsky.app" target="_blank" rel="noreferrer">
-                        Create account
-                        <ArrowUpRight className="ml-2 h-4 w-4" />
-                      </a>
-                    </Button>
-                    <Button asChild variant="outline">
-                      <a href="https://bsky.app/settings/app-passwords" target="_blank" rel="noreferrer">
-                        I have an account
-                        <ArrowUpRight className="ml-2 h-4 w-4" />
-                      </a>
-                    </Button>
-                  </div>
-                  <p className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                    Keep this drawer open, finish account setup in Bluesky, then continue to enter credentials.
-                  </p>
-                </div>
-              ) : null}
-
-              {addAccountStep === 3 ? (
-                <div className="space-y-4">
-                  <div className="space-y-1">
-                    <p className="text-sm font-semibold">Enter Bluesky credentials</p>
-                    <p className="text-xs text-muted-foreground">Support includes custom PDS/service URLs.</p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="add-account-bsky-identifier">Bluesky Identifier</Label>
-                    <Input
-                      id="add-account-bsky-identifier"
-                      value={newMapping.bskyIdentifier}
-                      onChange={(event) => {
-                        setNewMapping((previous) => ({ ...previous, bskyIdentifier: event.target.value }));
-                      }}
-                      placeholder="example.bsky.social"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="add-account-bsky-password">Bluesky App Password</Label>
-                    <Input
-                      id="add-account-bsky-password"
-                      type="password"
-                      value={newMapping.bskyPassword}
-                      onChange={(event) => {
-                        setNewMapping((previous) => ({ ...previous, bskyPassword: event.target.value }));
-                      }}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="add-account-bsky-url">Bluesky Service URL</Label>
-                    <Input
-                      id="add-account-bsky-url"
-                      value={newMapping.bskyServiceUrl}
-                      onChange={(event) => {
-                        setNewMapping((previous) => ({ ...previous, bskyServiceUrl: event.target.value }));
-                      }}
-                      placeholder="https://bsky.social"
-                    />
-                  </div>
-                  <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="font-medium">Credential check</p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        type="button"
-                        disabled={isCredentialValidationBusy}
-                        onClick={() => {
-                          void validateAddAccountCredentials();
-                        }}
-                      >
-                        {isCredentialValidationBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                        Validate
-                      </Button>
-                    </div>
-                    {validatedBskyCredentials ? (
-                      <p className="text-xs text-muted-foreground">
-                        Authenticated as @{validatedBskyCredentials.handle} on {validatedBskyCredentials.serviceUrl}.
-                      </p>
-                    ) : (
-                      <p className="text-xs text-muted-foreground">
-                        Validate now, or use Next to validate automatically.
-                      </p>
-                    )}
-                  </div>
-                </div>
-              ) : null}
-
-              {addAccountStep === 4 ? (
-                <div className="space-y-4">
-                  <div className="space-y-1">
-                    <p className="text-sm font-semibold">Verify email and create mapping</p>
-                    <p className="text-xs text-muted-foreground">
-                      Verify email in Bluesky, then create mapping to auto-sync name, bio, avatar, and banner, and apply
-                      the Bluesky bot self-label.
-                    </p>
-                  </div>
-                  <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
-                    <p>
-                      <span className="font-medium">Email status:</span>{' '}
-                      {validatedBskyCredentials?.emailConfirmed ? 'confirmed' : 'not confirmed yet'}
-                    </p>
-                    <Button asChild variant="outline" size="sm">
-                      <a
-                        href={validatedBskyCredentials?.settingsUrl || 'https://bsky.app/settings/account'}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Open Bluesky account settings
-                        <ArrowUpRight className="ml-2 h-4 w-4" />
-                      </a>
-                    </Button>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="add-account-owner">Owner (Optional)</Label>
-                    <Input
-                      id="add-account-owner"
-                      value={newMapping.owner}
-                      onChange={(event) => {
-                        setNewMapping((previous) => ({ ...previous, owner: event.target.value }));
-                      }}
-                      placeholder="jack"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Use Existing Folder (Optional)</Label>
-                    {reusableGroupOptions.length === 0 ? (
-                      <p className="rounded-lg border border-dashed border-border/70 px-3 py-2 text-xs text-muted-foreground">
-                        No folders yet. Create one below or from the Accounts tab.
-                      </p>
-                    ) : (
-                      <div className="flex flex-wrap gap-2">
-                        {reusableGroupOptions.map((group) => {
-                          const selected = getGroupKey(newMapping.groupName) === group.key;
                           return (
-                            <button
-                              key={`preset-group-${group.key}`}
-                              className={cn(
-                                'inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs transition-colors',
-                                selected
-                                  ? 'border-foreground bg-foreground text-background'
-                                  : 'border-border bg-background text-foreground hover:bg-muted',
-                              )}
-                              onClick={() => applyGroupPresetToNewMapping(group.key)}
-                              type="button"
+                            <article
+                              key={post.bskyUri || `${post.bskyCid || 'post'}-${post.createdAt || index}`}
+                              className="cv-auto rounded-lg border border-border bg-background p-4"
                             >
-                              <span>{group.emoji}</span>
-                              <span>{group.name}</span>
-                            </button>
+                              <div className="mb-3 flex items-start justify-between gap-3">
+                                <div className="flex items-center gap-2">
+                                  {authorAvatar ? (
+                                    <img
+                                      className="h-9 w-9 rounded-full border border-border/70 object-cover"
+                                      src={authorAvatar}
+                                      alt={authorName}
+                                      loading="lazy"
+                                    />
+                                  ) : (
+                                    <div className="flex h-9 w-9 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
+                                      <UserRound className="h-4 w-4" />
+                                    </div>
+                                  )}
+                                  <div>
+                                    <p className="text-sm font-semibold">{authorName}</p>
+                                    <p className="text-xs text-muted-foreground">
+                                      @{authorHandle} • from @{post.twitterUsername}
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <Badge variant="outline">
+                                    {groupMeta.emoji} {groupMeta.name}
+                                  </Badge>
+                                  <Badge variant="success">Posted</Badge>
+                                </div>
+                              </div>
+
+                              <p className="mb-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
+                                {segments.map((segment, segmentIndex) => {
+                                  if (segment.type === 'text') {
+                                    return <span key={`${post.bskyUri}-segment-${segmentIndex}`}>{segment.text}</span>;
+                                  }
+
+                                  const linkTone =
+                                    segment.type === 'mention'
+                                      ? 'text-cyan-600 hover:text-cyan-500 dark:text-cyan-300 dark:hover:text-cyan-200'
+                                      : segment.type === 'tag'
+                                        ? 'text-indigo-600 hover:text-indigo-500 dark:text-indigo-300 dark:hover:text-indigo-200'
+                                        : 'text-sky-600 hover:text-sky-500 dark:text-sky-300 dark:hover:text-sky-200';
+
+                                  return (
+                                    <a
+                                      key={`${post.bskyUri}-segment-${segmentIndex}`}
+                                      className={cn('hover:underline', linkTone)}
+                                      href={segment.href}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                    >
+                                      {segment.text}
+                                    </a>
+                                  );
+                                })}
+                              </p>
+
+                              {post.media.length > 0 ? (
+                                <div className="mb-3 space-y-2">
+                                  {post.media.map((media, mediaIndex) => {
+                                    if (media.type === 'image') {
+                                      const imageSrc = media.url || media.thumb;
+                                      if (!imageSrc) return null;
+                                      return (
+                                        <a
+                                          key={`${post.bskyUri}-media-${mediaIndex}`}
+                                          className="group block overflow-hidden rounded-lg border border-border/70 bg-muted"
+                                          href={imageSrc}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                        >
+                                          <img
+                                            className="h-56 w-full object-cover"
+                                            src={imageSrc}
+                                            alt={media.alt || 'Bluesky media'}
+                                            loading="lazy"
+                                          />
+                                        </a>
+                                      );
+                                    }
+
+                                    if (media.type === 'video') {
+                                      const videoHref = media.url || media.thumb;
+                                      return (
+                                        <div
+                                          key={`${post.bskyUri}-media-${mediaIndex}`}
+                                          className="group overflow-hidden rounded-lg border border-border/70 bg-muted"
+                                        >
+                                          {media.thumb ? (
+                                            <img
+                                              className="h-56 w-full object-cover"
+                                              src={media.thumb}
+                                              alt={media.alt || 'Video thumbnail'}
+                                              loading="lazy"
+                                            />
+                                          ) : (
+                                            <div className="flex h-44 items-center justify-center text-sm text-muted-foreground">
+                                              Video attachment
+                                            </div>
+                                          )}
+                                          {videoHref ? (
+                                            <div className="border-t border-border/70 p-2 text-right">
+                                              <a
+                                                className="inline-flex items-center text-xs text-foreground underline-offset-4 hover:underline"
+                                                href={videoHref}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                              >
+                                                Open video
+                                                <ArrowUpRight className="ml-1 h-3 w-3" />
+                                              </a>
+                                            </div>
+                                          ) : null}
+                                        </div>
+                                      );
+                                    }
+
+                                    if (media.type === 'external') {
+                                      if (!media.url) return null;
+                                      return (
+                                        <a
+                                          key={`${post.bskyUri}-media-${mediaIndex}`}
+                                          className="group block overflow-hidden rounded-lg border border-border/70 bg-background transition-colors hover:bg-muted/60"
+                                          href={media.url}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                        >
+                                          {media.thumb ? (
+                                            <img
+                                              className="h-40 w-full object-cover"
+                                              src={media.thumb}
+                                              alt={media.title || media.url}
+                                              loading="lazy"
+                                            />
+                                          ) : null}
+                                          <div className="space-y-1 p-3">
+                                            <p className="truncate text-sm font-medium">{media.title || media.url}</p>
+                                            {media.description ? (
+                                              <p className="max-h-10 overflow-hidden text-xs text-muted-foreground">
+                                                {media.description}
+                                              </p>
+                                            ) : null}
+                                          </div>
+                                        </a>
+                                      );
+                                    }
+
+                                    return null;
+                                  })}
+                                </div>
+                              ) : null}
+
+                              {statItems.length > 0 ? (
+                                <div className="mb-3 flex flex-wrap gap-2">
+                                  {statItems.map((stat) => {
+                                    const Icon = stat.icon;
+                                    return (
+                                      <span
+                                        key={`${post.bskyUri}-stat-${stat.key}`}
+                                        className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted px-2 py-1 text-xs text-muted-foreground"
+                                      >
+                                        <Icon className="h-3.5 w-3.5" />
+                                        {formatCompactNumber(stat.value)}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              ) : null}
+
+                              <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                                <span>
+                                  {post.createdAt ? new Date(post.createdAt).toLocaleString() : 'Unknown time'}
+                                </span>
+                                <div className="flex items-center gap-3">
+                                  {sourceTweetUrl ? (
+                                    <a
+                                      className="inline-flex items-center text-foreground underline-offset-4 hover:underline"
+                                      href={sourceTweetUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                    >
+                                      Source
+                                      <ArrowUpRight className="ml-1 h-3 w-3" />
+                                    </a>
+                                  ) : null}
+                                  {postUrl ? (
+                                    <a
+                                      className="inline-flex items-center text-foreground underline-offset-4 hover:underline"
+                                      href={postUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                    >
+                                      Bluesky
+                                      <ArrowUpRight className="ml-1 h-3 w-3" />
+                                    </a>
+                                  ) : (
+                                    <span>Missing URI</span>
+                                  )}
+                                </div>
+                              </div>
+                            </article>
                           );
                         })}
                       </div>
                     )}
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                    <div className="space-y-2">
-                      <Label htmlFor="add-account-group-name">Folder / Group Name (Optional)</Label>
-                      <Input
-                        id="add-account-group-name"
-                        value={newMapping.groupName}
-                        onChange={(event) => {
-                          setNewMapping((previous) => ({ ...previous, groupName: event.target.value }));
-                        }}
-                        placeholder="Gaming, News, Sports..."
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="add-account-group-emoji">Emoji</Label>
-                      <Input
-                        id="add-account-group-emoji"
-                        value={newMapping.groupEmoji}
-                        onChange={(event) => {
-                          setNewMapping((previous) => ({ ...previous, groupEmoji: event.target.value }));
-                        }}
-                        maxLength={8}
-                        placeholder={DEFAULT_GROUP_EMOJI}
-                      />
-                    </div>
-                  </div>
-                  <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
-                    <p>
-                      <span className="font-medium">Owner:</span> {newMapping.owner || '--'}
-                    </p>
-                    <p>
-                      <span className="font-medium">Twitter Sources:</span>{' '}
-                      {newTwitterUsers.length > 0 ? newTwitterUsers.map((username) => `@${username}`).join(', ') : '--'}
-                    </p>
-                    <p>
-                      <span className="font-medium">Bluesky Target:</span> {newMapping.bskyIdentifier || '--'}
-                    </p>
-                    <p>
-                      <span className="font-medium">Mirror Source:</span>{' '}
-                      {selectedMirrorSourceUsername ? `@${selectedMirrorSourceUsername}` : '--'}
-                    </p>
-                    {selectedMirrorPreview ? (
-                      <p className="whitespace-pre-wrap text-xs text-muted-foreground">
-                        {selectedMirrorPreview.mirroredDescription}
-                      </p>
-                    ) : null}
-                    <p>
-                      <span className="font-medium">Folder:</span>{' '}
-                      {newMapping.groupName.trim()
-                        ? `${newMapping.groupEmoji.trim() || DEFAULT_GROUP_EMOJI} ${newMapping.groupName.trim()}`
-                        : `${DEFAULT_GROUP_EMOJI} ${DEFAULT_GROUP_NAME}`}
-                    </p>
-                  </div>
-                </div>
-              ) : null}
-            </div>
+                  </CardContent>
+                </Card>
+              </section>
+            ) : null}
 
-            <div className="flex items-center justify-between gap-2 border-t border-border/70 px-5 py-4">
-              <Button variant="outline" onClick={retreatAddAccountStep} disabled={addAccountStep === 1 || isBusy}>
-                <ChevronLeft className="mr-2 h-4 w-4" />
-                Back
-              </Button>
-              {addAccountStep < ADD_ACCOUNT_STEP_COUNT ? (
-                <Button
-                  onClick={advanceAddAccountStep}
-                  disabled={isBusy || isMirrorPreviewLoading || isCredentialValidationBusy}
-                >
-                  Next
-                  <ChevronRight className="ml-2 h-4 w-4" />
-                </Button>
-              ) : (
-                <Button onClick={() => void submitNewMapping()} disabled={isBusy}>
-                  {isBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
-                  Create Account
-                </Button>
-              )}
-            </div>
-          </aside>
-        </div>
-      ) : null}
-
-      {editingMapping ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <Card className="w-full max-w-xl border-border/90 bg-card">
-            <CardHeader>
-              <CardTitle>Edit Mapping</CardTitle>
-              <CardDescription>Update ownership, handles, and target credentials.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="space-y-3" onSubmit={handleUpdateMapping}>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-owner">Owner</Label>
-                  <Input
-                    id="edit-owner"
-                    value={editForm.owner}
-                    onChange={(event) => {
-                      setEditForm((prev) => ({ ...prev, owner: event.target.value }));
-                    }}
-                    required
-                  />
-                </div>
-                <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                  <div className="space-y-2">
-                    <Label htmlFor="edit-groupName">Folder / Group Name</Label>
-                    <Input
-                      id="edit-groupName"
-                      value={editForm.groupName}
-                      onChange={(event) => {
-                        setEditForm((prev) => ({ ...prev, groupName: event.target.value }));
-                      }}
-                      placeholder="Gaming, News, Sports..."
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="edit-groupEmoji">Emoji</Label>
-                    <Input
-                      id="edit-groupEmoji"
-                      value={editForm.groupEmoji}
-                      onChange={(event) => {
-                        setEditForm((prev) => ({ ...prev, groupEmoji: event.target.value }));
-                      }}
-                      placeholder="📁"
-                      maxLength={8}
-                    />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-twitterUsernames">Twitter Usernames</Label>
-                  <div className="flex gap-2">
-                    <Input
-                      id="edit-twitterUsernames"
-                      value={editTwitterInput}
-                      onChange={(event) => {
-                        setEditTwitterInput(event.target.value);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ',') {
-                          event.preventDefault();
-                          addEditTwitterUsername();
-                        }
-                      }}
-                      placeholder="@accountname"
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      type="button"
-                      disabled={normalizeTwitterUsername(editTwitterInput).length === 0}
-                      onClick={addEditTwitterUsername}
-                    >
-                      Add
-                    </Button>
-                  </div>
-                  <div className="flex min-h-7 flex-wrap gap-2">
-                    {editTwitterUsers.map((username) => (
-                      <Badge key={`edit-${username}`} variant="secondary" className="gap-1 pr-1">
-                        @{username}
-                        <button
-                          type="button"
-                          className="rounded-full px-1 text-muted-foreground transition hover:bg-background hover:text-foreground"
-                          onClick={() => removeEditTwitterUsername(username)}
-                          aria-label={`Remove @${username}`}
+            {activeTab === 'activity' ? (
+              <section className="space-y-6">
+                <Card className="">
+                  <CardHeader className="pb-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <CardTitle className="flex items-center gap-2">
+                          <History className="h-4 w-4" />
+                          Recent Activity
+                        </CardTitle>
+                        <CardDescription>Latest migration outcomes from the processing database.</CardDescription>
+                      </div>
+                      <div className="w-full max-w-xs">
+                        <Label htmlFor="activity-group-filter">Filter group</Label>
+                        <select
+                          id="activity-group-filter"
+                          className={selectClassName}
+                          value={activityGroupFilter}
+                          onChange={(event) => setActivityGroupFilter(event.target.value)}
                         >
-                          ×
-                        </button>
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-bskyIdentifier">Bluesky Identifier</Label>
-                  <Input
-                    id="edit-bskyIdentifier"
-                    value={editForm.bskyIdentifier}
-                    onChange={(event) => {
-                      setEditForm((prev) => ({ ...prev, bskyIdentifier: event.target.value }));
-                    }}
-                    required
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-profile-sync-source">Profile Sync Source</Label>
-                  <select
-                    id="edit-profile-sync-source"
-                    className={selectClassName}
-                    value={editForm.profileSyncSourceUsername}
-                    onChange={(event) => {
-                      setEditForm((previous) => ({ ...previous, profileSyncSourceUsername: event.target.value }));
-                    }}
-                  >
-                    {editTwitterUsers.length > 1 ? <option value="">Select source username</option> : null}
-                    {editTwitterUsers.map((username) => (
-                      <option key={`edit-sync-source-${username}`} value={username}>
-                        @{username}
-                      </option>
-                    ))}
-                  </select>
-                  {editTwitterUsers.length > 1 ? (
-                    <p className="text-xs text-muted-foreground">
-                      Required when multiple Twitter usernames map to one Bluesky account.
-                    </p>
+                          <option value="all">All folders</option>
+                          {groupOptions.map((group) => (
+                            <option key={`activity-filter-${group.key}`} value={group.key}>
+                              {group.emoji} {group.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full text-left text-sm">
+                        <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+                          <tr>
+                            <th className="px-2 py-3">Time</th>
+                            <th className="px-2 py-3">Twitter User</th>
+                            <th className="px-2 py-3">Group</th>
+                            <th className="px-2 py-3">Status</th>
+                            <th className="px-2 py-3">Details</th>
+                            <th className="px-2 py-3 text-right">Link</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredRecentActivity.map((activity, index) => {
+                            const href = getBskyPostUrl(activity);
+                            const sourceTweetUrl = getTwitterPostUrl(activity.twitter_username, activity.twitter_id);
+                            const mapping = resolveMappingForActivity(activity);
+                            const groupMeta = getMappingGroupMeta(mapping);
+
+                            return (
+                              <tr
+                                key={`${activity.twitter_id}-${activity.created_at || index}`}
+                                className="interactive-row border-b border-border/60 last:border-0"
+                              >
+                                <td className="px-2 py-3 align-top text-xs text-muted-foreground">
+                                  {activity.created_at
+                                    ? new Date(activity.created_at).toLocaleTimeString([], {
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                      })
+                                    : '--'}
+                                </td>
+                                <td className="px-2 py-3 align-top font-medium">@{activity.twitter_username}</td>
+                                <td className="px-2 py-3 align-top">
+                                  <Badge variant="outline">
+                                    {groupMeta.emoji} {groupMeta.name}
+                                  </Badge>
+                                </td>
+                                <td className="px-2 py-3 align-top">
+                                  {activity.status === 'migrated' ? (
+                                    <Badge variant="success">Migrated</Badge>
+                                  ) : activity.status === 'skipped' ? (
+                                    <Badge variant="outline">Skipped</Badge>
+                                  ) : (
+                                    <Badge variant="danger">Failed</Badge>
+                                  )}
+                                </td>
+                                <td className="px-2 py-3 align-top text-xs text-muted-foreground">
+                                  <div className="max-w-[340px] truncate">
+                                    {activity.tweet_text || `Tweet ID: ${activity.twitter_id}`}
+                                  </div>
+                                </td>
+                                <td className="px-2 py-3 align-top text-right">
+                                  <div className="flex flex-col items-end gap-1">
+                                    {sourceTweetUrl ? (
+                                      <a
+                                        className="inline-flex items-center text-xs text-foreground underline-offset-4 hover:underline"
+                                        href={sourceTweetUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                      >
+                                        Source
+                                        <ArrowUpRight className="ml-1 h-3 w-3" />
+                                      </a>
+                                    ) : null}
+                                    {href ? (
+                                      <a
+                                        className="inline-flex items-center text-xs text-foreground underline-offset-4 hover:underline"
+                                        href={href}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                      >
+                                        Bluesky
+                                        <ArrowUpRight className="ml-1 h-3 w-3" />
+                                      </a>
+                                    ) : (
+                                      <span className="text-xs text-muted-foreground">--</span>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          {filteredRecentActivity.length === 0 ? (
+                            <tr>
+                              <td className="px-2 py-6 text-center text-sm text-muted-foreground" colSpan={6}>
+                                No activity for this filter.
+                              </td>
+                            </tr>
+                          ) : null}
+                        </tbody>
+                      </table>
+                    </div>
+                  </CardContent>
+                </Card>
+              </section>
+            ) : null}
+
+            {activeTab === 'settings' ? (
+              <section className="grid gap-6 lg:grid-cols-[200px_1fr]">
+                <Card className="h-fit lg:sticky lg:top-6">
+                  <CardContent className="p-2">
+                    <NavList
+                      items={settingsNavItems}
+                      activeId={settingsActiveSection}
+                      onSelect={setSettingsActiveSection}
+                    />
+                  </CardContent>
+                </Card>
+
+                <div className="min-w-0 space-y-6">
+                  {settingsActiveSection === 'account' ? (
+                    <Card className="">
+                      <CardHeader>
+                        <CardTitle>Account Security</CardTitle>
+                        <CardDescription>Update your own email/password with verification.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="grid gap-4 border-t border-border/70 pt-4 lg:grid-cols-2">
+                        <form className="space-y-3" onSubmit={handleChangeOwnEmail}>
+                          <p className="text-sm font-semibold">Change Email</p>
+                          <div className="space-y-2">
+                            <Label htmlFor="account-current-email">Current Email</Label>
+                            <Input
+                              id="account-current-email"
+                              type="email"
+                              value={emailForm.currentEmail}
+                              onChange={(event) => {
+                                setEmailForm((previous) => ({ ...previous, currentEmail: event.target.value }));
+                              }}
+                              placeholder={hasCurrentEmail ? undefined : 'No current email on this account'}
+                              required={hasCurrentEmail}
+                              disabled={!hasCurrentEmail}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="account-new-email">New Email</Label>
+                            <Input
+                              id="account-new-email"
+                              type="email"
+                              value={emailForm.newEmail}
+                              onChange={(event) => {
+                                setEmailForm((previous) => ({ ...previous, newEmail: event.target.value }));
+                              }}
+                              required
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="account-email-password">Current Password</Label>
+                            <Input
+                              id="account-email-password"
+                              type="password"
+                              value={emailForm.password}
+                              onChange={(event) => {
+                                setEmailForm((previous) => ({ ...previous, password: event.target.value }));
+                              }}
+                              required
+                            />
+                          </div>
+                          <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
+                            <Save className="mr-2 h-4 w-4" />
+                            Save Email
+                          </Button>
+                        </form>
+
+                        <form className="space-y-3" onSubmit={handleChangeOwnPassword}>
+                          <p className="text-sm font-semibold">Change Password</p>
+                          <div className="space-y-2">
+                            <Label htmlFor="account-current-password">Current Password</Label>
+                            <Input
+                              id="account-current-password"
+                              type="password"
+                              value={passwordForm.currentPassword}
+                              onChange={(event) => {
+                                setPasswordForm((previous) => ({ ...previous, currentPassword: event.target.value }));
+                              }}
+                              required
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="account-new-password">New Password</Label>
+                            <Input
+                              id="account-new-password"
+                              type="password"
+                              value={passwordForm.newPassword}
+                              onChange={(event) => {
+                                setPasswordForm((previous) => ({ ...previous, newPassword: event.target.value }));
+                              }}
+                              required
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="account-confirm-password">Confirm New Password</Label>
+                            <Input
+                              id="account-confirm-password"
+                              type="password"
+                              value={passwordForm.confirmPassword}
+                              onChange={(event) => {
+                                setPasswordForm((previous) => ({ ...previous, confirmPassword: event.target.value }));
+                              }}
+                              required
+                            />
+                          </div>
+                          <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
+                            <Save className="mr-2 h-4 w-4" />
+                            Save Password
+                          </Button>
+                        </form>
+                      </CardContent>
+                    </Card>
+                  ) : null}
+
+                  {settingsActiveSection === 'account' && !isAdmin ? (
+                    <Card className="">
+                      <CardHeader>
+                        <CardTitle>Access Scope</CardTitle>
+                        <CardDescription>Your current account permissions.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="flex flex-wrap gap-2 pt-0">
+                        {PERMISSION_OPTIONS.filter((permission) => effectivePermissions[permission.key]).map(
+                          (permission) => (
+                            <Badge key={`self-perm-${permission.key}`} variant="outline">
+                              {permission.label}
+                            </Badge>
+                          ),
+                        )}
+                      </CardContent>
+                    </Card>
+                  ) : null}
+
+                  {settingsActiveSection === 'system' && isAdmin ? (
+                    <Card className="">
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          <Settings2 className="h-4 w-4" />
+                          Admin Settings
+                        </CardTitle>
+                        <CardDescription>Running version, updates, and quick account creation.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-4 pt-0">
+                        <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="space-y-1">
+                              <p className="text-sm font-semibold">Running Version</p>
+                              <p className="font-mono text-sm text-foreground">{runtimeVersionLabel}</p>
+                              {runtimeBranchLabel ? (
+                                <p className="text-xs text-muted-foreground">{runtimeBranchLabel}</p>
+                              ) : null}
+                              <p className="text-xs text-muted-foreground">{updateStateLabel}</p>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                variant="outline"
+                                onClick={() => {
+                                  void handleRunUpdate();
+                                }}
+                                disabled={isUpdateBusy || updateStatus?.running}
+                              >
+                                {isUpdateBusy || updateStatus?.running ? (
+                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                ) : (
+                                  <RefreshCw className="mr-2 h-4 w-4" />
+                                )}
+                                {updateStatus?.running ? 'Updating...' : 'Update'}
+                              </Button>
+                              {canCreateMappings ? (
+                                <Button className="w-full sm:w-auto" onClick={openAddAccountSheet}>
+                                  <Plus className="mr-2 h-4 w-4" />
+                                  Add Account
+                                </Button>
+                              ) : null}
+                            </div>
+                          </div>
+                          {updateStatus?.logTail && updateStatus.logTail.length > 0 ? (
+                            <details className="mt-3">
+                              <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
+                                Update log
+                              </summary>
+                              <pre className="mt-2 max-h-44 overflow-auto rounded-md bg-background p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                                {updateStatus.logTail.join('\n')}
+                              </pre>
+                            </details>
+                          ) : null}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ) : null}
+
+                  {settingsActiveSection === 'users' && isAdmin ? (
+                    <Card className="">
+                      <CardHeader>
+                        <CardTitle>User Access Manager</CardTitle>
+                        <CardDescription>Create users and control what they can see/manage.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-4 border-t border-border/70 pt-4">
+                        <form
+                          className="space-y-3 rounded-lg border border-border/70 bg-muted/20 p-3"
+                          onSubmit={handleCreateUser}
+                        >
+                          <p className="text-sm font-semibold">Create User</p>
+                          <div className="grid gap-3 md:grid-cols-3">
+                            <div className="space-y-2">
+                              <Label htmlFor="new-user-username">Username</Label>
+                              <Input
+                                id="new-user-username"
+                                value={newUserForm.username}
+                                onChange={(event) => {
+                                  setNewUserForm((previous) => ({ ...previous, username: event.target.value }));
+                                }}
+                                placeholder="operator"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="new-user-email">Email</Label>
+                              <Input
+                                id="new-user-email"
+                                type="email"
+                                value={newUserForm.email}
+                                onChange={(event) => {
+                                  setNewUserForm((previous) => ({ ...previous, email: event.target.value }));
+                                }}
+                                placeholder="operator@example.com"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="new-user-password">Password</Label>
+                              <Input
+                                id="new-user-password"
+                                type="password"
+                                value={newUserForm.password}
+                                onChange={(event) => {
+                                  setNewUserForm((previous) => ({ ...previous, password: event.target.value }));
+                                }}
+                                placeholder="Minimum 8 characters"
+                                required
+                              />
+                            </div>
+                          </div>
+
+                          <label className="inline-flex items-center gap-2 text-sm font-medium">
+                            <input
+                              type="checkbox"
+                              checked={newUserForm.isAdmin}
+                              onChange={(event) => {
+                                setNewUserForm((previous) => ({
+                                  ...previous,
+                                  isAdmin: event.target.checked,
+                                }));
+                              }}
+                            />
+                            Make admin
+                          </label>
+
+                          {!newUserForm.isAdmin ? (
+                            <div className="grid gap-2 md:grid-cols-2">
+                              {PERMISSION_OPTIONS.map((permission) => (
+                                <label
+                                  key={`new-user-permission-${permission.key}`}
+                                  className="rounded-md border border-border/70 bg-background px-3 py-2 text-xs"
+                                >
+                                  <span className="flex items-center justify-between gap-2">
+                                    <span className="font-medium">{permission.label}</span>
+                                    <input
+                                      type="checkbox"
+                                      checked={newUserForm.permissions[permission.key]}
+                                      onChange={(event) => {
+                                        const checked = event.target.checked;
+                                        setNewUserForm((previous) => ({
+                                          ...previous,
+                                          permissions: {
+                                            ...previous.permissions,
+                                            [permission.key]: checked,
+                                          },
+                                        }));
+                                      }}
+                                    />
+                                  </span>
+                                  <span className="mt-1 block text-muted-foreground">{permission.help}</span>
+                                </label>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-xs text-muted-foreground">Admins always get full access.</p>
+                          )}
+
+                          <Button size="sm" type="submit" disabled={isBusy}>
+                            <Plus className="mr-2 h-4 w-4" />
+                            Create user
+                          </Button>
+                        </form>
+
+                        {managedUsers.length === 0 ? (
+                          <div className="rounded-lg border border-dashed border-border/70 p-4 text-sm text-muted-foreground">
+                            No user accounts created yet.
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {managedUsers.map((user) => {
+                              const isEditing = editingUserId === user.id;
+                              const displayName = user.username || user.email || user.id;
+                              return (
+                                <div
+                                  key={`managed-user-${user.id}`}
+                                  className="rounded-lg border border-border/70 bg-card/60 p-3"
+                                >
+                                  {isEditing ? (
+                                    <div className="space-y-3">
+                                      <div className="grid gap-3 md:grid-cols-2">
+                                        <div className="space-y-1">
+                                          <Label htmlFor={`edit-user-username-${user.id}`}>Username</Label>
+                                          <Input
+                                            id={`edit-user-username-${user.id}`}
+                                            value={editingUserForm.username}
+                                            onChange={(event) => {
+                                              setEditingUserForm((previous) => ({
+                                                ...previous,
+                                                username: event.target.value,
+                                              }));
+                                            }}
+                                          />
+                                        </div>
+                                        <div className="space-y-1">
+                                          <Label htmlFor={`edit-user-email-${user.id}`}>Email</Label>
+                                          <Input
+                                            id={`edit-user-email-${user.id}`}
+                                            type="email"
+                                            value={editingUserForm.email}
+                                            onChange={(event) => {
+                                              setEditingUserForm((previous) => ({
+                                                ...previous,
+                                                email: event.target.value,
+                                              }));
+                                            }}
+                                          />
+                                        </div>
+                                      </div>
+
+                                      <label className="inline-flex items-center gap-2 text-sm font-medium">
+                                        <input
+                                          type="checkbox"
+                                          checked={editingUserForm.isAdmin}
+                                          onChange={(event) => {
+                                            setEditingUserForm((previous) => ({
+                                              ...previous,
+                                              isAdmin: event.target.checked,
+                                            }));
+                                          }}
+                                        />
+                                        Admin access
+                                      </label>
+
+                                      {!editingUserForm.isAdmin ? (
+                                        <div className="grid gap-2 md:grid-cols-2">
+                                          {PERMISSION_OPTIONS.map((permission) => (
+                                            <label
+                                              key={`edit-user-permission-${user.id}-${permission.key}`}
+                                              className="rounded-md border border-border/70 bg-background px-3 py-2 text-xs"
+                                            >
+                                              <span className="flex items-center justify-between gap-2">
+                                                <span className="font-medium">{permission.label}</span>
+                                                <input
+                                                  type="checkbox"
+                                                  checked={editingUserForm.permissions[permission.key]}
+                                                  onChange={(event) => {
+                                                    const checked = event.target.checked;
+                                                    setEditingUserForm((previous) => ({
+                                                      ...previous,
+                                                      permissions: {
+                                                        ...previous.permissions,
+                                                        [permission.key]: checked,
+                                                      },
+                                                    }));
+                                                  }}
+                                                />
+                                              </span>
+                                              <span className="mt-1 block text-muted-foreground">
+                                                {permission.help}
+                                              </span>
+                                            </label>
+                                          ))}
+                                        </div>
+                                      ) : null}
+
+                                      <div className="flex flex-wrap justify-end gap-2">
+                                        <Button size="sm" variant="ghost" onClick={resetEditingUser} type="button">
+                                          Cancel
+                                        </Button>
+                                        <Button
+                                          size="sm"
+                                          onClick={() => {
+                                            void handleSaveEditedUser(user.id);
+                                          }}
+                                          type="button"
+                                          disabled={isBusy}
+                                        >
+                                          Save user
+                                        </Button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div className="space-y-3">
+                                      <div className="flex flex-wrap items-start justify-between gap-3">
+                                        <div className="space-y-1">
+                                          <p className="text-sm font-semibold">{displayName}</p>
+                                          <p className="text-xs text-muted-foreground">
+                                            {user.email ? `Email: ${user.email}` : 'No email set'}
+                                          </p>
+                                          <p className="text-xs text-muted-foreground">
+                                            {user.mappingCount} mappings ({user.activeMappingCount} active)
+                                          </p>
+                                        </div>
+                                        <div className="flex flex-wrap gap-2">
+                                          <Badge variant={user.isAdmin ? 'success' : 'outline'}>
+                                            {user.isAdmin ? 'Admin' : 'User'}
+                                          </Badge>
+                                          {user.id === me?.id ? <Badge variant="secondary">You</Badge> : null}
+                                        </div>
+                                      </div>
+
+                                      {!user.isAdmin ? (
+                                        <div className="flex flex-wrap gap-2">
+                                          {PERMISSION_OPTIONS.filter(
+                                            (permission) => user.permissions[permission.key],
+                                          ).map((permission) => (
+                                            <Badge key={`user-perm-${user.id}-${permission.key}`} variant="outline">
+                                              {permission.label}
+                                            </Badge>
+                                          ))}
+                                        </div>
+                                      ) : null}
+
+                                      <div className="flex flex-wrap gap-2">
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          onClick={() => {
+                                            setAccountsCreatorFilter(user.id);
+                                            setActiveTab('accounts');
+                                          }}
+                                        >
+                                          View Accounts
+                                        </Button>
+                                        <Button size="sm" variant="outline" onClick={() => beginEditUser(user)}>
+                                          Edit
+                                        </Button>
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          onClick={() => {
+                                            void handleResetUserPassword(user.id);
+                                          }}
+                                        >
+                                          Reset Password
+                                        </Button>
+                                        {user.id !== me?.id ? (
+                                          <Button
+                                            size="sm"
+                                            variant="ghost"
+                                            className="text-red-600 hover:text-red-500 dark:text-red-300 dark:hover:text-red-200"
+                                            onClick={() => {
+                                              void handleDeleteUser(user);
+                                            }}
+                                          >
+                                            Delete
+                                          </Button>
+                                        ) : null}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  ) : null}
+
+                  {settingsActiveSection === 'twitter' && isAdmin ? (
+                    <Card className="">
+                      <CardHeader>
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <CardTitle>Twitter Credentials</CardTitle>
+                            <CardDescription>Primary and backup cookie values.</CardDescription>
+                          </div>
+                          <Badge variant={twitterConfigured ? 'success' : 'outline'}>
+                            {twitterConfigured ? 'Configured' : 'Missing'}
+                          </Badge>
+                        </div>
+                      </CardHeader>
+                      <CardContent className="space-y-3 border-t border-border/70 pt-4">
+                        <form className="space-y-3" onSubmit={handleSaveTwitterConfig}>
+                          <div className="space-y-2">
+                            <Label htmlFor="authToken">Primary Auth Token</Label>
+                            <Input
+                              id="authToken"
+                              value={twitterConfig.authToken}
+                              onChange={(event) => {
+                                setTwitterConfig((prev) => ({ ...prev, authToken: event.target.value }));
+                              }}
+                              required
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="ct0">Primary CT0</Label>
+                            <Input
+                              id="ct0"
+                              value={twitterConfig.ct0}
+                              onChange={(event) => {
+                                setTwitterConfig((prev) => ({ ...prev, ct0: event.target.value }));
+                              }}
+                              required
+                            />
+                          </div>
+
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div className="space-y-2">
+                              <Label htmlFor="backupAuthToken">Backup Auth Token</Label>
+                              <Input
+                                id="backupAuthToken"
+                                value={twitterConfig.backupAuthToken || ''}
+                                onChange={(event) => {
+                                  setTwitterConfig((prev) => ({ ...prev, backupAuthToken: event.target.value }));
+                                }}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="backupCt0">Backup CT0</Label>
+                              <Input
+                                id="backupCt0"
+                                value={twitterConfig.backupCt0 || ''}
+                                onChange={(event) => {
+                                  setTwitterConfig((prev) => ({ ...prev, backupCt0: event.target.value }));
+                                }}
+                              />
+                            </div>
+                          </div>
+
+                          <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
+                            <Save className="mr-2 h-4 w-4" />
+                            Save Twitter Credentials
+                          </Button>
+                        </form>
+                      </CardContent>
+                    </Card>
+                  ) : null}
+
+                  {settingsActiveSection === 'ai' && isAdmin ? (
+                    <Card className="">
+                      <CardHeader>
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <CardTitle>AI Settings</CardTitle>
+                            <CardDescription>Optional enrichment and rewrite provider config.</CardDescription>
+                          </div>
+                          <Badge variant={aiConfigured ? 'success' : 'outline'}>
+                            {aiConfigured ? 'Configured' : 'Optional'}
+                          </Badge>
+                        </div>
+                      </CardHeader>
+                      <CardContent className="space-y-3 border-t border-border/70 pt-4">
+                        <form className="space-y-3" onSubmit={handleSaveAiConfig}>
+                          <div className="space-y-2">
+                            <Label htmlFor="provider">Provider</Label>
+                            <select
+                              className={selectClassName}
+                              id="provider"
+                              value={aiConfig.provider}
+                              onChange={(event) => {
+                                setAiConfig((prev) => ({
+                                  ...prev,
+                                  provider: event.target.value as AIConfig['provider'],
+                                }));
+                              }}
+                            >
+                              <option value="gemini">Google Gemini</option>
+                              <option value="openai">OpenAI / OpenRouter</option>
+                              <option value="anthropic">Anthropic</option>
+                              <option value="custom">Custom</option>
+                            </select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="apiKey">API Key</Label>
+                            <Input
+                              id="apiKey"
+                              type="password"
+                              value={aiConfig.apiKey || ''}
+                              onChange={(event) => {
+                                setAiConfig((prev) => ({ ...prev, apiKey: event.target.value }));
+                              }}
+                            />
+                          </div>
+                          {aiConfig.provider !== 'gemini' ? (
+                            <>
+                              <div className="space-y-2">
+                                <Label htmlFor="model">Model ID</Label>
+                                <Input
+                                  id="model"
+                                  value={aiConfig.model || ''}
+                                  onChange={(event) => {
+                                    setAiConfig((prev) => ({ ...prev, model: event.target.value }));
+                                  }}
+                                  placeholder="gpt-4o"
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <Label htmlFor="baseUrl">Base URL</Label>
+                                <Input
+                                  id="baseUrl"
+                                  value={aiConfig.baseUrl || ''}
+                                  onChange={(event) => {
+                                    setAiConfig((prev) => ({ ...prev, baseUrl: event.target.value }));
+                                  }}
+                                  placeholder="https://api.example.com/v1"
+                                />
+                              </div>
+                            </>
+                          ) : null}
+
+                          <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
+                            <Bot className="mr-2 h-4 w-4" />
+                            Save AI Settings
+                          </Button>
+                        </form>
+                      </CardContent>
+                    </Card>
+                  ) : null}
+
+                  {settingsActiveSection === 'data' && isAdmin ? (
+                    <Card className="">
+                      <CardHeader>
+                        <CardTitle>Data Management</CardTitle>
+                        <CardDescription>Export/import mappings and provider settings.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-3 border-t border-border/70 pt-4">
+                        <Button className="w-full sm:w-auto" variant="outline" onClick={handleExportConfig}>
+                          <Download className="mr-2 h-4 w-4" />
+                          Export configuration
+                        </Button>
+                        <input
+                          ref={importInputRef}
+                          className="hidden"
+                          type="file"
+                          accept="application/json,.json"
+                          onChange={(event) => {
+                            void handleImportConfig(event);
+                          }}
+                        />
+                        <Button
+                          className="w-full sm:w-auto"
+                          variant="outline"
+                          onClick={() => {
+                            importInputRef.current?.click();
+                          }}
+                        >
+                          <Upload className="mr-2 h-4 w-4" />
+                          Import configuration
+                        </Button>
+                        <p className="text-xs text-muted-foreground">
+                          Imports preserve dashboard users and passwords while replacing mappings, provider keys, and
+                          scheduler settings.
+                        </p>
+                      </CardContent>
+                    </Card>
                   ) : null}
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-bskyPassword">New App Password (optional)</Label>
-                  <Input
-                    id="edit-bskyPassword"
-                    type="password"
-                    value={editForm.bskyPassword}
-                    onChange={(event) => {
-                      setEditForm((prev) => ({ ...prev, bskyPassword: event.target.value }));
-                    }}
-                    placeholder="Leave blank to keep existing"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-bskyServiceUrl">Service URL</Label>
-                  <Input
-                    id="edit-bskyServiceUrl"
-                    value={editForm.bskyServiceUrl}
-                    onChange={(event) => {
-                      setEditForm((prev) => ({ ...prev, bskyServiceUrl: event.target.value }));
-                    }}
-                  />
-                </div>
+              </section>
+            ) : null}
+            {isAddAccountSheetOpen ? (
+              <div
+                className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-stretch sm:justify-end"
+                onClick={closeAddAccountSheet}
+              >
+                <aside
+                  className="flex h-[95vh] w-full max-w-xl flex-col rounded-t-2xl border border-border/80 bg-card shadow-2xl sm:h-full sm:rounded-none sm:rounded-l-2xl"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div className="flex items-start justify-between border-b border-border/70 px-5 py-4">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.15em] text-muted-foreground">Add Account</p>
+                      <h2 className="text-lg font-semibold">Create Crosspost Mapping</h2>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={closeAddAccountSheet}
+                      aria-label="Close add account flow"
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
 
-                <div className="flex flex-wrap justify-end gap-2 pt-2">
-                  <Button
-                    variant="ghost"
-                    type="button"
-                    onClick={() => {
-                      setEditingMapping(null);
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                  <Button type="submit" disabled={isBusy}>
-                    {isBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                    Save changes
-                  </Button>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
-        </div>
-      ) : null}
-    </main>
+                  <div className="border-b border-border/70 px-5 py-3">
+                    <div className="flex items-center gap-2">
+                      {ADD_ACCOUNT_STEPS.map((label, index) => {
+                        const step = index + 1;
+                        const active = step === addAccountStep;
+                        const complete = step < addAccountStep;
+                        return (
+                          <div key={label} className="flex min-w-0 flex-1 items-center gap-2">
+                            <div
+                              className={cn(
+                                'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold',
+                                complete && 'border-foreground bg-foreground text-background',
+                                active && 'border-foreground text-foreground',
+                                !active && !complete && 'border-border text-muted-foreground',
+                              )}
+                            >
+                              {step}
+                            </div>
+                            <span
+                              className={cn(
+                                'truncate text-xs',
+                                active ? 'text-foreground' : complete ? 'text-foreground/90' : 'text-muted-foreground',
+                              )}
+                            >
+                              {label}
+                            </span>
+                            {step < ADD_ACCOUNT_STEP_COUNT ? <div className="h-px flex-1 bg-border/70" /> : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto px-5 py-4">
+                    {addAccountStep === 1 ? (
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <p className="text-sm font-semibold">Add Twitter source account(s)</p>
+                          <p className="text-xs text-muted-foreground">
+                            Enter one or more usernames. We will preview metadata from your selected source.
+                          </p>
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="add-account-twitter-usernames">Twitter Usernames</Label>
+                          <div className="flex gap-2">
+                            <Input
+                              id="add-account-twitter-usernames"
+                              value={newTwitterInput}
+                              onChange={(event) => {
+                                setNewTwitterInput(event.target.value);
+                              }}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter' || event.key === ',') {
+                                  event.preventDefault();
+                                  addNewTwitterUsername();
+                                }
+                              }}
+                              placeholder="@accountname"
+                            />
+                            <Button
+                              variant="outline"
+                              type="button"
+                              disabled={normalizeTwitterUsername(newTwitterInput).length === 0}
+                              onClick={addNewTwitterUsername}
+                            >
+                              Add
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="flex min-h-7 flex-wrap gap-2">
+                          {newTwitterUsers.length === 0 ? (
+                            <p className="text-xs text-muted-foreground">No source usernames added yet.</p>
+                          ) : (
+                            newTwitterUsers.map((username) => (
+                              <Badge key={`new-${username}`} variant="secondary" className="gap-1 pr-1">
+                                @{username}
+                                <button
+                                  type="button"
+                                  className="rounded-full px-1 text-muted-foreground transition hover:bg-background hover:text-foreground"
+                                  onClick={() => removeNewTwitterUsername(username)}
+                                  aria-label={`Remove @${username}`}
+                                >
+                                  ×
+                                </button>
+                              </Badge>
+                            ))
+                          )}
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="add-account-source-select">Profile Mirror Source</Label>
+                          <select
+                            id="add-account-source-select"
+                            className={selectClassName}
+                            value={selectedMirrorSourceUsername}
+                            onChange={(event) => {
+                              setSelectedMirrorSourceUsername(event.target.value);
+                            }}
+                          >
+                            {newTwitterUsers.map((username) => (
+                              <option key={`source-${username}`} value={username}>
+                                @{username}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-medium">Twitter metadata preview</p>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              type="button"
+                              disabled={!selectedMirrorSourceUsername || isMirrorPreviewLoading}
+                              onClick={() => {
+                                if (!selectedMirrorSourceUsername) return;
+                                void ensureTwitterMirrorProfileLoaded(selectedMirrorSourceUsername);
+                              }}
+                            >
+                              {isMirrorPreviewLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                              Refresh preview
+                            </Button>
+                          </div>
+                          {selectedMirrorPreview ? (
+                            <>
+                              <p>
+                                <span className="font-medium">Display name:</span>{' '}
+                                {selectedMirrorPreview.mirroredDisplayName}
+                              </p>
+                              <p className="whitespace-pre-wrap text-xs text-muted-foreground">
+                                {selectedMirrorPreview.mirroredDescription}
+                              </p>
+                            </>
+                          ) : (
+                            <p className="text-xs text-muted-foreground">
+                              Add a username and fetch preview to confirm the mirrored profile text.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {addAccountStep === 2 ? (
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <p className="text-sm font-semibold">Create Bluesky account (or use existing)</p>
+                          <p className="text-xs text-muted-foreground">
+                            Open Bluesky in a new tab, create account if needed, then generate an app password.
+                          </p>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <Button asChild variant="outline">
+                            <a href="https://bsky.app" target="_blank" rel="noreferrer">
+                              Create account
+                              <ArrowUpRight className="ml-2 h-4 w-4" />
+                            </a>
+                          </Button>
+                          <Button asChild variant="outline">
+                            <a href="https://bsky.app/settings/app-passwords" target="_blank" rel="noreferrer">
+                              I have an account
+                              <ArrowUpRight className="ml-2 h-4 w-4" />
+                            </a>
+                          </Button>
+                        </div>
+                        <p className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                          Keep this drawer open, finish account setup in Bluesky, then continue to enter credentials.
+                        </p>
+                      </div>
+                    ) : null}
+
+                    {addAccountStep === 3 ? (
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <p className="text-sm font-semibold">Enter Bluesky credentials</p>
+                          <p className="text-xs text-muted-foreground">Support includes custom PDS/service URLs.</p>
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="add-account-bsky-identifier">Bluesky Identifier</Label>
+                          <Input
+                            id="add-account-bsky-identifier"
+                            value={newMapping.bskyIdentifier}
+                            onChange={(event) => {
+                              setNewMapping((previous) => ({ ...previous, bskyIdentifier: event.target.value }));
+                            }}
+                            placeholder="example.bsky.social"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="add-account-bsky-password">Bluesky App Password</Label>
+                          <Input
+                            id="add-account-bsky-password"
+                            type="password"
+                            value={newMapping.bskyPassword}
+                            onChange={(event) => {
+                              setNewMapping((previous) => ({ ...previous, bskyPassword: event.target.value }));
+                            }}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="add-account-bsky-url">Bluesky Service URL</Label>
+                          <Input
+                            id="add-account-bsky-url"
+                            value={newMapping.bskyServiceUrl}
+                            onChange={(event) => {
+                              setNewMapping((previous) => ({ ...previous, bskyServiceUrl: event.target.value }));
+                            }}
+                            placeholder="https://bsky.social"
+                          />
+                        </div>
+                        <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-medium">Credential check</p>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              type="button"
+                              disabled={isCredentialValidationBusy}
+                              onClick={() => {
+                                void validateAddAccountCredentials();
+                              }}
+                            >
+                              {isCredentialValidationBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                              Validate
+                            </Button>
+                          </div>
+                          {validatedBskyCredentials ? (
+                            <p className="text-xs text-muted-foreground">
+                              Authenticated as @{validatedBskyCredentials.handle} on{' '}
+                              {validatedBskyCredentials.serviceUrl}.
+                            </p>
+                          ) : (
+                            <p className="text-xs text-muted-foreground">
+                              Validate now, or use Next to validate automatically.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {addAccountStep === 4 ? (
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <p className="text-sm font-semibold">Verify email and create mapping</p>
+                          <p className="text-xs text-muted-foreground">
+                            Verify email in Bluesky, then create mapping to auto-sync name, bio, avatar, and banner, and
+                            apply the Bluesky bot self-label.
+                          </p>
+                        </div>
+                        <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
+                          <p>
+                            <span className="font-medium">Email status:</span>{' '}
+                            {validatedBskyCredentials?.emailConfirmed ? 'confirmed' : 'not confirmed yet'}
+                          </p>
+                          <Button asChild variant="outline" size="sm">
+                            <a
+                              href={validatedBskyCredentials?.settingsUrl || 'https://bsky.app/settings/account'}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Open Bluesky account settings
+                              <ArrowUpRight className="ml-2 h-4 w-4" />
+                            </a>
+                          </Button>
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="add-account-owner">Owner (Optional)</Label>
+                          <Input
+                            id="add-account-owner"
+                            value={newMapping.owner}
+                            onChange={(event) => {
+                              setNewMapping((previous) => ({ ...previous, owner: event.target.value }));
+                            }}
+                            placeholder="jack"
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label>Use Existing Folder (Optional)</Label>
+                          {reusableGroupOptions.length === 0 ? (
+                            <p className="rounded-lg border border-dashed border-border/70 px-3 py-2 text-xs text-muted-foreground">
+                              No folders yet. Create one below or from the Accounts tab.
+                            </p>
+                          ) : (
+                            <div className="flex flex-wrap gap-2">
+                              {reusableGroupOptions.map((group) => {
+                                const selected = getGroupKey(newMapping.groupName) === group.key;
+                                return (
+                                  <button
+                                    key={`preset-group-${group.key}`}
+                                    className={cn(
+                                      'inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs transition-colors',
+                                      selected
+                                        ? 'border-foreground bg-foreground text-background'
+                                        : 'border-border bg-background text-foreground hover:bg-muted',
+                                    )}
+                                    onClick={() => applyGroupPresetToNewMapping(group.key)}
+                                    type="button"
+                                  >
+                                    <span>{group.emoji}</span>
+                                    <span>{group.name}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                          <div className="space-y-2">
+                            <Label htmlFor="add-account-group-name">Folder / Group Name (Optional)</Label>
+                            <Input
+                              id="add-account-group-name"
+                              value={newMapping.groupName}
+                              onChange={(event) => {
+                                setNewMapping((previous) => ({ ...previous, groupName: event.target.value }));
+                              }}
+                              placeholder="Gaming, News, Sports..."
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="add-account-group-emoji">Emoji</Label>
+                            <Input
+                              id="add-account-group-emoji"
+                              value={newMapping.groupEmoji}
+                              onChange={(event) => {
+                                setNewMapping((previous) => ({ ...previous, groupEmoji: event.target.value }));
+                              }}
+                              maxLength={8}
+                              placeholder={DEFAULT_GROUP_EMOJI}
+                            />
+                          </div>
+                        </div>
+                        <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
+                          <p>
+                            <span className="font-medium">Owner:</span> {newMapping.owner || '--'}
+                          </p>
+                          <p>
+                            <span className="font-medium">Twitter Sources:</span>{' '}
+                            {newTwitterUsers.length > 0
+                              ? newTwitterUsers.map((username) => `@${username}`).join(', ')
+                              : '--'}
+                          </p>
+                          <p>
+                            <span className="font-medium">Bluesky Target:</span> {newMapping.bskyIdentifier || '--'}
+                          </p>
+                          <p>
+                            <span className="font-medium">Mirror Source:</span>{' '}
+                            {selectedMirrorSourceUsername ? `@${selectedMirrorSourceUsername}` : '--'}
+                          </p>
+                          {selectedMirrorPreview ? (
+                            <p className="whitespace-pre-wrap text-xs text-muted-foreground">
+                              {selectedMirrorPreview.mirroredDescription}
+                            </p>
+                          ) : null}
+                          <p>
+                            <span className="font-medium">Folder:</span>{' '}
+                            {newMapping.groupName.trim()
+                              ? `${newMapping.groupEmoji.trim() || DEFAULT_GROUP_EMOJI} ${newMapping.groupName.trim()}`
+                              : `${DEFAULT_GROUP_EMOJI} ${DEFAULT_GROUP_NAME}`}
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 border-t border-border/70 px-5 py-4">
+                    <Button variant="outline" onClick={retreatAddAccountStep} disabled={addAccountStep === 1 || isBusy}>
+                      <ChevronLeft className="mr-2 h-4 w-4" />
+                      Back
+                    </Button>
+                    {addAccountStep < ADD_ACCOUNT_STEP_COUNT ? (
+                      <Button
+                        onClick={advanceAddAccountStep}
+                        disabled={isBusy || isMirrorPreviewLoading || isCredentialValidationBusy}
+                      >
+                        Next
+                        <ChevronRight className="ml-2 h-4 w-4" />
+                      </Button>
+                    ) : (
+                      <Button onClick={() => void submitNewMapping()} disabled={isBusy}>
+                        {isBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+                        Create Account
+                      </Button>
+                    )}
+                  </div>
+                </aside>
+              </div>
+            ) : null}
+
+            {editingMapping ? (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+                <Card className="w-full max-w-xl border-border/90 bg-card">
+                  <CardHeader>
+                    <CardTitle>Edit Mapping</CardTitle>
+                    <CardDescription>Update ownership, handles, and target credentials.</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <form className="space-y-3" onSubmit={handleUpdateMapping}>
+                      <div className="space-y-2">
+                        <Label htmlFor="edit-owner">Owner</Label>
+                        <Input
+                          id="edit-owner"
+                          value={editForm.owner}
+                          onChange={(event) => {
+                            setEditForm((prev) => ({ ...prev, owner: event.target.value }));
+                          }}
+                          required
+                        />
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                        <div className="space-y-2">
+                          <Label htmlFor="edit-groupName">Folder / Group Name</Label>
+                          <Input
+                            id="edit-groupName"
+                            value={editForm.groupName}
+                            onChange={(event) => {
+                              setEditForm((prev) => ({ ...prev, groupName: event.target.value }));
+                            }}
+                            placeholder="Gaming, News, Sports..."
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="edit-groupEmoji">Emoji</Label>
+                          <Input
+                            id="edit-groupEmoji"
+                            value={editForm.groupEmoji}
+                            onChange={(event) => {
+                              setEditForm((prev) => ({ ...prev, groupEmoji: event.target.value }));
+                            }}
+                            placeholder="📁"
+                            maxLength={8}
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="edit-twitterUsernames">Twitter Usernames</Label>
+                        <div className="flex gap-2">
+                          <Input
+                            id="edit-twitterUsernames"
+                            value={editTwitterInput}
+                            onChange={(event) => {
+                              setEditTwitterInput(event.target.value);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ',') {
+                                event.preventDefault();
+                                addEditTwitterUsername();
+                              }
+                            }}
+                            placeholder="@accountname"
+                          />
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            type="button"
+                            disabled={normalizeTwitterUsername(editTwitterInput).length === 0}
+                            onClick={addEditTwitterUsername}
+                          >
+                            Add
+                          </Button>
+                        </div>
+                        <div className="flex min-h-7 flex-wrap gap-2">
+                          {editTwitterUsers.map((username) => (
+                            <Badge key={`edit-${username}`} variant="secondary" className="gap-1 pr-1">
+                              @{username}
+                              <button
+                                type="button"
+                                className="rounded-full px-1 text-muted-foreground transition hover:bg-background hover:text-foreground"
+                                onClick={() => removeEditTwitterUsername(username)}
+                                aria-label={`Remove @${username}`}
+                              >
+                                ×
+                              </button>
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="edit-bskyIdentifier">Bluesky Identifier</Label>
+                        <Input
+                          id="edit-bskyIdentifier"
+                          value={editForm.bskyIdentifier}
+                          onChange={(event) => {
+                            setEditForm((prev) => ({ ...prev, bskyIdentifier: event.target.value }));
+                          }}
+                          required
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="edit-profile-sync-source">Profile Sync Source</Label>
+                        <select
+                          id="edit-profile-sync-source"
+                          className={selectClassName}
+                          value={editForm.profileSyncSourceUsername}
+                          onChange={(event) => {
+                            setEditForm((previous) => ({ ...previous, profileSyncSourceUsername: event.target.value }));
+                          }}
+                        >
+                          {editTwitterUsers.length > 1 ? <option value="">Select source username</option> : null}
+                          {editTwitterUsers.map((username) => (
+                            <option key={`edit-sync-source-${username}`} value={username}>
+                              @{username}
+                            </option>
+                          ))}
+                        </select>
+                        {editTwitterUsers.length > 1 ? (
+                          <p className="text-xs text-muted-foreground">
+                            Required when multiple Twitter usernames map to one Bluesky account.
+                          </p>
+                        ) : null}
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="edit-bskyPassword">New App Password (optional)</Label>
+                        <Input
+                          id="edit-bskyPassword"
+                          type="password"
+                          value={editForm.bskyPassword}
+                          onChange={(event) => {
+                            setEditForm((prev) => ({ ...prev, bskyPassword: event.target.value }));
+                          }}
+                          placeholder="Leave blank to keep existing"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="edit-bskyServiceUrl">Service URL</Label>
+                        <Input
+                          id="edit-bskyServiceUrl"
+                          value={editForm.bskyServiceUrl}
+                          onChange={(event) => {
+                            setEditForm((prev) => ({ ...prev, bskyServiceUrl: event.target.value }));
+                          }}
+                        />
+                      </div>
+
+                      <div className="flex flex-wrap justify-end gap-2 pt-2">
+                        <Button
+                          variant="ghost"
+                          type="button"
+                          onClick={() => {
+                            setEditingMapping(null);
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                        <Button type="submit" disabled={isBusy}>
+                          {isBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                          Save changes
+                        </Button>
+                      </div>
+                    </form>
+                  </CardContent>
+                </Card>
+              </div>
+            ) : null}
+          </div>
+        </main>
+      </div>
+    </div>
   );
 }
 
