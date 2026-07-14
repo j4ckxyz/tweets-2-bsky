@@ -25,7 +25,8 @@
     "lint": "biome check --write .",
     "preview:web": "vite preview",
     "format": "biome format --write .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:pds": "bun scripts/test-pds.ts"
   },
   "keywords": [
     "bluesky",
@@ -39,6 +40,7 @@
   "license": "MIT",
   "dependencies": {
     "@atproto/api": "^0.18.9",
+    "@atproto/crypto": "^0.5.4",
     "@google/generative-ai": "^0.24.1",
     "@the-convocation/twitter-scraper": "^0.21.1",
     "axios": "^1.13.2",
@@ -64,9 +66,6 @@
     "tailwind-merge": "^3.3.1"
   },
   "devDependencies": {
-    "@types/react": "^19.2.6",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.0",
     "@biomejs/biome": "^1.9.4",
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.13",
@@ -76,7 +75,10 @@
     "@types/inquirer": "^9.0.9",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.10.2",
+    "@types/react": "^19.2.6",
+    "@types/react-dom": "^19.2.3",
     "@types/sharp": "^0.31.1",
+    "@vitejs/plugin-react": "^5.1.0",
     "autoprefixer": "^10.4.21",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.18",

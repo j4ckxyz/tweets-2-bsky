@@ -16,6 +16,16 @@ import {
 } from './config-manager.js';
 import { dbService, postQueueService } from './db.js';
 import {
+  PDS_DEFAULT_PORT,
+  type PdsHandle,
+  generateMissingPdsSecrets,
+  isPdsHealthy,
+  provisionPdsAccount,
+  startPds,
+  twitterHandleToPdsLabel,
+  writeCaddyfile,
+} from './pds-manager.js';
+import {
   applyProfileMirrorSyncState,
   ensureBlueskyBotSelfLabel,
   fetchTwitterMirrorProfile,
@@ -910,9 +920,16 @@ program
 program
   .command('status')
   .description('Show local CLI status summary')
-  .action(() => {
+  .action(async () => {
     const config = getConfig();
     const recent = dbService.getRecentProcessedTweets(5);
+
+    if (config.pds?.hostname) {
+      const healthy = config.pds.enabled && (await isPdsHealthy(`http://127.0.0.1:${config.pds.port}`));
+      console.log(
+        `Built-in PDS: ${config.pds.hostname}:${config.pds.port} (${config.pds.enabled ? (healthy ? 'running' : 'enabled, not running') : 'disabled'})`,
+      );
+    }
 
     console.log('Tweets-2-Bsky status');
     console.log('--------------------');
@@ -929,6 +946,448 @@ program
     if (recent.length > 0) {
       const last = recent[0];
       console.log(`Latest activity: ${last?.created_at || 'unknown'} (${last?.status || 'unknown'})`);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// Built-in PDS mode
+// ---------------------------------------------------------------------------
+
+const stepLog = (message: string) => console.log(`   ↳ ${message}`);
+
+const resolve4 = async (name: string): Promise<string[]> => {
+  try {
+    const { promises: dns } = await import('node:dns');
+    return await dns.resolve4(name);
+  } catch {
+    return [];
+  }
+};
+
+const isLocalPdsHostname = (hostname: string) =>
+  hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.test');
+
+async function checkPdsDnsSetup(hostname: string): Promise<boolean> {
+  console.log('\nChecking DNS setup (best effort)...');
+  let publicIp = '';
+  try {
+    const res = await fetch('https://api.ipify.org', { signal: AbortSignal.timeout(5_000) });
+    publicIp = (await res.text()).trim();
+    console.log(`   Public IP of this machine: ${publicIp}`);
+  } catch {
+    console.log('   Could not determine public IP (offline?). Skipping IP comparison.');
+  }
+
+  const rootRecords = await resolve4(hostname);
+  const wildcardRecords = await resolve4(`t2b-dns-check-${Date.now().toString(36)}.${hostname}`);
+
+  let ok = true;
+  if (rootRecords.length === 0) {
+    console.log(`   ✗ ${hostname} has no A record.`);
+    ok = false;
+  } else if (publicIp && !rootRecords.includes(publicIp)) {
+    console.log(`   ✗ ${hostname} resolves to ${rootRecords.join(', ')} (not this machine).`);
+    ok = false;
+  } else {
+    console.log(`   ✓ ${hostname} -> ${rootRecords.join(', ')}`);
+  }
+
+  if (wildcardRecords.length === 0) {
+    console.log(`   ✗ Wildcard *.${hostname} does not resolve. Mirrored handles need it.`);
+    ok = false;
+  } else if (publicIp && !wildcardRecords.includes(publicIp)) {
+    console.log(`   ✗ *.${hostname} resolves to ${wildcardRecords.join(', ')} (not this machine).`);
+    ok = false;
+  } else {
+    console.log(`   ✓ *.${hostname} -> ${wildcardRecords.join(', ')}`);
+  }
+
+  if (!ok) {
+    console.log('\n   Required DNS records (both pointing at this server):');
+    console.log(`     A  ${hostname}      -> <public IP>`);
+    console.log(`     A  *.${hostname}    -> <public IP>`);
+  }
+  return ok;
+}
+
+// Uses an already-running PDS (e.g. under `bun start`) when the port answers
+// health checks; otherwise starts a temporary in-process instance.
+async function ensurePdsForCli(settings: { enabled: boolean; hostname: string; port: number }): Promise<{
+  tempHandle: PdsHandle | null;
+}> {
+  const localUrl = `http://127.0.0.1:${settings.port}`;
+  if (await isPdsHealthy(localUrl)) {
+    console.log(`Using already-running PDS at ${localUrl}.`);
+    return { tempHandle: null };
+  }
+  console.log('Starting built-in PDS...');
+  const tempHandle = await startPds(settings);
+  console.log(`PDS ready at ${tempHandle.localUrl}.`);
+  return { tempHandle };
+}
+
+async function mirrorTwitterAccountToPds(
+  settings: { enabled: boolean; hostname: string; port: number },
+  rawUsername: string,
+  ownerDefault: string,
+): Promise<AccountMapping | null> {
+  const twitterUsername = normalizeHandle(rawUsername);
+  const localUrl = `http://127.0.0.1:${settings.port}`;
+
+  console.log(`\n@${twitterUsername} -> ${twitterHandleToPdsLabel(twitterUsername)}.${settings.hostname}`);
+
+  const account = await provisionPdsAccount(settings, twitterUsername, stepLog);
+  if (account.existing) {
+    stepLog('Reusing existing PDS account (password was rotated).');
+  }
+
+  const existingMapping = findMappingByRef(getConfig(), account.handle);
+  if (existingMapping) {
+    stepLog('Updating existing mapping credentials');
+    const config = getConfig();
+    const index = config.mappings.findIndex((entry) => entry.id === existingMapping.id);
+    const current = config.mappings[index];
+    if (index !== -1 && current) {
+      config.mappings[index] = {
+        ...current,
+        bskyPassword: account.password,
+        bskyServiceUrl: localUrl,
+        pdsManaged: true,
+      };
+      saveConfig(config);
+    }
+  } else {
+    stepLog('Saving mapping');
+    addMapping({
+      owner: ownerDefault || undefined,
+      twitterUsernames: [twitterUsername],
+      bskyIdentifier: account.handle,
+      bskyPassword: account.password,
+      bskyServiceUrl: localUrl,
+      profileSyncSourceUsername: twitterUsername,
+      pdsManaged: true,
+    });
+  }
+
+  const mapping = findMappingByRef(getConfig(), account.handle);
+  if (!mapping) {
+    console.log('   ✗ Mapping was saved but could not be found again; skipping profile sync.');
+    return null;
+  }
+
+  try {
+    stepLog('Applying Bluesky bot self-label');
+    await ensureBlueskyBotSelfLabel({
+      bskyIdentifier: mapping.bskyIdentifier,
+      bskyPassword: mapping.bskyPassword,
+      bskyServiceUrl: mapping.bskyServiceUrl,
+    });
+    const config = getConfig();
+    const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
+    const current = config.mappings[index];
+    if (index !== -1 && current && !current.hasBotLabel) {
+      current.hasBotLabel = true;
+      saveConfig(config);
+    }
+  } catch (error) {
+    stepLog(`Bot self-label failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    stepLog(`Mirroring profile from @${twitterUsername} (name, bio, avatar, banner)`);
+    const syncResult = await syncBlueskyProfileFromTwitter({
+      twitterUsername,
+      bskyIdentifier: mapping.bskyIdentifier,
+      bskyPassword: mapping.bskyPassword,
+      bskyServiceUrl: mapping.bskyServiceUrl,
+      previousSync: {
+        sourceUsername: mapping.profileSyncSourceUsername,
+        mirroredDisplayName: mapping.lastMirroredDisplayName,
+        mirroredDescription: mapping.lastMirroredDescription,
+        avatarUrl: mapping.lastMirroredAvatarUrl,
+        bannerUrl: mapping.lastMirroredBannerUrl,
+      },
+    });
+    const config = getConfig();
+    const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
+    const current = config.mappings[index];
+    if (index !== -1 && current) {
+      config.mappings[index] = applyProfileMirrorSyncState(current, twitterUsername, syncResult);
+      saveConfig(config);
+    }
+    for (const warning of syncResult.warnings) {
+      stepLog(`Profile sync warning: ${warning}`);
+    }
+  } catch (error) {
+    stepLog(
+      `Profile sync failed (retry later with sync-profile): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  console.log(`   ✓ @${twitterUsername} is now mirrored to ${account.handle}`);
+  return findMappingByRef(getConfig(), account.handle) ?? null;
+}
+
+async function offerBackfill(mappings: AccountMapping[]): Promise<void> {
+  if (mappings.length === 0) return;
+  const { backfillNow } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'backfillNow',
+      message: `Import recent tweets for ${mappings.length} account(s) now? (output streams live)`,
+      default: true,
+    },
+  ]);
+  if (!backfillNow) return;
+
+  const { limit } = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'limit',
+      message: 'How many recent tweets per account?',
+      default: '15',
+    },
+  ]);
+
+  for (const mapping of mappings) {
+    console.log(`\n=== Backfilling ${mapping.twitterUsernames.join(', ')} -> ${mapping.bskyIdentifier} ===`);
+    try {
+      await runCoreCommand([
+        '--run-once',
+        '--backfill-mapping',
+        mapping.id,
+        '--backfill-limit',
+        String(parsePositiveInt(limit, 15)),
+        '--no-web',
+      ]);
+    } catch (error) {
+      console.log(`Backfill failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+program
+  .command('setup-pds')
+  .description('Set up the built-in Bluesky PDS, then walk through tweets-2-bsky configuration')
+  .action(async () => {
+    console.log('Built-in PDS setup');
+    console.log('==================');
+    console.log('This runs your own Bluesky PDS inside tweets-2-bsky. Mirrored accounts are');
+    console.log('created automatically as [twitterhandle].yourdomain — no manual signup.');
+    console.log('\nRequirements for a public PDS:');
+    console.log('  - A server with a public IP');
+    console.log('  - A domain with A records for both "@" and "*" pointing at it');
+    console.log('  - Ports 80/443 reachable (TLS via Caddy or similar; config is generated for you)');
+    console.log('  - (Use hostname "localhost" for a local test run without any of the above)\n');
+
+    const config = getConfig();
+    const answers = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'hostname',
+        message: 'PDS hostname (e.g. example.com):',
+        default: config.pds?.hostname,
+        validate: (value: string) => (value.trim().length > 0 ? true : 'Hostname is required'),
+      },
+      {
+        type: 'input',
+        name: 'port',
+        message: 'Local port for the PDS:',
+        default: String(config.pds?.port ?? PDS_DEFAULT_PORT),
+      },
+    ]);
+
+    const hostname = String(answers.hostname)
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/\/.*$/, '');
+    const port = parsePositiveInt(answers.port, PDS_DEFAULT_PORT);
+    const settings = { enabled: true, hostname, port };
+
+    if (!isLocalPdsHostname(hostname)) {
+      const dnsOk = await checkPdsDnsSetup(hostname);
+      if (!dnsOk) {
+        const { proceed } = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'proceed',
+            message: 'DNS is not fully set up. Continue anyway? (handles will not resolve publicly yet)',
+            default: false,
+          },
+        ]);
+        if (!proceed) {
+          console.log('Setup cancelled. Fix DNS and re-run setup-pds.');
+          return;
+        }
+      }
+    }
+
+    console.log('\nGenerating PDS secrets...');
+    const { generated } = await generateMissingPdsSecrets();
+    if (generated.length > 0) {
+      console.log(`   ✓ Generated and saved to .env: ${generated.join(', ')}`);
+    } else {
+      console.log('   ✓ All PDS secrets already present in .env.');
+    }
+
+    const { wantEmail } = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'wantEmail',
+        message: 'Configure SMTP for outgoing email? (optional — verification is handled automatically without it)',
+        default: false,
+      },
+    ]);
+    if (wantEmail) {
+      const smtp = await inquirer.prompt([
+        { type: 'input', name: 'url', message: 'SMTP URL (e.g. smtps://user:pass@smtp.example.com):' },
+        { type: 'input', name: 'from', message: 'From address (e.g. admin@example.com):' },
+      ]);
+      if (smtp.url?.trim() && smtp.from?.trim()) {
+        fs.appendFileSync(
+          path.resolve(process.cwd(), '.env'),
+          `\nPDS_EMAIL_SMTP_URL=${smtp.url.trim()}\nPDS_EMAIL_FROM_ADDRESS=${smtp.from.trim()}\n`,
+        );
+        process.env.PDS_EMAIL_SMTP_URL = smtp.url.trim();
+        process.env.PDS_EMAIL_FROM_ADDRESS = smtp.from.trim();
+        console.log('   ✓ SMTP settings saved to .env.');
+      }
+    }
+
+    const savedConfig = getConfig();
+    savedConfig.pds = settings;
+    saveConfig(savedConfig);
+    console.log('   ✓ PDS settings saved to config.');
+
+    if (!isLocalPdsHostname(hostname)) {
+      const caddyfile = writeCaddyfile(settings);
+      console.log(`\nTLS reverse proxy config written to: ${caddyfile}`);
+      console.log('Run Caddy with it (installs certificates automatically, including per-handle subdomains):');
+      console.log(`   caddy run --config ${caddyfile}`);
+      console.log('   (or: docker run -d --network host -v <dir>:/etc/caddy caddy:2)');
+    }
+
+    const { tempHandle } = await ensurePdsForCli(settings);
+
+    try {
+      // PDS is up — now walk through the tweets-2-bsky side.
+      console.log('\ntweets-2-bsky setup');
+      console.log('-------------------');
+      const freshConfig = getConfig();
+      if (!freshConfig.twitter.authToken || !freshConfig.twitter.ct0) {
+        console.log('Twitter credentials are needed to read tweets (cookies from a logged-in session).');
+        const twitterAnswers = await inquirer.prompt([
+          { type: 'input', name: 'authToken', message: 'Twitter auth_token cookie:' },
+          { type: 'input', name: 'ct0', message: 'Twitter ct0 cookie:' },
+        ]);
+        updateTwitterConfig({
+          ...freshConfig.twitter,
+          authToken: twitterAnswers.authToken.trim(),
+          ct0: twitterAnswers.ct0.trim(),
+        });
+        console.log('   ✓ Twitter credentials saved.');
+      } else {
+        console.log('   ✓ Twitter credentials already configured.');
+      }
+
+      const { interval } = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'interval',
+          message: 'Check for new tweets every N minutes:',
+          default: String(getConfig().checkIntervalMinutes),
+        },
+      ]);
+      const intervalConfig = getConfig();
+      intervalConfig.checkIntervalMinutes = parsePositiveInt(interval, intervalConfig.checkIntervalMinutes);
+      saveConfig(intervalConfig);
+
+      console.log('\nAdd Twitter accounts to mirror. Each gets a PDS account created automatically.');
+      const ownerDefault =
+        getConfig().users.find((user) => user.role === 'admin')?.username || getConfig().users[0]?.username || '';
+      const addedMappings: AccountMapping[] = [];
+      for (;;) {
+        const { username } = await inquirer.prompt([
+          {
+            type: 'input',
+            name: 'username',
+            message: 'Twitter username to mirror (empty to finish):',
+          },
+        ]);
+        const trimmed = normalizeHandle(String(username || ''));
+        if (!trimmed) break;
+        try {
+          const mapping = await mirrorTwitterAccountToPds(settings, trimmed, ownerDefault);
+          if (mapping) addedMappings.push(mapping);
+        } catch (error) {
+          console.log(`   ✗ Failed for @${trimmed}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      await offerBackfill(addedMappings);
+
+      console.log('\nSetup complete.');
+      console.log('Start everything (PDS + mirroring + dashboard) with: bun start');
+      if (!isLocalPdsHostname(hostname)) {
+        console.log(`Mirrored accounts appear on Bluesky as [twitterhandle].${hostname}`);
+        console.log('Keep Caddy (or your reverse proxy) running so handles resolve publicly.');
+      }
+    } finally {
+      if (tempHandle) {
+        await tempHandle.stop();
+      }
+    }
+  });
+
+program
+  .command('add-pds-account [usernames...]')
+  .description('Create PDS account(s) for Twitter username(s) and start mirroring them')
+  .action(async (usernames: string[] = []) => {
+    const config = getConfig();
+    if (!config.pds?.hostname) {
+      console.log('Built-in PDS is not configured. Run setup-pds first.');
+      return;
+    }
+    const settings = { ...config.pds, enabled: true };
+
+    let targets = usernames.map(normalizeHandle).filter((username) => username.length > 0);
+    if (targets.length === 0) {
+      const { input } = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'input',
+          message: 'Twitter username(s) to mirror (comma separated):',
+        },
+      ]);
+      targets = String(input || '')
+        .split(',')
+        .map(normalizeHandle)
+        .filter((username) => username.length > 0);
+    }
+    if (targets.length === 0) {
+      console.log('No usernames provided.');
+      return;
+    }
+
+    const { tempHandle } = await ensurePdsForCli(settings);
+    try {
+      const ownerDefault =
+        config.users.find((user) => user.role === 'admin')?.username || config.users[0]?.username || '';
+      const addedMappings: AccountMapping[] = [];
+      for (const username of targets) {
+        try {
+          const mapping = await mirrorTwitterAccountToPds(settings, username, ownerDefault);
+          if (mapping) addedMappings.push(mapping);
+        } catch (error) {
+          console.log(`   ✗ Failed for @${username}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      await offerBackfill(addedMappings);
+    } finally {
+      if (tempHandle) {
+        await tempHandle.stop();
+      }
     }
   });
 

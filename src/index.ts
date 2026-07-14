@@ -3123,6 +3123,24 @@ async function main(): Promise<void> {
 
   await migrateJsonToSqlite();
 
+  if (config.pds?.enabled) {
+    const { startPds, isPdsHealthy } = await import('./pds-manager.js');
+    const localUrl = `http://127.0.0.1:${config.pds.port}`;
+    if (await isPdsHealthy(localUrl)) {
+      console.log(`🛰️ Built-in PDS already running at ${localUrl}; using it.`);
+    } else {
+      console.log(`🛰️ Starting built-in PDS for ${config.pds.hostname}...`);
+      const pdsHandle = await startPds(config.pds);
+      console.log(`🛰️ Built-in PDS ready at ${pdsHandle.localUrl} (handles: *.${config.pds.hostname}).`);
+      const stopPds = async () => {
+        await pdsHandle.stop().catch(() => {});
+        process.exit(0);
+      };
+      process.once('SIGINT', stopPds);
+      process.once('SIGTERM', stopPds);
+    }
+  }
+
   if (!options.web) {
     console.log('🌐 Web interface is disabled.');
   } else {

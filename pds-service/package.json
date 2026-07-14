@@ -1,0 +1,14 @@
+{
+  "name": "tweets-2-bsky-pds-service",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Isolated runtime for the built-in Bluesky PDS. Installed on demand by setup-pds and run as a Node child process (the PDS dependency tree conflicts with the main app's and its undici does not load under bun).",
+  "type": "module",
+  "main": "index.mjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@atproto/pds": "^0.5.17"
+  }
+}

@@ -87,11 +87,18 @@ export interface AccountMapping {
   lastPinnedTweetId?: string;
   lastPinSyncAt?: string;
   hasBotLabel?: boolean;
+  pdsManaged?: boolean;
 }
 
 export interface AccountGroup {
   name: string;
   emoji?: string;
+}
+
+export interface PdsSettings {
+  enabled: boolean;
+  hostname: string;
+  port: number;
 }
 
 export interface AppConfig {
@@ -102,6 +109,7 @@ export interface AppConfig {
   checkIntervalMinutes: number;
   geminiApiKey?: string;
   ai?: AIConfig;
+  pds?: PdsSettings;
 }
 
 const DEFAULT_TWITTER_CONFIG: TwitterConfig = {
@@ -342,6 +350,7 @@ const normalizeMapping = (rawMapping: unknown, users: WebUser[], adminUserId?: s
     lastPinnedTweetId: normalizeString(record.lastPinnedTweetId),
     lastPinSyncAt: normalizeIsoDateString(record.lastPinSyncAt),
     hasBotLabel: normalizeBoolean(record.hasBotLabel, false),
+    pdsManaged: normalizeBoolean(record.pdsManaged, false),
     createdByUserId:
       (explicitCreatorExists ? explicitCreator : undefined) ?? matchOwnerToUserId(owner, users) ?? adminUserId,
   };
@@ -379,6 +388,24 @@ const normalizeUsers = (rawUsers: unknown): WebUser[] => {
   }
 
   return normalized;
+};
+
+const normalizePdsSettings = (rawPds: unknown): PdsSettings | undefined => {
+  if (!rawPds || typeof rawPds !== 'object') {
+    return undefined;
+  }
+  const record = rawPds as Record<string, unknown>;
+  const hostname = normalizeString(record.hostname)?.toLowerCase();
+  if (!hostname) {
+    return undefined;
+  }
+  const portCandidate = Number(record.port);
+  const port = Number.isInteger(portCandidate) && portCandidate > 0 && portCandidate < 65536 ? portCandidate : 3010;
+  return {
+    enabled: normalizeBoolean(record.enabled, false),
+    hostname,
+    port,
+  };
 };
 
 const normalizeAiConfig = (rawAi: unknown): AIConfig | undefined => {
@@ -439,6 +466,7 @@ const normalizeConfigShape = (rawConfig: unknown): AppConfig => {
 
   const geminiApiKey = normalizeString(record.geminiApiKey);
   const ai = normalizeAiConfig(record.ai);
+  const pds = normalizePdsSettings(record.pds);
 
   return {
     twitter: {
@@ -453,6 +481,7 @@ const normalizeConfigShape = (rawConfig: unknown): AppConfig => {
     checkIntervalMinutes,
     ...(geminiApiKey ? { geminiApiKey } : {}),
     ...(ai ? { ai } : {}),
+    ...(pds ? { pds } : {}),
   };
 };
 

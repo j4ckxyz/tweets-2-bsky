@@ -177,6 +177,41 @@ Tuning (optional `.env` values, sensible defaults built in):
 
 Upgrading from an older version needs no manual steps: the queue table is created automatically on first boot and existing history is untouched (Docker users keep the same `data` volume; source installs just run `./update.sh`).
 
+## Built-in PDS Mode (Optional)
+
+Instead of creating Bluesky accounts by hand, tweets-2-bsky can run its own AT Protocol PDS (personal data server). Every mirrored Twitter account then gets a Bluesky account created **automatically** as `[twitterhandle].yourdomain.com` — no signup, no app passwords, no email verification (a placeholder email is marked verified directly in the PDS database, backdated 30 days).
+
+Requirements:
+
+- A server with a **public IP** and a domain you control.
+- DNS `A` records for both `@` and `*` (wildcard) pointing at the server.
+- Ports 80/443 reachable for TLS (a ready-to-use Caddyfile is generated for you).
+- Node.js 22+ installed alongside Bun (the PDS runs as a Node child process; its dependency tree does not load under Bun).
+
+Setup is PDS-first, then walks you through the tweets-2-bsky side:
+
+```bash
+bun run cli -- setup-pds
+```
+
+The wizard checks your DNS, generates and stores PDS secrets in `.env`, writes `data/pds/Caddyfile`, starts the PDS, prompts for Twitter cookies and the check interval, and then asks for Twitter usernames to mirror — each one is provisioned live (invite code → account → verified email → bot label → profile mirror) with progress streamed to the terminal, ending with an optional streamed backfill of recent tweets.
+
+Add more accounts at any time:
+
+```bash
+bun run cli -- add-pds-account jack someotheruser
+```
+
+After setup, `bun start` runs everything together: the PDS starts first, then the mirror scheduler and dashboard. Regular (non-PDS) operation is completely unaffected — mappings pointing at `bsky.social` or any other service keep working, and both kinds can coexist.
+
+Notes:
+
+- PDS data lives in `data/pds/` (accounts, blobs, `pds.log`). Backups of `data/` cover it.
+- Signups on your PDS still require invite codes, so strangers cannot register on your server; the wizard mints a single-use code per account internally.
+- Twitter underscores become hyphens in handles (DNS labels cannot contain `_`): `some_user` → `some-user.yourdomain.com`.
+- PDS dependencies install on first use into `pds-service/node_modules` (via npm, kept separate from the main app on purpose).
+- Test the whole flow locally without a domain: `bun run test:pds`.
+
 ## CLI Quick Commands
 
 Always run CLI commands as:
