@@ -3130,14 +3130,25 @@ async function main(): Promise<void> {
       console.log(`🛰️ Built-in PDS already running at ${localUrl}; using it.`);
     } else {
       console.log(`🛰️ Starting built-in PDS for ${config.pds.hostname}...`);
-      const pdsHandle = await startPds(config.pds);
+      // Long-running process: keep the PDS alive across crashes, otherwise every
+      // subsequent post fails against a dead loopback URL.
+      const pdsHandle = await startPds(config.pds, { superviseOnCrash: true });
       console.log(`🛰️ Built-in PDS ready at ${pdsHandle.localUrl} (handles: *.${config.pds.hostname}).`);
-      const stopPds = async () => {
+      // In-flight queue items are safe to abandon: startup calls
+      // postQueueService.resetProcessing() to reclaim anything left mid-flight.
+      let shuttingDown = false;
+      const stopPds = async (signal: string) => {
+        if (shuttingDown) {
+          console.log('🛰️ Second signal received — exiting immediately.');
+          process.exit(130);
+        }
+        shuttingDown = true;
+        console.log(`\n🛰️ ${signal} received — stopping the built-in PDS...`);
         await pdsHandle.stop().catch(() => {});
         process.exit(0);
       };
-      process.once('SIGINT', stopPds);
-      process.once('SIGTERM', stopPds);
+      process.on('SIGINT', () => void stopPds('SIGINT'));
+      process.on('SIGTERM', () => void stopPds('SIGTERM'));
     }
   }
 

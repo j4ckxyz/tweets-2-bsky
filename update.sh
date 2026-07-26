@@ -429,6 +429,15 @@ install_dependencies() {
 
   echo "📦 Installing dependencies..."
   run_bun install
+
+  # The built-in PDS keeps its own npm-installed node_modules (it runs under Node,
+  # not bun). Only refresh it when it already exists — a first install happens on
+  # demand in setup-pds, so non-PDS users never pay for it.
+  if [[ -d "$SCRIPT_DIR/pds-service/node_modules" ]]; then
+    echo "📦 Updating built-in PDS dependencies..."
+    (cd "$SCRIPT_DIR/pds-service" && npm install --no-audit --no-fund) ||
+      echo "⚠️  Could not update built-in PDS dependencies; run 'npm install' in pds-service/ manually."
+  fi
 }
 
 build_project() {

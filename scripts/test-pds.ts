@@ -1,10 +1,27 @@
 // Smoke test for the built-in PDS: start it against a throwaway data dir,
 // provision an account for a fake twitter handle, verify the email backdate
 // hack, log in with the generated credentials, and confirm re-provisioning is
-// idempotent. Run with: bun run test:pds
+// idempotent. Run with: T2B_PDS_TEST_ALLOW_PLC=1 bun run test:pds
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+// Creating an account makes the PDS send a genuine did:plc operation to
+// https://plc.directory. That registry is public and append-only, so every run
+// leaves behind a permanent DID whose serviceEndpoint (https://t2b.test) will
+// never resolve. Require an explicit opt-in rather than doing that by default.
+if (process.env.T2B_PDS_TEST_ALLOW_PLC !== '1') {
+  console.error('REFUSING TO RUN.');
+  console.error('');
+  console.error('This smoke test provisions a real account, which makes the PDS register a');
+  console.error('permanent did:plc on the public https://plc.directory registry. That registry is');
+  console.error('append-only: the DID cannot be deleted, and its serviceEndpoint (https://t2b.test)');
+  console.error('will never resolve.');
+  console.error('');
+  console.error('To run anyway:');
+  console.error('  T2B_PDS_TEST_ALLOW_PLC=1 bun run test:pds');
+  process.exit(1);
+}
 
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 't2b-pds-test-'));
 process.env.TWEETS2BSKY_DATA_DIR = testDataDir;

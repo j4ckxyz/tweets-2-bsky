@@ -186,7 +186,7 @@ Requirements:
 - A server with a **public IP** and a domain you control.
 - DNS `A` records for both `@` and `*` (wildcard) pointing at the server.
 - Ports 80/443 reachable for TLS (a ready-to-use Caddyfile is generated for you).
-- Node.js 22+ installed alongside Bun (the PDS runs as a Node child process; its dependency tree does not load under Bun).
+- Node.js 22+ installed alongside Bun (the PDS runs as a Node child process; its dependency tree does not load under Bun). The Docker image already includes it.
 
 Setup is PDS-first, then walks you through the tweets-2-bsky side:
 
@@ -194,7 +194,7 @@ Setup is PDS-first, then walks you through the tweets-2-bsky side:
 bun run cli -- setup-pds
 ```
 
-The wizard checks your DNS, generates and stores PDS secrets in `.env`, writes `data/pds/Caddyfile`, starts the PDS, prompts for Twitter cookies and the check interval, and then asks for Twitter usernames to mirror — each one is provisioned live (invite code → account → verified email → bot label → profile mirror) with progress streamed to the terminal, ending with an optional streamed backfill of recent tweets.
+The wizard validates the hostname, checks your DNS, generates and stores PDS secrets in `.env`, writes `data/pds/Caddyfile`, starts the PDS, prompts for Twitter cookies and the check interval, and then asks for Twitter usernames to mirror — each one is provisioned live (invite code → account → verified email → bot label → profile mirror) with progress streamed to the terminal, ending with an optional streamed backfill of recent tweets.
 
 Add more accounts at any time:
 
@@ -204,13 +204,24 @@ bun run cli -- add-pds-account jack someotheruser
 
 After setup, `bun start` runs everything together: the PDS starts first, then the mirror scheduler and dashboard. Regular (non-PDS) operation is completely unaffected — mappings pointing at `bsky.social` or any other service keep working, and both kinds can coexist.
 
-Notes:
+### Network exposure
 
-- PDS data lives in `data/pds/` (accounts, blobs, `pds.log`). Backups of `data/` cover it.
+The PDS listens on **127.0.0.1 only**. `@atproto/pds` itself binds `0.0.0.0`, which on a public-IP server would serve the whole PDS — including logins — over unencrypted HTTP and bypass the TLS proxy entirely; tweets-2-bsky overrides the bind address to prevent that. Only ports 80 and 443 ever need to be open.
+
+Because of this, your reverse proxy has to reach loopback, so run Caddy on the host or with `--network host`. If it genuinely cannot (a bridge-networked container, a proxy on another machine), set `PDS_BIND_HOST=0.0.0.0` in `.env` — and then **firewall the PDS port yourself**, e.g. `sudo ufw deny 3010/tcp`. Under Docker Compose, prefer publishing it to host loopback instead: uncomment the `127.0.0.1:3010:3010` port mapping and `PDS_BIND_HOST` in `docker-compose.yml`.
+
+### Notes
+
+- PDS data lives in `data/pds/` (accounts, blobs, `pds.log`). Backups of `data/` cover it. Together with `.env`, that directory is now the **only** copy of credentials for real accounts — the generated passwords are not recoverable from anywhere else, so treat both as secrets and back them up.
 - Signups on your PDS still require invite codes, so strangers cannot register on your server; the wizard mints a single-use code per account internally.
 - Twitter underscores become hyphens in handles (DNS labels cannot contain `_`): `some_user` → `some-user.yourdomain.com`.
-- PDS dependencies install on first use into `pds-service/node_modules` (via npm, kept separate from the main app on purpose).
-- Test the whole flow locally without a domain: `bun run test:pds`.
+- Handle labels must be 3–18 characters, an AT Protocol rule. Twitter's 15-character cap covers the upper bound, but legacy 1–2 character usernames cannot be mirrored to the built-in PDS; use a manually created account for those.
+- Each account's email is a placeholder like `someuser@yourdomain.com` that **does not receive mail** — verification is written straight into the PDS database instead. The PDS's own password-reset and email-change flows therefore cannot work for these accounts; rotate credentials with `add-pds-account`, which resets the password through the admin API.
+- If a Twitter account is already mirrored somewhere else (e.g. a `bsky.social` account), `add-pds-account` will spot the clash and ask, rather than silently creating a second mirror that double-posts every tweet.
+- If the PDS crashes while `bun start` is running, it is restarted automatically with exponential backoff (1s up to 60s); check `data/pds/pds.log`.
+- PDS dependencies install on first use into `pds-service/node_modules` (via npm, kept separate from the main app on purpose). The Docker image bakes them in at build time.
+- For a local run without a domain, use a `.test` hostname such as `t2b.test`. Plain `localhost` does **not** work — the AT Protocol rejects handles under `.localhost`, and `@atproto/pds` restricts a `localhost` hostname to `.test` handles anyway. The wizard rejects unusable hostnames up front.
+- There is a smoke test for the whole flow, but note that provisioning an account registers a **permanent** `did:plc` on the public, append-only `plc.directory` registry. It therefore refuses to run unless you opt in: `T2B_PDS_TEST_ALLOW_PLC=1 bun run test:pds`.
 
 ## CLI Quick Commands
 

@@ -1,6 +1,8 @@
 .git
 .gitignore
-node_modules
+# Globbed: a bare "node_modules" only matches the context root, which would let a
+# host-built pds-service/node_modules overwrite the Linux one built by npm ci.
+**/node_modules
 dist
 web/dist
 data

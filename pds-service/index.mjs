@@ -3,16 +3,30 @@
 // by src/pds-manager.ts with all PDS_* configuration in the environment.
 import { PDS, envToCfg, envToSecrets, readEnv } from '@atproto/pds';
 
+// @atproto/pds calls `app.listen(port)` with no host, which binds 0.0.0.0. On a
+// server with a public IP that exposes the entire PDS over cleartext HTTP,
+// bypassing the TLS reverse proxy. There is no upstream env var for the bind
+// address, so wrap listen() to supply one. Defaults to loopback; pds-manager.ts
+// always sets PDS_BIND_HOST explicitly.
+const bindListenHost = (app, host) => {
+  const listen = app.listen.bind(app);
+  app.listen = (port, ...rest) => listen(port, host, ...rest);
+};
+
 const main = async () => {
   const env = readEnv();
   env.version ||= 'tweets-2-bsky-builtin';
   const cfg = envToCfg(env);
   const secrets = envToSecrets(env);
   const pds = await PDS.create(cfg, secrets);
-  await pds.start();
 
-  // Caddy on-demand TLS asks this endpoint before issuing a certificate for a
-  // subdomain handle; mirrors the route in bluesky-social/pds's service entry.
+  const host = process.env.PDS_BIND_HOST?.trim() || '127.0.0.1';
+  bindListenHost(pds.app, host);
+
+  // Registered before start() so the route is in place the moment the port
+  // accepts connections. Caddy's on-demand TLS asks this endpoint before issuing
+  // a certificate for a subdomain handle; mirrors the route in
+  // bluesky-social/pds's service entry.
   pds.app.get('/tls-check', async (req, res) => {
     try {
       const { domain } = req.query;
@@ -36,7 +50,9 @@ const main = async () => {
     }
   });
 
-  console.log(`pds listening on port ${cfg.service.port} (hostname ${cfg.service.hostname})`);
+  await pds.start();
+
+  console.log(`pds listening on ${host}:${cfg.service.port} (hostname ${cfg.service.hostname})`);
 
   const shutdown = async () => {
     try {

@@ -4,12 +4,19 @@ FROM oven/bun:1-slim AS build
 
 WORKDIR /app
 
+# curl/gnupg pull in the NodeSource repo below. Node.js 22 is required by the
+# built-in PDS, which runs as a child process because @atproto/pds cannot load
+# under bun; Debian bookworm only ships Node 18.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     python3 \
     make \
     g++ \
     ca-certificates \
+    curl \
+    gnupg \
+  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && apt-get install -y --no-install-recommends nodejs \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json ./
@@ -17,6 +24,12 @@ COPY bun.lock ./bun.lock
 COPY scripts ./scripts
 
 RUN bun install --frozen-lockfile
+
+# Installed with npm (not bun) so native modules match the Node child process's
+# ABI. Done at build time so the runtime image needs neither npm nor network
+# access on first PDS start.
+COPY pds-service/package.json pds-service/package-lock.json ./pds-service/
+RUN cd pds-service && npm ci --no-audit --no-fund --omit=dev
 
 COPY . .
 
@@ -36,11 +49,17 @@ ENV NODE_ENV=production \
   CHROME_BIN=/usr/bin/chromium \
   PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
+# Node.js 22 runs the built-in PDS child process (bun cannot load @atproto/pds).
+# npm is deliberately not installed: dependencies are baked in by the build stage.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     chromium \
     ca-certificates \
     tini \
+    curl \
+    gnupg \
+  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && apt-get install -y --no-install-recommends nodejs \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/package.json ./package.json
@@ -49,6 +68,8 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/web/dist ./web/dist
 COPY --from=build /app/public ./public
+# Runtime for the optional built-in PDS, with its own pre-installed node_modules.
+COPY --from=build /app/pds-service ./pds-service
 
 RUN mkdir -p /app/data \
   && ln -sf /app/data/config.json /app/config.json

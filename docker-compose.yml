@@ -5,8 +5,14 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+      # Built-in PDS mode only: publish the PDS to the host's loopback so a
+      # reverse proxy (Caddy) can reach it, without exposing cleartext HTTP to
+      # the internet. Requires PDS_BIND_HOST=0.0.0.0 so the PDS listens on the
+      # container's external interface. Leave both commented out otherwise.
+      # - "127.0.0.1:3010:3010"
     environment:
       TWEETS2BSKY_DATA_DIR: /app/data
+      # PDS_BIND_HOST: "0.0.0.0"
     volumes:
       - tweets2bsky_data:/app/data
 

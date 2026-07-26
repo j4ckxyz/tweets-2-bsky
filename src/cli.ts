@@ -12,6 +12,7 @@ import {
   getConfig,
   removeMapping,
   saveConfig,
+  updateMapping,
   updateTwitterConfig,
 } from './config-manager.js';
 import { dbService, postQueueService } from './db.js';
@@ -19,10 +20,12 @@ import {
   PDS_DEFAULT_PORT,
   type PdsHandle,
   generateMissingPdsSecrets,
+  isDevPdsHostname,
   isPdsHealthy,
   provisionPdsAccount,
   startPds,
   twitterHandleToPdsLabel,
+  validatePdsHostname,
   writeCaddyfile,
 } from './pds-manager.js';
 import {
@@ -924,16 +927,18 @@ program
     const config = getConfig();
     const recent = dbService.getRecentProcessedTweets(5);
 
+    console.log('Tweets-2-Bsky status');
+    console.log('--------------------');
     if (config.pds?.hostname) {
       const healthy = config.pds.enabled && (await isPdsHealthy(`http://127.0.0.1:${config.pds.port}`));
       console.log(
         `Built-in PDS: ${config.pds.hostname}:${config.pds.port} (${config.pds.enabled ? (healthy ? 'running' : 'enabled, not running') : 'disabled'})`,
       );
     }
-
-    console.log('Tweets-2-Bsky status');
-    console.log('--------------------');
-    console.log(`Mappings: ${config.mappings.length}`);
+    const pdsManagedCount = config.mappings.filter((mapping) => mapping.pdsManaged).length;
+    console.log(
+      `Mappings: ${config.mappings.length}${pdsManagedCount > 0 ? ` (${pdsManagedCount} on the built-in PDS)` : ''}`,
+    );
     console.log(`Enabled mappings: ${config.mappings.filter((mapping) => mapping.enabled).length}`);
     console.log(`Check interval: ${config.checkIntervalMinutes} minute(s)`);
     console.log(`Twitter configured: ${Boolean(config.twitter.authToken && config.twitter.ct0)}`);
@@ -963,9 +968,6 @@ const resolve4 = async (name: string): Promise<string[]> => {
     return [];
   }
 };
-
-const isLocalPdsHostname = (hostname: string) =>
-  hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.test');
 
 async function checkPdsDnsSetup(hostname: string): Promise<boolean> {
   console.log('\nChecking DNS setup (best effort)...');
@@ -1033,8 +1035,49 @@ async function mirrorTwitterAccountToPds(
 ): Promise<AccountMapping | null> {
   const twitterUsername = normalizeHandle(rawUsername);
   const localUrl = `http://127.0.0.1:${settings.port}`;
+  const targetHandle = `${twitterHandleToPdsLabel(twitterUsername)}.${settings.hostname}`;
 
-  console.log(`\n@${twitterUsername} -> ${twitterHandleToPdsLabel(twitterUsername)}.${settings.hostname}`);
+  console.log(`\n@${twitterUsername} -> ${targetHandle}`);
+
+  // Mappings are keyed by Bluesky identifier, so adding a PDS mapping for a
+  // Twitter account that is already mirrored elsewhere would silently produce two
+  // mirrors, each posting every tweet.
+  const conflicting = getConfig().mappings.filter(
+    (mapping) =>
+      mapping.twitterUsernames.some((username) => normalizeHandle(username) === twitterUsername) &&
+      normalizeHandle(mapping.bskyIdentifier) !== normalizeHandle(targetHandle),
+  );
+  if (conflicting.length > 0) {
+    console.log(`   ! @${twitterUsername} is already mirrored to:`);
+    for (const mapping of conflicting) {
+      console.log(
+        `       ${mapping.bskyIdentifier} (${mapping.bskyServiceUrl || 'https://bsky.social'})${mapping.enabled ? '' : ' [disabled]'}`,
+      );
+    }
+    const { resolution } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'resolution',
+        message: 'Adding a PDS mapping too means every tweet gets posted twice. What should happen?',
+        choices: [
+          { name: `Skip @${twitterUsername} and leave the existing mirror alone`, value: 'skip' },
+          { name: 'Disable the existing mapping(s), then mirror to the built-in PDS', value: 'disable' },
+          { name: 'Add anyway — I want both mirrors posting', value: 'both' },
+        ],
+        default: 'skip',
+      },
+    ]);
+    if (resolution === 'skip') {
+      console.log(`   ↳ Skipped @${twitterUsername}.`);
+      return null;
+    }
+    if (resolution === 'disable') {
+      for (const mapping of conflicting) {
+        updateMapping(mapping.id, { enabled: false });
+        stepLog(`Disabled existing mapping ${mapping.bskyIdentifier}`);
+      }
+    }
+  }
 
   const account = await provisionPdsAccount(settings, twitterUsername, stepLog);
   if (account.existing) {
@@ -1178,16 +1221,27 @@ program
     console.log('  - A server with a public IP');
     console.log('  - A domain with A records for both "@" and "*" pointing at it');
     console.log('  - Ports 80/443 reachable (TLS via Caddy or similar; config is generated for you)');
-    console.log('  - (Use hostname "localhost" for a local test run without any of the above)\n');
+    console.log('  - (For a local test run without any of the above, use a ".test" hostname such as "t2b.test")\n');
 
     const config = getConfig();
     const answers = await inquirer.prompt([
       {
         type: 'input',
         name: 'hostname',
-        message: 'PDS hostname (e.g. example.com):',
+        message: 'PDS hostname (e.g. example.com, or t2b.test for a local run):',
         default: config.pds?.hostname,
-        validate: (value: string) => (value.trim().length > 0 ? true : 'Hostname is required'),
+        // The AT Protocol rejects handles under reserved TLDs, so catch an
+        // unusable hostname here rather than after generating secrets and
+        // booting a server.
+        validate: (value: string) => {
+          const candidate = value
+            .trim()
+            .toLowerCase()
+            .replace(/^https?:\/\//, '')
+            .replace(/\/.*$/, '');
+          const result = validatePdsHostname(candidate);
+          return result.ok ? true : result.reason;
+        },
       },
       {
         type: 'input',
@@ -1205,7 +1259,14 @@ program
     const port = parsePositiveInt(answers.port, PDS_DEFAULT_PORT);
     const settings = { enabled: true, hostname, port };
 
-    if (!isLocalPdsHostname(hostname)) {
+    // Belt and braces: the prompt validator can be bypassed by a --default answer.
+    const hostnameCheck = validatePdsHostname(hostname);
+    if (!hostnameCheck.ok) {
+      console.log(`\n✗ ${hostnameCheck.reason}`);
+      return;
+    }
+
+    if (!isDevPdsHostname(hostname)) {
       const dnsOk = await checkPdsDnsSetup(hostname);
       if (!dnsOk) {
         const { proceed } = await inquirer.prompt([
@@ -1246,7 +1307,7 @@ program
       ]);
       if (smtp.url?.trim() && smtp.from?.trim()) {
         fs.appendFileSync(
-          path.resolve(process.cwd(), '.env'),
+          path.join(ROOT_DIR, '.env'),
           `\nPDS_EMAIL_SMTP_URL=${smtp.url.trim()}\nPDS_EMAIL_FROM_ADDRESS=${smtp.from.trim()}\n`,
         );
         process.env.PDS_EMAIL_SMTP_URL = smtp.url.trim();
@@ -1260,12 +1321,17 @@ program
     saveConfig(savedConfig);
     console.log('   ✓ PDS settings saved to config.');
 
-    if (!isLocalPdsHostname(hostname)) {
+    if (!isDevPdsHostname(hostname)) {
       const caddyfile = writeCaddyfile(settings);
       console.log(`\nTLS reverse proxy config written to: ${caddyfile}`);
       console.log('Run Caddy with it (installs certificates automatically, including per-handle subdomains):');
       console.log(`   caddy run --config ${caddyfile}`);
       console.log('   (or: docker run -d --network host -v <dir>:/etc/caddy caddy:2)');
+      console.log(`\nThe PDS itself listens on 127.0.0.1:${port} only, so Caddy must reach it over loopback`);
+      console.log('(hence "--network host" above). Only ports 80 and 443 need to be open to the internet.');
+      console.log(`If your proxy cannot use loopback, set PDS_BIND_HOST=0.0.0.0 in .env and firewall port ${port}`);
+      console.log('yourself — otherwise the PDS is served over unencrypted HTTP to anyone who asks:');
+      console.log(`   sudo ufw deny ${port}/tcp        # or the equivalent for your firewall`);
     }
 
     const { tempHandle } = await ensurePdsForCli(settings);
@@ -1329,7 +1395,7 @@ program
 
       console.log('\nSetup complete.');
       console.log('Start everything (PDS + mirroring + dashboard) with: bun start');
-      if (!isLocalPdsHostname(hostname)) {
+      if (!isDevPdsHostname(hostname)) {
         console.log(`Mirrored accounts appear on Bluesky as [twitterhandle].${hostname}`);
         console.log('Keep Caddy (or your reverse proxy) running so handles resolve publicly.');
       }
@@ -1347,6 +1413,14 @@ program
     const config = getConfig();
     if (!config.pds?.hostname) {
       console.log('Built-in PDS is not configured. Run setup-pds first.');
+      return;
+    }
+    // Config written by an older build may hold a hostname that cannot host
+    // handles (e.g. "localhost").
+    const hostnameCheck = validatePdsHostname(config.pds.hostname);
+    if (!hostnameCheck.ok) {
+      console.log(`Configured PDS hostname "${config.pds.hostname}" is unusable: ${hostnameCheck.reason}`);
+      console.log('Re-run setup-pds with a valid hostname.');
       return;
     }
     const settings = { ...config.pds, enabled: true };
