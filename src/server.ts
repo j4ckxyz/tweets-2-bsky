@@ -2244,6 +2244,232 @@ app.post('/api/mappings', authenticateToken, async (req: any, res) => {
   res.json(sanitizeMapping(newMapping, createUserLookupById(config), req.user));
 });
 
+// ---------------------------------------------------------------------------
+// Built-in PDS
+// ---------------------------------------------------------------------------
+
+// Lets the dashboard skip the whole "go make a Bluesky account and generate an
+// app password" flow when the built-in PDS can mint accounts itself.
+app.get('/api/pds/status', authenticateToken, async (_req: any, res) => {
+  const pds = getConfig().pds;
+  if (!pds?.enabled || !pds.hostname) {
+    res.json({ enabled: false });
+    return;
+  }
+  const { isPdsHealthy } = await import('./pds-manager.js');
+  res.json({
+    enabled: true,
+    hostname: pds.hostname,
+    port: pds.port,
+    running: await isPdsHealthy(`http://127.0.0.1:${pds.port}`),
+  });
+});
+
+// One-shot equivalent of `cli -- add-pds-account`: provision the account, save
+// the mapping, apply the bot label, and mirror the Twitter profile.
+app.post('/api/pds/provision-mapping', authenticateToken, async (req: any, res) => {
+  if (!canManageOwnMappings(req.user) && !canManageAllMappings(req.user)) {
+    res.status(403).json({ error: 'You do not have permission to create mappings.' });
+    return;
+  }
+
+  const config = getConfig();
+  const pds = config.pds;
+  if (!pds?.enabled || !pds.hostname) {
+    res.status(400).json({ error: 'The built-in PDS is not enabled. Run `bun run cli -- setup-pds` first.' });
+    return;
+  }
+
+  const twitterUsernames = parseTwitterUsernames(req.body?.twitterUsernames);
+  if (twitterUsernames.length === 0) {
+    res.status(400).json({ error: 'At least one Twitter username is required.' });
+    return;
+  }
+
+  const { isPdsHealthy, provisionPdsAccount, twitterHandleToPdsLabel, validatePdsHostname } = await import(
+    './pds-manager.js'
+  );
+
+  const hostnameCheck = validatePdsHostname(pds.hostname);
+  if (!hostnameCheck.ok) {
+    res.status(400).json({ error: `Configured PDS hostname "${pds.hostname}" is unusable: ${hostnameCheck.reason}` });
+    return;
+  }
+
+  const localUrl = `http://127.0.0.1:${pds.port}`;
+  if (!(await isPdsHealthy(localUrl))) {
+    res.status(503).json({
+      error: 'The built-in PDS is not running. Start the app with `bun start` so the PDS comes up alongside it.',
+    });
+    return;
+  }
+
+  // The account name is derived from the mirror source, matching the CLI.
+  const profileSyncSourceUsername = resolveProfileSyncSourceUsername({
+    twitterUsernames,
+    requestedSource: req.body?.profileSyncSourceUsername,
+  });
+  const accountSource = profileSyncSourceUsername || twitterUsernames[0];
+  if (!accountSource) {
+    res.status(400).json({ error: 'Could not determine which Twitter account to derive the handle from.' });
+    return;
+  }
+
+  let targetHandle: string;
+  try {
+    targetHandle = `${twitterHandleToPdsLabel(accountSource)}.${pds.hostname}`;
+  } catch (error) {
+    // Handle-label rules (3-18 chars, no underscores) are surfaced verbatim.
+    res.status(400).json({ error: getErrorMessage(error, 'Cannot derive a PDS handle from that Twitter username.') });
+    return;
+  }
+
+  // Same guard as the CLI: a second mapping for an already-mirrored Twitter
+  // account would post every tweet twice.
+  const conflicting = config.mappings.filter(
+    (mapping) =>
+      mapping.twitterUsernames.some((username) =>
+        twitterUsernames.some((candidate) => normalizeActor(username) === normalizeActor(candidate)),
+      ) && normalizeActor(mapping.bskyIdentifier) !== normalizeActor(targetHandle),
+  );
+  if (conflicting.length > 0 && req.body?.allowDuplicateMirror !== true) {
+    res.status(409).json({
+      error: 'duplicate-mirror',
+      message: `Already mirrored to ${conflicting.map((mapping) => mapping.bskyIdentifier).join(', ')}. Creating this mapping too would post every tweet twice.`,
+      conflicts: conflicting.map((mapping) => ({
+        id: mapping.id,
+        bskyIdentifier: mapping.bskyIdentifier,
+        bskyServiceUrl: mapping.bskyServiceUrl,
+        enabled: mapping.enabled,
+      })),
+    });
+    return;
+  }
+
+  let account: Awaited<ReturnType<typeof provisionPdsAccount>>;
+  try {
+    account = await provisionPdsAccount(pds, accountSource);
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Failed to provision the account on the built-in PDS.') });
+    return;
+  }
+
+  const usersById = createUserLookupById(config);
+  let createdByUserId = req.user.id;
+  const requestedCreatorId = normalizeOptionalString(req.body?.createdByUserId);
+  if (requestedCreatorId && requestedCreatorId !== req.user.id) {
+    if (!canManageAllMappings(req.user)) {
+      res.status(403).json({ error: 'You cannot assign mappings to another user.' });
+      return;
+    }
+    if (!usersById.has(requestedCreatorId)) {
+      res.status(400).json({ error: 'Selected account owner does not exist.' });
+      return;
+    }
+    createdByUserId = requestedCreatorId;
+  }
+  const ownerUser = usersById.get(createdByUserId);
+  const owner =
+    normalizeOptionalString(req.body?.owner) ||
+    (ownerUser ? getUserPublicLabel(ownerUser) : getActorPublicLabel(req.user));
+  const normalizedGroupName = normalizeGroupName(req.body?.groupName);
+  const normalizedGroupEmoji = normalizeGroupEmoji(req.body?.groupEmoji);
+
+  // Re-read: provisioning is slow enough that the config may have changed.
+  const freshConfig = getConfig();
+  const existingIndex = freshConfig.mappings.findIndex(
+    (mapping) => normalizeActor(mapping.bskyIdentifier) === normalizeActor(account.handle),
+  );
+
+  let mapping: AccountMapping;
+  if (existingIndex !== -1 && freshConfig.mappings[existingIndex]) {
+    // Re-provisioned an account we already track: keep it, refresh credentials.
+    mapping = {
+      ...freshConfig.mappings[existingIndex],
+      twitterUsernames,
+      bskyPassword: account.password,
+      bskyServiceUrl: localUrl,
+      pdsManaged: true,
+      profileSyncSourceUsername,
+    };
+    freshConfig.mappings[existingIndex] = mapping;
+  } else {
+    mapping = {
+      id: randomUUID(),
+      twitterUsernames,
+      bskyIdentifier: account.handle,
+      bskyPassword: account.password,
+      bskyServiceUrl: localUrl,
+      enabled: true,
+      owner,
+      groupName: normalizedGroupName || undefined,
+      groupEmoji: normalizedGroupEmoji || undefined,
+      createdByUserId,
+      profileSyncSourceUsername,
+      hasBotLabel: false,
+      pdsManaged: true,
+    };
+    freshConfig.mappings.push(mapping);
+  }
+  ensureGroupExists(freshConfig, normalizedGroupName, normalizedGroupEmoji);
+  saveConfig(freshConfig);
+
+  // Label and profile mirror are best-effort: the account and mapping already
+  // exist, and both are retryable from the Accounts tab.
+  const warnings: string[] = [];
+
+  try {
+    const labelResult = await ensureBlueskyBotSelfLabel({
+      bskyIdentifier: mapping.bskyIdentifier,
+      bskyPassword: mapping.bskyPassword,
+      bskyServiceUrl: mapping.bskyServiceUrl,
+    });
+    if (labelResult.hasBotLabel) {
+      mapping.hasBotLabel = true;
+      saveConfig(freshConfig);
+    }
+  } catch (error) {
+    warnings.push(`Bot label was not applied: ${getErrorMessage(error, 'unknown error')}`);
+  }
+
+  if (profileSyncSourceUsername) {
+    try {
+      const syncResult = await syncBlueskyProfileFromTwitter({
+        twitterUsername: profileSyncSourceUsername,
+        bskyIdentifier: mapping.bskyIdentifier,
+        bskyPassword: mapping.bskyPassword,
+        bskyServiceUrl: mapping.bskyServiceUrl,
+        previousSync: getMappingMirrorSyncState(mapping),
+      });
+      mapping = applyProfileMirrorSyncState(mapping, profileSyncSourceUsername, syncResult);
+      const index = freshConfig.mappings.findIndex((entry) => entry.id === mapping.id);
+      if (index !== -1) {
+        freshConfig.mappings[index] = mapping;
+        saveConfig(freshConfig);
+      }
+      warnings.push(...(syncResult.warnings || []));
+    } catch (error) {
+      warnings.push(`Profile mirror failed: ${getErrorMessage(error, 'unknown error')}`);
+    }
+  }
+
+  for (const key of [normalizeActor(mapping.bskyIdentifier), normalizeActor(account.did)]) {
+    if (key) {
+      profileCache.delete(key);
+    }
+  }
+
+  res.json({
+    success: true,
+    handle: account.handle,
+    did: account.did,
+    reusedExistingAccount: account.existing,
+    profileUrl: `https://bsky.app/profile/${account.handle}`,
+    warnings,
+    mapping: sanitizeMapping(mapping, createUserLookupById(freshConfig), req.user),
+  });
+});
+
 app.put('/api/mappings/:id', authenticateToken, (req: any, res) => {
   const { id } = req.params;
   const config = getConfig();

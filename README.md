@@ -202,6 +202,8 @@ Add more accounts at any time:
 bun run cli -- add-pds-account jack someotheruser
 ```
 
+Or from the dashboard: when the built-in PDS is running, **Add Account** drops the "create a Bluesky account" and "enter an app password" steps entirely. Enter the Twitter username, confirm the handle it will mint, and press **Create & Mirror** — the account is provisioned, the profile is mirrored, the bot label is applied, and a toast links straight to the new profile. If the PDS is configured but not running, the wizard says so and falls back to the manual credential flow.
+
 After setup, `bun start` runs everything together: the PDS starts first, then the mirror scheduler and dashboard. Regular (non-PDS) operation is completely unaffected — mappings pointing at `bsky.social` or any other service keep working, and both kinds can coexist.
 
 ### Network exposure

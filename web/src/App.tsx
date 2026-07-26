@@ -412,6 +412,7 @@ interface UpdateStatusInfo {
 interface Notice {
   tone: 'success' | 'error' | 'info';
   message: string;
+  link?: { href: string; label: string };
 }
 
 interface MappingFormState {
@@ -474,6 +475,16 @@ const TAB_PATHS: Record<DashboardTab, string> = {
 };
 const ADD_ACCOUNT_STEPS = ['Sources', 'Create', 'Bluesky', 'Verify & Create'] as const;
 const ADD_ACCOUNT_STEP_COUNT = ADD_ACCOUNT_STEPS.length;
+// With the built-in PDS there is no external signup and no app password, so the
+// "Create" and "Bluesky credentials" steps disappear entirely.
+const ADD_ACCOUNT_STEPS_PDS = ['Sources', 'Create & Mirror'] as const;
+
+interface PdsStatus {
+  enabled: boolean;
+  hostname?: string;
+  port?: number;
+  running?: boolean;
+}
 const ACCOUNT_SEARCH_MIN_SCORE = 22;
 const ACCOUNT_PAGE_SIZE_DEFAULT = 50;
 const DEFAULT_BACKFILL_LIMIT = 15;
@@ -906,6 +917,7 @@ function App() {
   const [newGroupEmoji, setNewGroupEmoji] = useState(DEFAULT_GROUP_EMOJI);
   const [isAddAccountSheetOpen, setIsAddAccountSheetOpen] = useState(false);
   const [addAccountStep, setAddAccountStep] = useState(1);
+  const [pdsStatus, setPdsStatus] = useState<PdsStatus | null>(null);
   const [settingsActiveSection, setSettingsActiveSection] = useState<SettingsSection>('account');
   const [selectedFolderKey, setSelectedFolderKey] = useState('__all__');
   const [accountsSearchQuery, setAccountsSearchQuery] = useState('');
@@ -955,6 +967,42 @@ function App() {
   const canManageAllMappings = isAdmin || effectivePermissions.manageAllMappings;
   const canManageOwnMappings = isAdmin || effectivePermissions.manageOwnMappings;
   const canCreateMappings = canManageAllMappings || canManageOwnMappings;
+  // Accounts are minted locally, so the manual signup + app-password steps are
+  // skipped entirely. Requires the PDS to actually be up, not merely configured.
+  const usePdsAccountFlow = pdsStatus?.enabled === true && pdsStatus.running === true;
+  const addAccountSteps = usePdsAccountFlow ? ADD_ACCOUNT_STEPS_PDS : ADD_ACCOUNT_STEPS;
+  const addAccountStepCount = usePdsAccountFlow ? ADD_ACCOUNT_STEPS_PDS.length : ADD_ACCOUNT_STEP_COUNT;
+
+  // Preview of the handle the server will mint, so the 3-18 character limit is
+  // visible before provisioning rather than as a failure afterwards. Mirrors
+  // twitterHandleToPdsLabel in src/pds-manager.ts.
+  const { pdsHandlePreview, pdsHandleError } = useMemo(() => {
+    if (!usePdsAccountFlow || !pdsStatus?.hostname) {
+      return { pdsHandlePreview: '', pdsHandleError: '' };
+    }
+    const source = normalizeTwitterUsername(selectedMirrorSourceUsername || newTwitterUsers[0] || '');
+    if (!source) {
+      return { pdsHandlePreview: '', pdsHandleError: '' };
+    }
+    const label = source
+      .toLowerCase()
+      .replace(/_/g, '-')
+      .replace(/[^a-z0-9-]/g, '')
+      .replace(/^-+|-+$/g, '');
+    if (label.length < 3) {
+      return {
+        pdsHandlePreview: '',
+        pdsHandleError: `“${source}” becomes “${label}”, which is under the 3-character minimum the AT Protocol enforces. Use a manually created Bluesky account for this one.`,
+      };
+    }
+    if (label.length > 18) {
+      return {
+        pdsHandlePreview: '',
+        pdsHandleError: `“${source}” becomes “${label}”, which is over the 18-character maximum the AT Protocol enforces.`,
+      };
+    }
+    return { pdsHandlePreview: `${label}.${pdsStatus.hostname}`, pdsHandleError: '' };
+  }, [newTwitterUsers, pdsStatus?.hostname, selectedMirrorSourceUsername, usePdsAccountFlow]);
   const canManageGroupsPermission = isAdmin || effectivePermissions.manageGroups;
   const canQueueBackfillsPermission = isAdmin || effectivePermissions.queueBackfills;
   const canRunNowPermission = isAdmin || effectivePermissions.runNow;
@@ -1008,14 +1056,18 @@ function App() {
     };
   }, []);
 
-  const showNotice = useCallback((tone: Notice['tone'], message: string) => {
-    setNotice({ tone, message });
+  const showNotice = useCallback((tone: Notice['tone'], message: string, link?: Notice['link']) => {
+    setNotice({ tone, message, link });
     if (noticeTimerRef.current) {
       window.clearTimeout(noticeTimerRef.current);
     }
-    noticeTimerRef.current = window.setTimeout(() => {
-      setNotice(null);
-    }, 4200);
+    // A notice with a link has to stay up long enough to actually click it.
+    noticeTimerRef.current = window.setTimeout(
+      () => {
+        setNotice(null);
+      },
+      link ? 15000 : 4200,
+    );
   }, []);
 
   const handleLogout = useCallback(() => {
@@ -1425,6 +1477,33 @@ function App() {
 
     void fetchData();
   }, [token, fetchBootstrapStatus, fetchData]);
+
+  // Decides whether the add-account wizard shows the manual Bluesky steps or
+  // provisions on the built-in PDS. Re-checked when the drawer opens so a PDS
+  // that came up after login is picked up without a reload.
+  useEffect(() => {
+    if (!authHeaders) {
+      setPdsStatus(null);
+      return;
+    }
+    let cancelled = false;
+    void axios
+      .get<PdsStatus>('/api/pds/status', { headers: authHeaders })
+      .then((response) => {
+        if (!cancelled) {
+          setPdsStatus(response.data);
+        }
+      })
+      .catch(() => {
+        // Older backend without the route: fall back to the manual flow.
+        if (!cancelled) {
+          setPdsStatus({ enabled: false });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authHeaders, isAddAccountSheetOpen]);
 
   useEffect(() => {
     if (!token || activeTab !== 'accounts' || mappings.length === 0) {
@@ -4010,6 +4089,81 @@ function App() {
     }
   };
 
+  // Provisions the account on the built-in PDS and creates the mapping in one
+  // call — no external signup, no app password.
+  const submitPdsProvisionedMapping = async (options?: { allowDuplicateMirror?: boolean }) => {
+    if (!canCreateMappings) {
+      showNotice('error', 'You do not have permission to add mappings.');
+      return;
+    }
+    if (newTwitterUsers.length === 0) {
+      showNotice('error', 'Add at least one Twitter username.');
+      return;
+    }
+    const sourceTwitterUsername = normalizeTwitterUsername(selectedMirrorSourceUsername || newTwitterUsers[0] || '');
+    if (!sourceTwitterUsername) {
+      showNotice('error', 'Select a Twitter source for profile mirroring.');
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      const response = await axios.post<{
+        handle: string;
+        profileUrl: string;
+        reusedExistingAccount: boolean;
+        warnings: string[];
+      }>(
+        '/api/pds/provision-mapping',
+        {
+          owner: newMapping.owner.trim(),
+          twitterUsernames: newTwitterUsers,
+          groupName: newMapping.groupName.trim(),
+          groupEmoji: newMapping.groupEmoji.trim(),
+          profileSyncSourceUsername: sourceTwitterUsername,
+          ...(options?.allowDuplicateMirror ? { allowDuplicateMirror: true } : {}),
+        },
+        { headers: authHeaders },
+      );
+
+      const { handle, profileUrl, warnings, reusedExistingAccount } = response.data;
+      setNewMapping(defaultMappingForm());
+      setNewTwitterUsers([]);
+      setNewTwitterInput('');
+      setNewTwitterMirrorProfiles({});
+      setSelectedMirrorSourceUsername('');
+      setValidatedBskyCredentials(null);
+      setIsAddAccountSheetOpen(false);
+      setAddAccountStep(1);
+
+      const base = reusedExistingAccount
+        ? `Reused the existing account @${handle} and remapped it.`
+        : `Created @${handle} and started mirroring.`;
+      showNotice(
+        warnings.length > 0 ? 'info' : 'success',
+        warnings.length > 0 ? `${base} ${warnings.length} warning(s): ${warnings.join('; ')}` : base,
+        { href: profileUrl, label: 'View profile' },
+      );
+      await fetchData();
+    } catch (error) {
+      // The backend refuses by default when the Twitter account is already
+      // mirrored elsewhere, since both mappings would post every tweet.
+      if (axios.isAxiosError(error) && error.response?.status === 409) {
+        const message = error.response.data?.message || 'This Twitter account is already mirrored elsewhere.';
+        if (window.confirm(`${message}\n\nCreate the PDS mirror anyway?`)) {
+          setIsBusy(false);
+          await submitPdsProvisionedMapping({ allowDuplicateMirror: true });
+          return;
+        }
+        showNotice('info', 'Cancelled — no PDS account was created.');
+        return;
+      }
+      handleAuthFailure(error, 'Failed to provision the account on the built-in PDS.');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   const advanceAddAccountStep = () => {
     if (addAccountStep === 1) {
       if (newTwitterUsers.length === 0) {
@@ -4034,6 +4188,11 @@ function App() {
         .finally(() => {
           setIsMirrorPreviewLoading(false);
         });
+      return;
+    }
+
+    // In PDS mode step 2 is the final confirm screen, so there is nothing after it.
+    if (usePdsAccountFlow) {
       return;
     }
 
@@ -4701,7 +4860,20 @@ function App() {
                   notice.tone === 'info' && 'border-border bg-muted text-muted-foreground',
                 )}
               >
-                {notice.message}
+                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+                  <span>{notice.message}</span>
+                  {notice.link ? (
+                    <a
+                      href={notice.link.href}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex shrink-0 items-center font-medium underline underline-offset-2"
+                    >
+                      {notice.link.label}
+                      <ArrowUpRight className="ml-1 h-3.5 w-3.5" />
+                    </a>
+                  ) : null}
+                </div>
               </div>
             ) : null}
 
@@ -6874,7 +7046,7 @@ function App() {
 
                   <div className="border-b border-border/70 px-5 py-3">
                     <div className="flex items-center gap-2">
-                      {ADD_ACCOUNT_STEPS.map((label, index) => {
+                      {addAccountSteps.map((label, index) => {
                         const step = index + 1;
                         const active = step === addAccountStep;
                         const complete = step < addAccountStep;
@@ -6898,7 +7070,7 @@ function App() {
                             >
                               {label}
                             </span>
-                            {step < ADD_ACCOUNT_STEP_COUNT ? <div className="h-px flex-1 bg-border/70" /> : null}
+                            {step < addAccountStepCount ? <div className="h-px flex-1 bg-border/70" /> : null}
                           </div>
                         );
                       })}
@@ -6906,6 +7078,21 @@ function App() {
                   </div>
 
                   <div className="flex-1 overflow-y-auto px-5 py-4">
+                    {addAccountStep === 1 && pdsStatus?.enabled && !pdsStatus.running ? (
+                      <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/30 dark:text-amber-300">
+                        The built-in PDS ({pdsStatus.hostname}) is configured but not running, so accounts cannot be
+                        created automatically. Start the app with <code>bun start</code> to bring it up. Until then this
+                        wizard needs Bluesky credentials you supply yourself.
+                      </div>
+                    ) : null}
+
+                    {addAccountStep === 1 && usePdsAccountFlow ? (
+                      <div className="mb-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:border-emerald-500/30 dark:text-emerald-300">
+                        Built-in PDS is running. The Bluesky account is created automatically on {pdsStatus?.hostname} —
+                        no signup and no app password needed.
+                      </div>
+                    ) : null}
+
                     {addAccountStep === 1 ? (
                       <div className="space-y-4">
                         <div className="space-y-1">
@@ -7013,7 +7200,57 @@ function App() {
                       </div>
                     ) : null}
 
-                    {addAccountStep === 2 ? (
+                    {addAccountStep === 2 && usePdsAccountFlow ? (
+                      <div className="space-y-4">
+                        <div className="space-y-1">
+                          <p className="text-sm font-semibold">Create the account on your own PDS</p>
+                          <p className="text-xs text-muted-foreground">
+                            No signup and no app password: the account is minted on {pdsStatus?.hostname}, the profile
+                            is mirrored from Twitter, and the bot label is applied automatically.
+                          </p>
+                        </div>
+                        <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
+                          <div className="flex items-baseline justify-between gap-3">
+                            <span className="text-xs font-medium text-muted-foreground">Twitter source</span>
+                            <span className="truncate font-medium">
+                              @{normalizeTwitterUsername(selectedMirrorSourceUsername || newTwitterUsers[0] || '')}
+                            </span>
+                          </div>
+                          <div className="flex items-baseline justify-between gap-3">
+                            <span className="text-xs font-medium text-muted-foreground">New handle</span>
+                            <span className="truncate font-mono text-xs font-medium">{pdsHandlePreview || '--'}</span>
+                          </div>
+                          {newTwitterUsers.length > 1 ? (
+                            <div className="flex items-baseline justify-between gap-3">
+                              <span className="text-xs font-medium text-muted-foreground">Also mirroring</span>
+                              <span className="truncate text-xs">
+                                {newTwitterUsers
+                                  .filter(
+                                    (username) =>
+                                      normalizeTwitterUsername(username) !==
+                                      normalizeTwitterUsername(
+                                        selectedMirrorSourceUsername || newTwitterUsers[0] || '',
+                                      ),
+                                  )
+                                  .map((username) => `@${username}`)
+                                  .join(', ')}
+                              </span>
+                            </div>
+                          ) : null}
+                        </div>
+                        {pdsHandleError ? (
+                          <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+                            {pdsHandleError}
+                          </p>
+                        ) : (
+                          <p className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                            Press “Create &amp; Mirror” to provision it. This takes a few seconds.
+                          </p>
+                        )}
+                      </div>
+                    ) : null}
+
+                    {addAccountStep === 2 && !usePdsAccountFlow ? (
                       <div className="space-y-4">
                         <div className="space-y-1">
                           <p className="text-sm font-semibold">Create Bluesky account (or use existing)</p>
@@ -7239,7 +7476,7 @@ function App() {
                       <ChevronLeft className="mr-2 h-4 w-4" />
                       Back
                     </Button>
-                    {addAccountStep < ADD_ACCOUNT_STEP_COUNT ? (
+                    {addAccountStep < addAccountStepCount ? (
                       <Button
                         onClick={advanceAddAccountStep}
                         disabled={isBusy || isMirrorPreviewLoading || isCredentialValidationBusy}
@@ -7248,9 +7485,12 @@ function App() {
                         <ChevronRight className="ml-2 h-4 w-4" />
                       </Button>
                     ) : (
-                      <Button onClick={() => void submitNewMapping()} disabled={isBusy}>
+                      <Button
+                        onClick={() => void (usePdsAccountFlow ? submitPdsProvisionedMapping() : submitNewMapping())}
+                        disabled={isBusy || (usePdsAccountFlow && (!pdsHandlePreview || Boolean(pdsHandleError)))}
+                      >
                         {isBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
-                        Create Account
+                        {usePdsAccountFlow ? 'Create & Mirror' : 'Create Account'}
                       </Button>
                     )}
                   </div>
