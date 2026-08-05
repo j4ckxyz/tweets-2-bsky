@@ -17,6 +17,8 @@ import sharp from 'sharp';
 import { generateAltText, isAltTextConfigured } from './ai-manager.js';
 
 import { getConfig, saveConfig } from './config-manager.js';
+import type { ErrorDetail } from './event-log.js';
+import { logEvent } from './event-log.js';
 import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './profile-mirror.js';
 import {
   buildPollNote,
@@ -206,16 +208,6 @@ const QUEUE_MAX_ATTEMPTS = envInt('QUEUE_MAX_ATTEMPTS', 8, 1, 50);
 // every timeline fetch and tweet lookup waits for a slot here.
 const SCRAPER_MIN_GAP_MS = envInt('SCRAPER_MIN_GAP_MS', 800, 0, 60_000);
 const SCRAPER_JITTER_MS = envInt('SCRAPER_JITTER_MS', 400, 0, 60_000);
-
-// Timestamped logging for the pipeline halves, so sweep cadence and queue
-// latency can be read straight off the logs (PM2/Docker don't always add
-// their own timestamps).
-const logPipeline = (tag: 'Sweep' | 'Queue', message: string, isError = false): void => {
-  const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  const line = `[${stamp}] [${tag}] ${message}`;
-  if (isError) console.error(line);
-  else console.log(line);
-};
 
 const formatDurationMs = (ms: number): string => {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
@@ -1193,6 +1185,45 @@ async function fetchUserTweets(
 // Main Processing Logic
 // ============================================================================
 
+// What happened to one tweet, from the point of view of whoever handed it over.
+// Before this existed the queue could only ask "is there a processed_tweets row
+// yet?" — so a tweet that was deliberately skipped, one that failed on its
+// third chunk, and one the batch never even reached all looked identical, and
+// all three ended up parked with the same "Tweet was not posted" placeholder.
+export type TweetOutcomeStatus = 'posted' | 'skipped' | 'failed' | 'not-attempted';
+
+export interface TweetOutcome {
+  status: TweetOutcomeStatus;
+  /** Where in the pipeline it ended up: 'filter' | 'media' | 'post' | 'record' | 'login' | … */
+  stage: string;
+  /** Human sentence explaining this specific tweet's fate. */
+  reason: string;
+  detail?: ErrorDetail;
+  retryable?: boolean;
+  uri?: string;
+  cid?: string;
+  chunks?: number;
+  durationMs?: number;
+}
+
+/**
+ * Optional per-run context threaded through processTweets so callers can learn
+ * what happened to each individual tweet, and so a post can be recorded as
+ * "already on Bluesky" the instant it lands rather than after all the
+ * follow-up bookkeeping has succeeded.
+ */
+export interface ProcessContext {
+  outcomes?: Map<string, TweetOutcome>;
+  /** Fired as soon as the PDS accepts a tweet's first chunk. */
+  onPosted?: (twitterId: string, uri: string, cid: string) => void;
+  mappingId?: string;
+  jobId?: string;
+}
+
+function recordOutcome(context: ProcessContext | undefined, twitterId: string, outcome: TweetOutcome): void {
+  context?.outcomes?.set(twitterId, outcome);
+}
+
 async function processTweets(
   agent: BskyAgent,
   twitterUsername: string,
@@ -1202,14 +1233,30 @@ async function processTweets(
   sharedProcessedMap?: ProcessedTweetsMap,
   sharedTweetMap?: Map<string, Tweet>,
   sessionKey = 'default',
+  context?: ProcessContext,
 ): Promise<void> {
+  const logScope = { twitterUsername, bskyIdentifier, mappingId: context?.mappingId, jobId: context?.jobId };
+
   // Filter tweets to ensure they're actually from this user
   const filteredTweets = tweets.filter((t) => {
     const authorScreenName = t.user?.screen_name?.toLowerCase();
     if (authorScreenName && authorScreenName !== twitterUsername.toLowerCase()) {
-      console.log(
-        `[${twitterUsername}] ⏩ Skipping tweet ${t.id_str || t.id} - author is @${t.user?.screen_name}, not @${twitterUsername}`,
-      );
+      const id = t.id_str || t.id || '';
+      // Recorded as an outcome, not just a console line: otherwise the queue
+      // row for this tweet never settles and retries until it is parked.
+      recordOutcome(context, id, {
+        status: 'skipped',
+        stage: 'filter',
+        reason: `Timeline entry is authored by @${t.user?.screen_name}, not @${twitterUsername}`,
+      });
+      logEvent({
+        level: 'debug',
+        stage: 'post',
+        event: 'tweet.skipped.author-mismatch',
+        message: `Skipped tweet ${id}: authored by @${t.user?.screen_name}, not @${twitterUsername}`,
+        twitterId: id,
+        ...logScope,
+      });
       return false;
     }
     return true;
@@ -1224,11 +1271,25 @@ async function processTweets(
   const toProcess = filteredTweets.filter((t) => !localProcessedMap[t.id_str || t.id || '']);
 
   if (toProcess.length === 0) {
-    console.log(`[${twitterUsername}] ✅ No new tweets to process for ${bskyIdentifier}.`);
+    logEvent({
+      level: 'debug',
+      stage: 'post',
+      event: 'batch.nothing-to-do',
+      message: `Nothing new to post for ${bskyIdentifier}: all ${filteredTweets.length} tweet(s) already have a record.`,
+      detail: { handedOver: tweets.length, afterAuthorFilter: filteredTweets.length },
+      ...logScope,
+    });
     return;
   }
 
-  console.log(`[${twitterUsername}] 🚀 Processing ${toProcess.length} new tweets for ${bskyIdentifier}...`);
+  logEvent({
+    level: 'info',
+    stage: 'post',
+    event: 'batch.start',
+    message: `Processing ${toProcess.length} new tweet(s) for ${bskyIdentifier}.`,
+    detail: { handedOver: tweets.length, afterAuthorFilter: filteredTweets.length, newTweets: toProcess.length },
+    ...logScope,
+  });
 
   const mirrorJobId = `mirror:${bskyIdentifier.toLowerCase()}:${twitterUsername.toLowerCase()}`;
   let mirroredCount = 0;
@@ -1240,7 +1301,21 @@ async function processTweets(
     const tweetId = tweet.id_str || tweet.id;
     if (!tweetId) continue;
 
-    if (localProcessedMap[tweetId]) continue;
+    const tweetStartedAt = Date.now();
+
+    if (localProcessedMap[tweetId]) {
+      const known = localProcessedMap[tweetId];
+      recordOutcome(context, tweetId, {
+        status: known?.skipped ? 'skipped' : 'posted',
+        stage: 'already-known',
+        reason: known?.skipped
+          ? 'Already recorded as skipped in an earlier run.'
+          : 'Already mirrored in an earlier run.',
+        uri: known?.uri,
+        cid: known?.cid,
+      });
+      continue;
+    }
 
     // Fallback to DB in case a nested backfill already saved this tweet.
     const dbRecord = dbService.getTweet(tweetId, bskyIdentifier);
@@ -1259,13 +1334,29 @@ async function processTweets(
         migrated: dbRecord.status === 'migrated',
         skipped: dbRecord.status === 'skipped',
       };
+      recordOutcome(context, tweetId, {
+        status: dbRecord.status === 'skipped' ? 'skipped' : 'posted',
+        stage: 'already-recorded',
+        reason: `Already in the processed history as "${dbRecord.status}".`,
+        uri: dbRecord.bsky_uri,
+        cid: dbRecord.bsky_cid,
+      });
       continue;
     }
 
     const isRetweet = tweet.isRetweet || tweet.retweeted_status_id_str || tweet.text?.startsWith('RT @');
 
     if (isRetweet) {
-      console.log(`[${twitterUsername}] ⏩ Skipping retweet ${tweetId}.`);
+      const reason = 'Retweets are not mirrored.';
+      logEvent({
+        level: 'debug',
+        stage: 'post',
+        event: 'tweet.skipped.retweet',
+        message: `Skipped tweet ${tweetId}: ${reason}`,
+        twitterId: tweetId,
+        ...logScope,
+      });
+      recordOutcome(context, tweetId, { status: 'skipped', stage: 'filter', reason });
       if (!dryRun) {
         // Save as skipped so we don't check it again
         saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, { skipped: true, text: tweet.text });
@@ -1274,7 +1365,14 @@ async function processTweets(
       continue;
     }
 
-    console.log(`\n[${twitterUsername}] 🔍 Inspecting tweet: ${tweetId}`);
+    logEvent({
+      level: 'debug',
+      stage: 'post',
+      event: 'tweet.inspect',
+      message: `Inspecting tweet ${tweetId} (${count}/${filteredTweets.length}).`,
+      twitterId: tweetId,
+      ...logScope,
+    });
     updateJob(mirrorJobId, {
       kind: 'mirroring',
       account: twitterUsername,
@@ -1308,6 +1406,7 @@ async function processTweets(
         console.log(`[${twitterUsername}] 🕵️ Parent ${replyStatusId} missing. Checking if backfillable...`);
 
         let parentBackfilled = false;
+        let parentLookupError: ErrorDetail | undefined;
         try {
           const scraper = await getTwitterScraper(sessionKey);
           if (scraper) {
@@ -1320,7 +1419,9 @@ async function processTweets(
               if (parentAuthor?.toLowerCase() === twitterUsername.toLowerCase()) {
                 console.log(`[${twitterUsername}] 🔄 Parent is ours (@${parentAuthor}). Backfilling parent first...`);
                 addTweetsToMap(tweetMap, [parentTweet]);
-                // Recursively process the parent
+                // Recursively process the parent. The nested run gets its own
+                // outcome map so a parent's fate never overwrites the child's
+                // entry in the caller's map.
                 await processTweets(
                   agent,
                   twitterUsername,
@@ -1330,6 +1431,7 @@ async function processTweets(
                   localProcessedMap,
                   tweetMap,
                   sessionKey,
+                  { ...context, outcomes: new Map<string, TweetOutcome>() },
                 );
 
                 // Check if it was saved
@@ -1359,11 +1461,43 @@ async function processTweets(
             }
           }
         } catch (e) {
-          console.warn(`[${twitterUsername}] ⚠️ Failed to fetch/backfill parent ${replyStatusId}:`, e);
+          parentLookupError = toErrorDetail(e);
+          logEvent({
+            level: 'warn',
+            stage: 'twitter',
+            event: 'thread.parent-lookup.failed',
+            message: `Could not fetch parent tweet ${replyStatusId} while threading ${tweetId}.`,
+            twitterId: tweetId,
+            error: parentLookupError,
+            detail: { parentTweetId: replyStatusId },
+            ...logScope,
+          });
         }
 
         if (!parentBackfilled) {
-          console.log(`[${twitterUsername}] ⏩ Skipping external/unknown reply (Parent not found or external).`);
+          // Distinguish "this reply is genuinely external" from "we could not
+          // reach Twitter to find out" — the first is a permanent skip, the
+          // second is a transient failure that shouldn't silently discard a
+          // tweet that belongs in the thread.
+          const reason = parentLookupError
+            ? `Parent tweet ${replyStatusId} could not be fetched (${describeErrorDetail(parentLookupError)}); treated as an external reply.`
+            : `Parent tweet ${replyStatusId} is not ours or no longer exists, so this reply is external.`;
+          logEvent({
+            level: parentLookupError ? 'warn' : 'debug',
+            stage: 'post',
+            event: 'tweet.skipped.external-reply',
+            message: `Skipped tweet ${tweetId}: ${reason}`,
+            twitterId: tweetId,
+            error: parentLookupError,
+            detail: { parentTweetId: replyStatusId },
+            ...logScope,
+          });
+          recordOutcome(context, tweetId, {
+            status: 'skipped',
+            stage: 'thread',
+            reason,
+            detail: parentLookupError,
+          });
           if (!dryRun) {
             saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, { skipped: true, text: tweetText });
             localProcessedMap[tweetId] = { skipped: true, text: tweetText };
@@ -1371,7 +1505,17 @@ async function processTweets(
           continue;
         }
       } else {
-        console.log(`[${twitterUsername}] ⏩ Skipping external/unknown reply.`);
+        const reason = 'Reply has no parent tweet id (reply to a user, not a specific post), so it is external.';
+        logEvent({
+          level: 'debug',
+          stage: 'post',
+          event: 'tweet.skipped.external-reply',
+          message: `Skipped tweet ${tweetId}: ${reason}`,
+          twitterId: tweetId,
+          detail: { replyUserId },
+          ...logScope,
+        });
+        recordOutcome(context, tweetId, { status: 'skipped', stage: 'thread', reason });
         if (!dryRun) {
           saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, { skipped: true, text: tweetText });
           localProcessedMap[tweetId] = { skipped: true, text: tweetText };
@@ -1436,6 +1580,10 @@ async function processTweets(
     let videoAspectRatio: AspectRatio | undefined;
     const mediaEntities = tweet.extended_entities?.media || tweet.entities?.media || [];
     const mediaLinksToRemove: string[] = [];
+    // Media that was present on the tweet but did not make it to Bluesky, with
+    // the reason. Surfaces in the log line for the post so a mysteriously
+    // text-only mirror can be traced back to the upload that failed.
+    const droppedMedia: { type: string; url?: string; reason: string }[] = [];
 
     console.log(`[${twitterUsername}] 🖼️ Found ${mediaEntities.length} media entities.`);
 
@@ -1491,7 +1639,17 @@ async function processTweets(
           images.push({ alt: altText || 'Image from Twitter', image: blob, aspectRatio });
           console.log(`[${twitterUsername}] ✅ Image uploaded.`);
         } catch (err) {
-          console.error(`[${twitterUsername}] ❌ High quality upload failed:`, (err as Error).message);
+          const detail = toErrorDetail(err);
+          logEvent({
+            level: 'warn',
+            stage: 'media',
+            event: 'image.upload.failed',
+            message: `Full-quality image upload failed for tweet ${tweetId}; falling back to standard quality.`,
+            twitterId: tweetId,
+            error: detail,
+            detail: { mediaUrl: url },
+            ...logScope,
+          });
           try {
             console.log(`[${twitterUsername}] 🔄 Retrying with standard quality...`);
             updateAppStatus({ message: 'Retrying with standard quality...' });
@@ -1500,7 +1658,20 @@ async function processTweets(
             images.push({ alt: media.ext_alt_text || 'Image from Twitter', image: blob, aspectRatio });
             console.log(`[${twitterUsername}] ✅ Image uploaded on retry.`);
           } catch (retryErr) {
-            console.error(`[${twitterUsername}] ❌ Retry also failed:`, (retryErr as Error).message);
+            const retryDetail = toErrorDetail(retryErr);
+            // The post still goes out; it just loses this image. Recorded as a
+            // warning so a silently text-only post is explainable afterwards.
+            logEvent({
+              level: 'warn',
+              stage: 'media',
+              event: 'image.upload.dropped',
+              message: `Image dropped from tweet ${tweetId}: both quality levels failed to upload.`,
+              twitterId: tweetId,
+              error: retryDetail,
+              detail: { mediaUrl: url, firstAttempt: detail.message },
+              ...logScope,
+            });
+            droppedMedia.push({ type: 'photo', url, reason: describeErrorDetail(retryDetail) });
           }
         }
       } else if (media.type === 'video' || media.type === 'animated_gif') {
@@ -1509,7 +1680,17 @@ async function processTweets(
 
         if (duration > 180000) {
           // 3 minutes
-          console.warn(`[${twitterUsername}] ⚠️ Video too long (${(duration / 1000).toFixed(1)}s). Fallback to link.`);
+          const reason = `Video is ${(duration / 1000).toFixed(1)}s, over Bluesky's 180s limit; linked back to the tweet instead.`;
+          logEvent({
+            level: 'info',
+            stage: 'media',
+            event: 'video.too-long',
+            message: `Tweet ${tweetId}: ${reason}`,
+            twitterId: tweetId,
+            detail: { durationMs: duration, limitMs: 180000 },
+            ...logScope,
+          });
+          droppedMedia.push({ type: 'video', reason });
           const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
           if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
           continue;
@@ -1550,16 +1731,41 @@ async function processTweets(
                 break; // Prioritize first video
               }
 
-              console.warn(
-                `[${twitterUsername}] ⚠️ Video too large (${(buffer.length / 1024 / 1024).toFixed(2)}MB). Fallback to link.`,
-              );
+              const sizeReason = `Video is ${(buffer.length / 1024 / 1024).toFixed(2)}MB, over the 280MB upload ceiling; linked back to the tweet instead.`;
+              logEvent({
+                level: 'info',
+                stage: 'media',
+                event: 'video.too-large',
+                message: `Tweet ${tweetId}: ${sizeReason}`,
+                twitterId: tweetId,
+                detail: { bytes: buffer.length, limitBytes: 280 * 1024 * 1024 },
+                ...logScope,
+              });
+              droppedMedia.push({ type: 'video', url: videoUrl, reason: sizeReason });
               const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
               if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
             } catch (err) {
-              const errMsg = (err as Error).message;
-              if (errMsg !== 'VIDEO_FALLBACK_503') {
-                console.error(`[${twitterUsername}] ❌ Failed video upload flow:`, errMsg);
-              }
+              const videoDetail = toErrorDetail(err);
+              // VIDEO_FALLBACK_503 is Bluesky's video service being busy — an
+              // expected condition with a working fallback, so it stays at info.
+              const expected = videoDetail.message === 'VIDEO_FALLBACK_503';
+              logEvent({
+                level: expected ? 'info' : 'warn',
+                stage: 'media',
+                event: expected ? 'video.service-unavailable' : 'video.upload.failed',
+                message: expected
+                  ? `Tweet ${tweetId}: Bluesky's video service was unavailable; linked back to the tweet instead.`
+                  : `Tweet ${tweetId}: video upload failed; linked back to the tweet instead.`,
+                twitterId: tweetId,
+                error: expected ? undefined : videoDetail,
+                detail: { videoUrl },
+                ...logScope,
+              });
+              droppedMedia.push({
+                type: 'video',
+                url: videoUrl,
+                reason: expected ? 'Bluesky video service unavailable' : describeErrorDetail(videoDetail),
+              });
               const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
               if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
             }
@@ -1696,10 +1902,68 @@ async function processTweets(
     }
 
     // 4. Threading and Posting
+    const hasEmbed = Boolean(videoBlob) || images.length > 0 || Boolean(quoteEmbed) || Boolean(linkCard);
+
+    // A post with neither text nor an embed is rejected by every PDS, so it can
+    // never succeed no matter how many times it is retried. This happens for
+    // real: a media-only tweet whose t.co links get stripped during cleanup and
+    // whose upload then fails leaves an empty record behind. Previously such a
+    // tweet burned all eight attempts across ~12 hours of backoff and was
+    // parked as "failed" with no explanation. Record it as a skip with the
+    // actual reason instead.
+    if (text.trim().length === 0 && !hasEmbed) {
+      const reason =
+        droppedMedia.length > 0
+          ? `Nothing left to post: the tweet had no text and its media could not be uploaded (${droppedMedia
+              .map((entry) => `${entry.type}: ${entry.reason}`)
+              .join('; ')}).`
+          : 'Nothing left to post: the tweet had no text and no embeddable media.';
+      logEvent({
+        level: 'warn',
+        stage: 'post',
+        event: 'tweet.skipped.empty',
+        message: `Skipped tweet ${tweetId}: ${reason}`,
+        twitterId: tweetId,
+        detail: { droppedMedia, originalText: tweetText.slice(0, 200), mediaEntities: mediaEntities.length },
+        ...logScope,
+      });
+      recordOutcome(context, tweetId, {
+        status: 'skipped',
+        stage: 'compose',
+        reason,
+        durationMs: Date.now() - tweetStartedAt,
+      });
+      if (!dryRun) {
+        saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, { skipped: true, text: tweetText });
+        localProcessedMap[tweetId] = { skipped: true, text: tweetText };
+      }
+      continue;
+    }
+
     const chunks = splitText(text);
-    console.log(`[${twitterUsername}] 📝 Splitting text into ${chunks.length} chunks.`);
+    logEvent({
+      level: 'debug',
+      stage: 'post',
+      event: 'tweet.compose',
+      message: `Tweet ${tweetId} composed into ${chunks.length} chunk(s).`,
+      twitterId: tweetId,
+      detail: {
+        chunks: chunks.length,
+        textLength: text.length,
+        images: images.length,
+        video: Boolean(videoBlob),
+        quote: Boolean(quoteEmbed),
+        linkCard: Boolean(linkCard),
+        isReply,
+        droppedMedia: droppedMedia.length > 0 ? droppedMedia : undefined,
+      },
+      ...logScope,
+    });
 
     let lastPostInfo: ProcessedTweetEntry | null = replyParentInfo;
+    // Filled in when a chunk fails, so the outcome below can explain exactly
+    // which chunk broke and why rather than falling back to a placeholder.
+    let postFailure: { detail: ErrorDetail; chunkIndex: number } | null = null;
 
     // We will save the first chunk as the "Root" of this tweet, and the last chunk as the "Tail".
     let firstChunkInfo: { uri: string; cid: string; root?: { uri: string; cid: string } } | null = null;
@@ -1805,10 +2069,10 @@ async function processTweets(
         };
       }
 
+      const chunkStartedAt = Date.now();
       try {
-        // Retry logic for network/socket errors
         let response: any;
-        let retries = 3;
+        const maxAttempts = 3;
 
         if (dryRun) {
           console.log(`[${twitterUsername}] 🧪 [DRY RUN] Would post chunk ${i + 1}/${chunks.length}`);
@@ -1816,16 +2080,62 @@ async function processTweets(
           if (postRecord.reply) console.log(`   - As reply to: ${postRecord.reply.parent.uri}`);
           response = { uri: 'at://did:plc:mock/app.bsky.feed.post/mock', cid: 'mock-cid' };
         } else {
-          while (retries > 0) {
+          for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             try {
               response = await withTimeout(agent.post(postRecord), 120000, 'Post request timed out after 120s');
               break;
-            } catch (err: any) {
-              retries--;
-              if (retries === 0) throw err;
-              console.warn(
-                `[${twitterUsername}] ⚠️ Post failed (Socket/Network), retrying in 5s... (${retries} retries left)`,
+            } catch (err: unknown) {
+              const attemptDetail = toErrorDetail(err);
+
+              // The old loop retried everything three times. A rejected record
+              // (400) or a deleted account (403) fails identically every time,
+              // so those three attempts only delayed the real explanation.
+              if (attempt === maxAttempts || attemptDetail.retryable === false) {
+                logEvent({
+                  level: 'error',
+                  stage: 'bluesky',
+                  event: 'post.chunk.failed',
+                  message:
+                    attemptDetail.retryable === false
+                      ? `Bluesky rejected chunk ${i + 1}/${chunks.length} of tweet ${tweetId}; retrying cannot help.`
+                      : `Chunk ${i + 1}/${chunks.length} of tweet ${tweetId} failed after ${maxAttempts} attempts.`,
+                  twitterId: tweetId,
+                  attempt,
+                  durationMs: Date.now() - chunkStartedAt,
+                  error: attemptDetail,
+                  detail: {
+                    chunkIndex: i,
+                    chunkCount: chunks.length,
+                    chunkLength: chunk.length,
+                    embedType: postRecord.embed?.$type,
+                    isReply: Boolean(postRecord.reply),
+                  },
+                  ...logScope,
+                });
+                throw err;
+              }
+
+              // A timeout is ambiguous: the PDS may well have created the
+              // record before the response was lost. Retrying is still the
+              // right call (a genuinely dropped request must be resent), but
+              // say so in the log, because this is the one path that can
+              // produce a duplicate post.
+              const ambiguous = /timed out|socket hang up|econnreset|aborted/i.test(
+                `${attemptDetail.code || ''} ${attemptDetail.message || ''}`,
               );
+              logEvent({
+                level: 'warn',
+                stage: 'bluesky',
+                event: ambiguous ? 'post.chunk.retry-ambiguous' : 'post.chunk.retry',
+                message: ambiguous
+                  ? `Chunk ${i + 1}/${chunks.length} of tweet ${tweetId} timed out without a response; retrying in 5s (the first request may still have landed).`
+                  : `Chunk ${i + 1}/${chunks.length} of tweet ${tweetId} failed; retrying in 5s.`,
+                twitterId: tweetId,
+                attempt,
+                error: attemptDetail,
+                detail: { chunkIndex: i, chunkCount: chunks.length, attemptsLeft: maxAttempts - attempt },
+                ...logScope,
+              });
               await new Promise((r) => setTimeout(r, 5000));
             }
           }
@@ -1839,17 +2149,47 @@ async function processTweets(
           text: chunk,
         };
 
-        if (i === 0) firstChunkInfo = currentPostInfo;
+        if (i === 0) {
+          firstChunkInfo = currentPostInfo;
+          // Tell the caller the post exists *now*, before alt text, threading
+          // bookkeeping or the processed_tweets write get a chance to fail.
+          // This is what stops a live Bluesky post from being re-queued and
+          // eventually parked as "failed".
+          if (!dryRun) {
+            try {
+              context?.onPosted?.(tweetId, response.uri, response.cid);
+            } catch (hookErr) {
+              logEvent({
+                level: 'warn',
+                stage: 'queue',
+                event: 'post.stamp.failed',
+                message: `Posted tweet ${tweetId} but could not stamp the queue row with its URI.`,
+                twitterId: tweetId,
+                error: toErrorDetail(hookErr),
+                ...logScope,
+              });
+            }
+          }
+        }
         lastChunkInfo = currentPostInfo;
         lastPostInfo = currentPostInfo; // Update for next iteration
 
-        console.log(`[${twitterUsername}] ✅ Chunk ${i + 1} posted successfully.`);
+        logEvent({
+          level: 'info',
+          stage: 'bluesky',
+          event: 'post.chunk.ok',
+          message: `Posted chunk ${i + 1}/${chunks.length} of tweet ${tweetId}.`,
+          twitterId: tweetId,
+          durationMs: Date.now() - chunkStartedAt,
+          detail: { uri: response.uri, cid: response.cid, chunkIndex: i, chunkCount: chunks.length },
+          ...logScope,
+        });
 
         if (chunks.length > 1) {
           await new Promise((r) => setTimeout(r, 3000));
         }
       } catch (err) {
-        console.error(`[${twitterUsername}] ❌ Failed to post ${tweetId} (chunk ${i + 1}):`, err);
+        postFailure = { detail: toErrorDetail(err), chunkIndex: i };
         break;
       }
     }
@@ -1865,10 +2205,94 @@ async function processTweets(
       };
 
       if (!dryRun) {
-        saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, entry);
+        // The post is already live at this point. If this write fails the tweet
+        // must NOT be retried, so surface it loudly rather than letting the
+        // queue conclude the post never happened.
+        try {
+          saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, entry);
+        } catch (saveErr) {
+          logEvent({
+            level: 'error',
+            stage: 'queue',
+            event: 'record.write.failed',
+            message: `Tweet ${tweetId} was posted to Bluesky but its history record could not be written. It will be repaired from the queue's stamped URI rather than re-posted.`,
+            twitterId: tweetId,
+            error: toErrorDetail(saveErr),
+            detail: { uri: entry.uri, cid: entry.cid },
+            ...logScope,
+          });
+        }
         localProcessedMap[tweetId] = entry; // Update local map for subsequent replies in this batch
       }
       mirroredCount++;
+
+      const partial = postFailure !== null;
+      logEvent({
+        level: partial ? 'warn' : 'info',
+        stage: 'post',
+        event: partial ? 'tweet.posted.partial' : 'tweet.posted',
+        message: partial
+          ? `Tweet ${tweetId} posted only ${postFailure?.chunkIndex ?? 0} of ${chunks.length} chunks; the thread is incomplete.`
+          : `Mirrored tweet ${tweetId} to ${bskyIdentifier} as ${chunks.length} chunk(s).`,
+        twitterId: tweetId,
+        durationMs: Date.now() - tweetStartedAt,
+        error: postFailure?.detail,
+        detail: {
+          uri: entry.uri,
+          cid: entry.cid,
+          chunks: chunks.length,
+          images: images.length,
+          video: Boolean(videoBlob),
+          droppedMedia: droppedMedia.length > 0 ? droppedMedia : undefined,
+        },
+        ...logScope,
+      });
+
+      recordOutcome(context, tweetId, {
+        status: 'posted',
+        stage: partial ? 'post-partial' : 'post',
+        reason: partial
+          ? `Posted, but chunk ${(postFailure?.chunkIndex ?? 0) + 1} of ${chunks.length} failed: ${describeErrorDetail(
+              postFailure?.detail ?? {},
+            )}`
+          : `Posted ${chunks.length} chunk(s) to ${bskyIdentifier}.`,
+        uri: entry.uri,
+        cid: entry.cid,
+        chunks: chunks.length,
+        detail: postFailure?.detail,
+        durationMs: Date.now() - tweetStartedAt,
+      });
+    } else if (!dryRun) {
+      // Nothing at all made it out for this tweet.
+      const detail = postFailure?.detail;
+      const reason = detail
+        ? `First chunk was rejected by Bluesky: ${describeErrorDetail(detail)}`
+        : 'No chunk was posted and no error was reported.';
+      logEvent({
+        level: 'error',
+        stage: 'post',
+        event: 'tweet.failed',
+        message: `Tweet ${tweetId} was not posted to ${bskyIdentifier}. ${reason}`,
+        twitterId: tweetId,
+        durationMs: Date.now() - tweetStartedAt,
+        error: detail,
+        detail: {
+          chunks: chunks.length,
+          images: images.length,
+          video: Boolean(videoBlob),
+          droppedMedia: droppedMedia.length > 0 ? droppedMedia : undefined,
+          textPreview: text.slice(0, 200),
+        },
+        ...logScope,
+      });
+      recordOutcome(context, tweetId, {
+        status: 'failed',
+        stage: 'post',
+        reason,
+        detail,
+        retryable: detail?.retryable ?? true,
+        durationMs: Date.now() - tweetStartedAt,
+      });
     }
 
     // Human-like pause between posts. This only delays the current account's
@@ -1886,7 +2310,7 @@ async function processTweets(
   updateJob(mirrorJobId, null);
 }
 
-import { getAgent } from './bsky.js';
+import { getAgent, invalidateAgent } from './bsky.js';
 
 // ============================================================================
 // Fetch Sweep + Post Queue Workers (daemon mode)
@@ -1973,13 +2397,24 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
     }
   }
   if (accounts.length === 0) {
-    logPipeline('Sweep', 'ℹ️ No enabled source accounts to check.');
+    logEvent({
+      level: 'info',
+      stage: 'sweep',
+      event: 'sweep.no-accounts',
+      message: 'Sweep skipped: no enabled source accounts are configured.',
+    });
     return 0;
   }
 
   const fetchTimeoutMs = envInt('SWEEP_FETCH_TIMEOUT_MS', 180_000, 30_000, 1_800_000);
   const startedAt = Date.now();
-  logPipeline('Sweep', `🔎 Checking ${accounts.length} source account(s) (concurrency ${FETCH_CONCURRENCY}).`);
+  logEvent({
+    level: 'info',
+    stage: 'sweep',
+    event: 'sweep.start',
+    message: `Checking ${accounts.length} source account(s) with a concurrency of ${FETCH_CONCURRENCY}.`,
+    detail: { accounts: accounts.length, concurrency: FETCH_CONCURRENCY, fetchTimeoutMs },
+  });
 
   let cursor = 0;
   let enqueuedTotal = 0;
@@ -1993,6 +2428,13 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
       if (!ref) continue;
       const { mapping, twitterUsername } = ref;
       const checkJobId = `check:${mapping.id}:${twitterUsername.toLowerCase()}`;
+      const accountStartedAt = Date.now();
+      const accountScope = {
+        mappingId: mapping.id,
+        bskyIdentifier: mapping.bskyIdentifier,
+        twitterUsername,
+        jobId: checkJobId,
+      };
       try {
         updateJob(checkJobId, {
           kind: 'checking',
@@ -2004,20 +2446,38 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
         const fresh = await withTimeout(
           sweepAccountForNewTweets(mapping, twitterUsername, sessionKey),
           fetchTimeoutMs,
-          `[${twitterUsername}] Sweep fetch timed out after ${Math.round(fetchTimeoutMs / 1000)}s`,
+          `Timeline fetch for @${twitterUsername} exceeded its ${Math.round(fetchTimeoutMs / 1000)}s watchdog`,
         );
+        let inserted = 0;
         if (fresh.length > 0) {
-          const inserted = enqueueTweetsForMapping(mapping, twitterUsername, fresh, 'scheduled');
+          inserted = enqueueTweetsForMapping(mapping, twitterUsername, fresh, 'scheduled');
           enqueuedTotal += inserted;
-          if (inserted > 0) {
-            logPipeline(
-              'Sweep',
-              `📬 @${twitterUsername} → ${mapping.bskyIdentifier}: queued ${inserted} new tweet(s).`,
-            );
-          }
         }
+        logEvent({
+          level: 'info',
+          stage: 'sweep',
+          event: inserted > 0 ? 'account.queued' : 'account.checked',
+          message:
+            inserted > 0
+              ? `Queued ${inserted} new tweet(s) from @${twitterUsername} for ${mapping.bskyIdentifier}.`
+              : `No new tweets from @${twitterUsername} for ${mapping.bskyIdentifier}.`,
+          durationMs: Date.now() - accountStartedAt,
+          // `found` vs `queued` diverging means tweets were deduped against the
+          // queue or history — worth being able to see rather than inferring.
+          detail: { found: fresh.length, queued: inserted },
+          ...accountScope,
+        });
       } catch (err) {
-        logPipeline('Sweep', `❌ @${twitterUsername} → ${mapping.bskyIdentifier}: ${describeError(err)}`, true);
+        const detail = toErrorDetail(err);
+        logEvent({
+          level: 'error',
+          stage: 'sweep',
+          event: 'account.check.failed',
+          message: `Could not check @${twitterUsername} for ${mapping.bskyIdentifier}: ${describeErrorDetail(detail)}`,
+          durationMs: Date.now() - accountStartedAt,
+          error: detail,
+          ...accountScope,
+        });
       } finally {
         updateJob(checkJobId, null);
       }
@@ -2039,11 +2499,25 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
   }
 
   const counts = postQueueService.getCounts();
-  logPipeline(
-    'Sweep',
-    `✅ Swept ${accounts.length} account(s) in ${formatDurationMs(Date.now() - startedAt)}; ` +
-      `queued ${enqueuedTotal} new tweet(s). Queue now: ${counts.pending} pending, ${counts.processing} posting, ${counts.failed} failed.`,
-  );
+  logEvent({
+    level: 'info',
+    stage: 'sweep',
+    event: 'sweep.completed',
+    message:
+      `Swept ${accounts.length} account(s) in ${formatDurationMs(Date.now() - startedAt)}; queued ${enqueuedTotal} new tweet(s). ` +
+      `Queue now: ${counts.ready} ready, ${counts.backoff} waiting on retry backoff, ${counts.processing} posting, ${counts.failed} parked as failed.`,
+    durationMs: Date.now() - startedAt,
+    detail: {
+      accountsChecked: accounts.length,
+      queued: enqueuedTotal,
+      queue: {
+        ready: counts.ready,
+        backoff: counts.backoff,
+        processing: counts.processing,
+        failed: counts.failed,
+      },
+    },
+  });
   return enqueuedTotal;
 }
 
@@ -2120,29 +2594,163 @@ function queueBatchTimeoutMs(itemCount: number): number {
   return Math.max(resolveScheduledAccountTimeoutMs(), itemCount * 120_000);
 }
 
+/**
+ * Finds queue rows that carry a stamped Bluesky URI but have no permanent
+ * history record, and writes the record from the stamp.
+ *
+ * These are posts that are live on Bluesky while the dashboard still counts
+ * them as pending or failed — the exact mismatch behind "it says failed but I
+ * can see the post". Retrying them would publish duplicates, so they are
+ * repaired rather than re-queued.
+ */
+function reconcilePostedButUnrecorded(): number {
+  let repaired = 0;
+  for (const item of postQueueService.listPostedButUnrecorded()) {
+    if (!item.posted_uri || !item.posted_cid) continue;
+    if (dbService.getTweet(item.twitter_id, item.bsky_identifier)) {
+      // Already recorded; the queue row is just stale.
+      postQueueService.markDone(item.twitter_id, item.bsky_identifier);
+      continue;
+    }
+    try {
+      saveProcessedTweet(item.twitter_username, item.bsky_identifier, item.twitter_id, {
+        uri: item.posted_uri,
+        cid: item.posted_cid,
+        root: { uri: item.posted_uri, cid: item.posted_cid },
+        tail: { uri: item.posted_uri, cid: item.posted_cid },
+        text: item.tweet_text,
+        migrated: true,
+      });
+      postQueueService.markDone(item.twitter_id, item.bsky_identifier);
+      repaired += 1;
+    } catch (err) {
+      logEvent({
+        level: 'error',
+        stage: 'queue',
+        event: 'reconcile.item.failed',
+        message: `Could not repair the history record for tweet ${item.twitter_id}, which is already live on Bluesky.`,
+        twitterId: item.twitter_id,
+        bskyIdentifier: item.bsky_identifier,
+        twitterUsername: item.twitter_username,
+        mappingId: item.mapping_id,
+        error: toErrorDetail(err),
+      });
+    }
+  }
+
+  if (repaired > 0) {
+    logEvent({
+      level: 'warn',
+      stage: 'queue',
+      event: 'reconcile.completed',
+      message: `Repaired ${repaired} tweet(s) that were already live on Bluesky but missing from the history table. They were not re-posted.`,
+      detail: { repaired },
+    });
+  }
+  return repaired;
+}
+
+const FAILED_QUEUE_RETENTION_MS = (() => {
+  const days = envInt('QUEUE_FAILED_RETENTION_DAYS', 14, 1, 365);
+  return days * 24 * 60 * 60 * 1000;
+})();
+
+function purgeStaleFailedQueueRows(): number {
+  const purged = postQueueService.purgeFailedOlderThan(FAILED_QUEUE_RETENTION_MS);
+  if (purged > 0) {
+    logEvent({
+      level: 'info',
+      stage: 'queue',
+      event: 'queue.failed-purged',
+      message: `Dropped ${purged} failed queue row(s) older than ${Math.round(FAILED_QUEUE_RETENTION_MS / (24 * 60 * 60 * 1000))} days.`,
+      detail: { purged },
+    });
+  }
+  return purged;
+}
+
+// How many batches in a row have failed outright for a mapping. A broken app
+// password or a suspended account fails every batch identically; without this
+// the worker would re-claim, re-fail and re-log every 30 seconds indefinitely.
+const consecutiveBatchFailures = new Map<string, number>();
+
+function unattemptedRetryDelayMs(failureStreak: number): number {
+  // 30s, 1m, 2m, 4m, 8m, capped at 15m.
+  return Math.min(30_000 * 2 ** Math.max(0, failureStreak - 1), 15 * 60 * 1000);
+}
+
 async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionKey: string): Promise<void> {
-  const logPrefix = getMappingLogPrefix(mapping);
-  let batchError = 'Tweet was not posted (see logs for details)';
   const startedAt = Date.now();
   const oldestEnqueuedAt = Math.min(...batch.items.map((item) => item.enqueued_at));
-  logPipeline(
-    'Queue',
-    `▶️ @${batch.twitter_username} → ${mapping.bskyIdentifier}: posting ${batch.items.length} tweet(s) ` +
-      `(oldest waited ${formatDurationMs(startedAt - oldestEnqueuedAt)} in queue).`,
-  );
+  const jobId = `mirror:${batch.bsky_identifier}:${batch.twitter_username}`;
+  const scope = {
+    mappingId: mapping.id,
+    bskyIdentifier: mapping.bskyIdentifier,
+    twitterUsername: batch.twitter_username,
+    jobId,
+  };
+
+  // Per-tweet verdicts filled in by processTweets. This is what replaced the
+  // old single `batchError` string: one batch-wide message could not say why
+  // any individual tweet failed, so every parked row ended up carrying the
+  // same uninformative placeholder.
+  const outcomes = new Map<string, TweetOutcome>();
+  // Populated the moment Bluesky accepts a post, independent of any later
+  // bookkeeping. Used below to tell "never posted" apart from "posted, but we
+  // failed to write it down" — the two cases that used to be indistinguishable.
+  const stampedUris = new Map<string, { uri: string; cid: string }>();
+
+  let batchFailure: ErrorDetail | null = null;
+  let batchStage = 'batch';
+
+  logEvent({
+    level: 'info',
+    stage: 'queue',
+    event: 'batch.claimed',
+    message:
+      `Posting ${batch.items.length} queued tweet(s) from @${batch.twitter_username} to ${mapping.bskyIdentifier} ` +
+      `(oldest waited ${formatDurationMs(startedAt - oldestEnqueuedAt)} in the queue).`,
+    detail: {
+      items: batch.items.length,
+      oldestWaitedMs: startedAt - oldestEnqueuedAt,
+      attemptsSoFar: batch.items.map((item) => item.attempts).reduce((a, b) => Math.max(a, b), 0),
+    },
+    ...scope,
+  });
 
   try {
     const agent = await getAgent(mapping);
     if (!agent) {
-      throw new Error('Bluesky login failed');
+      batchStage = 'login';
+      throw new Error(
+        `Bluesky login failed for ${mapping.bskyIdentifier}. Check the app password in Settings — every tweet for this account stays queued until it works.`,
+      );
     }
 
     const tweets: Tweet[] = [];
     for (const item of batch.items) {
       try {
         tweets.push(JSON.parse(item.tweet_json) as Tweet);
-      } catch {
-        console.error(`${logPrefix} ⚠️ Corrupt queued payload for tweet ${item.twitter_id}; it will be retried out.`);
+      } catch (parseErr) {
+        // A payload that will not parse cannot ever post; park it now with a
+        // real reason instead of retrying the same broken JSON eight times.
+        const detail = toErrorDetail(parseErr);
+        logEvent({
+          level: 'error',
+          stage: 'queue',
+          event: 'item.payload.corrupt',
+          message: `Queued payload for tweet ${item.twitter_id} is not valid JSON, so it can never be posted. Re-run a backfill for this account to fetch it again.`,
+          twitterId: item.twitter_id,
+          error: detail,
+          ...scope,
+        });
+        outcomes.set(item.twitter_id, {
+          status: 'failed',
+          stage: 'payload',
+          reason: 'The stored copy of this tweet is corrupt and cannot be decoded. Re-run a backfill to re-fetch it.',
+          detail,
+          retryable: false,
+        });
       }
     }
 
@@ -2160,49 +2768,233 @@ async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionK
         undefined,
         undefined,
         sessionKey,
+        {
+          outcomes,
+          mappingId: mapping.id,
+          jobId,
+          onPosted: (twitterId, uri, cid) => {
+            stampedUris.set(twitterId, { uri, cid });
+            postQueueService.markPosted(twitterId, batch.bsky_identifier, uri, cid);
+          },
+        },
       ),
       queueBatchTimeoutMs(batch.items.length),
-      `[${batch.twitter_username}] Posting batch timed out`,
+      `Posting batch for @${batch.twitter_username} exceeded its ${formatDurationMs(queueBatchTimeoutMs(batch.items.length))} watchdog`,
     );
   } catch (err) {
-    batchError = describeError(err);
-    console.error(`${logPrefix} ❌ Post batch failed: ${batchError}`);
+    batchFailure = toErrorDetail(err);
+
+    // An expired or rejected session poisons every subsequent post for this
+    // account. Drop the cached agent so the next batch signs in again instead
+    // of replaying the same auth failure until the tweets hit their retry cap.
+    const authFailure =
+      batchFailure.status === 401 ||
+      batchFailure.status === 403 ||
+      /expiredtoken|invalidtoken|authmissing|not authenticated|login failed/i.test(
+        `${batchFailure.code || ''} ${batchFailure.message || ''}`,
+      );
+    if (authFailure) {
+      invalidateAgent(mapping.bskyIdentifier, mapping.bskyServiceUrl);
+      logEvent({
+        level: 'warn',
+        stage: 'bluesky',
+        event: 'session.invalidated',
+        message: `Dropped the cached Bluesky session for ${mapping.bskyIdentifier} after an authentication failure; the next batch will sign in again.`,
+        error: batchFailure,
+        ...scope,
+      });
+    }
+
+    const streak = (consecutiveBatchFailures.get(mapping.id) ?? 0) + 1;
+    consecutiveBatchFailures.set(mapping.id, streak);
+
+    // A persistent misconfiguration would otherwise write the same error every
+    // 30 seconds forever. Keep the first few at full volume, then thin out so
+    // the log stays readable without ever going completely silent.
+    const noisy = streak <= 3 || streak % 20 === 0;
+    logEvent({
+      level: 'error',
+      stage: 'queue',
+      event: 'batch.failed',
+      message:
+        `Post batch for @${batch.twitter_username} → ${mapping.bskyIdentifier} stopped early: ${describeErrorDetail(batchFailure)}` +
+        (streak > 1 ? ` (${streak} consecutive failures for this account)` : ''),
+      error: batchFailure,
+      durationMs: Date.now() - startedAt,
+      detail: {
+        stage: batchStage,
+        itemsInBatch: batch.items.length,
+        outcomesRecorded: outcomes.size,
+        consecutiveFailures: streak,
+        nextAttemptIn: formatDurationMs(unattemptedRetryDelayMs(streak)),
+      },
+      console: noisy,
+      ...scope,
+    });
   } finally {
-    // Settle every claimed row. processed_tweets is the source of truth:
-    // whatever landed there is done, everything else retries with backoff.
+    if (!batchFailure) consecutiveBatchFailures.delete(mapping.id);
     let posted = 0;
     let skipped = 0;
+    let repaired = 0;
     let retrying = 0;
     let parked = 0;
+    let deferred = 0;
+
     for (const item of batch.items) {
+      const outcome = outcomes.get(item.twitter_id);
       const record = dbService.getTweet(item.twitter_id, item.bsky_identifier);
+
+      // 1. Recorded in the permanent history — the normal happy path.
       if (record) {
         postQueueService.markDone(item.twitter_id, item.bsky_identifier);
         if (record.status === 'migrated') posted += 1;
         else skipped += 1;
+        continue;
+      }
+
+      // 2. Bluesky accepted the post but the history write never landed. This
+      //    is the case that produced "it's failed in the dashboard but I can
+      //    see it on Bluesky": retrying would publish a duplicate, so repair
+      //    the record from the URI we stamped at post time instead.
+      const stamped =
+        stampedUris.get(item.twitter_id) ??
+        (item.posted_uri && item.posted_cid ? { uri: item.posted_uri, cid: item.posted_cid } : undefined);
+      if (stamped) {
+        try {
+          saveProcessedTweet(batch.twitter_username, item.bsky_identifier, item.twitter_id, {
+            uri: stamped.uri,
+            cid: stamped.cid,
+            root: { uri: stamped.uri, cid: stamped.cid },
+            tail: { uri: stamped.uri, cid: stamped.cid },
+            text: item.tweet_text,
+            migrated: true,
+          });
+          postQueueService.markDone(item.twitter_id, item.bsky_identifier);
+          repaired += 1;
+          logEvent({
+            level: 'warn',
+            stage: 'queue',
+            event: 'item.repaired',
+            message: `Tweet ${item.twitter_id} was live on Bluesky but missing from the history table; recorded it from the stamped URI instead of re-posting.`,
+            twitterId: item.twitter_id,
+            detail: { uri: stamped.uri, cid: stamped.cid },
+            ...scope,
+          });
+        } catch (repairErr) {
+          logEvent({
+            level: 'error',
+            stage: 'queue',
+            event: 'item.repair.failed',
+            message: `Tweet ${item.twitter_id} is live on Bluesky but its record could not be repaired; it is held back rather than re-posted.`,
+            twitterId: item.twitter_id,
+            error: toErrorDetail(repairErr),
+            ...scope,
+          });
+          postQueueService.releaseUnattempted(item, 'Posted to Bluesky; waiting to record it in the history table.');
+          deferred += 1;
+        }
+        continue;
+      }
+
+      // 3. Deliberately skipped but the skip write did not land. Nothing is
+      //    wrong and nothing needs posting.
+      if (outcome?.status === 'skipped') {
+        saveProcessedTweet(batch.twitter_username, item.bsky_identifier, item.twitter_id, {
+          skipped: true,
+          text: item.tweet_text,
+        });
+        postQueueService.markDone(item.twitter_id, item.bsky_identifier);
+        skipped += 1;
+        continue;
+      }
+
+      // 4. The batch stopped before this tweet was ever attempted (login
+      //    failure, or the watchdog firing on an earlier tweet). Charging an
+      //    attempt here is how untouched tweets used to reach the retry cap and
+      //    get parked as "failed" without anything having gone wrong with them.
+      if (!outcome && batchFailure) {
+        postQueueService.releaseUnattempted(
+          item,
+          `Not attempted: the batch stopped first (${describeErrorDetail(batchFailure)})`,
+          unattemptedRetryDelayMs(consecutiveBatchFailures.get(mapping.id) ?? 1),
+        );
+        deferred += 1;
+        continue;
+      }
+
+      // 5. A genuine failure. Carry the specific reason onto the row.
+      const detail = outcome?.detail ?? batchFailure ?? undefined;
+      const reason =
+        outcome?.reason ??
+        (batchFailure
+          ? `Batch stopped before this tweet completed: ${describeErrorDetail(batchFailure)}`
+          : 'The post did not complete and no error was reported. This usually means the run was interrupted.');
+      const result = postQueueService.releaseForRetry(item, reason, QUEUE_MAX_ATTEMPTS, {
+        stage: outcome?.stage ?? batchStage,
+        detail,
+        retryable: outcome?.retryable ?? detail?.retryable,
+      });
+
+      if (result.status === 'failed') {
+        parked += 1;
+        logEvent({
+          level: 'error',
+          stage: 'queue',
+          event: 'item.parked',
+          message: `Tweet ${item.twitter_id} parked as failed after ${result.attempts} attempt(s): ${reason}`,
+          twitterId: item.twitter_id,
+          attempt: result.attempts,
+          error: detail,
+          detail: { failureStage: outcome?.stage ?? batchStage, tweetText: item.tweet_text },
+          ...scope,
+        });
       } else {
-        postQueueService.releaseForRetry(item, batchError, QUEUE_MAX_ATTEMPTS);
-        if (item.attempts + 1 >= QUEUE_MAX_ATTEMPTS) parked += 1;
-        else retrying += 1;
+        retrying += 1;
+        logEvent({
+          level: 'warn',
+          stage: 'queue',
+          event: 'item.retry-scheduled',
+          message:
+            `Tweet ${item.twitter_id} will retry (attempt ${result.attempts} of ${QUEUE_MAX_ATTEMPTS}) ` +
+            `in ${formatDurationMs((result.retryAt ?? Date.now()) - Date.now())}: ${reason}`,
+          twitterId: item.twitter_id,
+          attempt: result.attempts,
+          error: detail,
+          detail: { retryAt: result.retryAt, failureStage: outcome?.stage ?? batchStage },
+          ...scope,
+        });
       }
     }
+
     const parts = [`${posted} posted`];
     if (skipped > 0) parts.push(`${skipped} skipped`);
+    if (repaired > 0) parts.push(`${repaired} already live, record repaired`);
+    if (deferred > 0) parts.push(`${deferred} deferred without penalty`);
     if (retrying > 0) parts.push(`${retrying} will retry`);
     if (parked > 0) parts.push(`${parked} parked as failed`);
-    logPipeline(
-      'Queue',
-      `${retrying + parked > 0 ? '⚠️' : '✅'} @${batch.twitter_username} → ${mapping.bskyIdentifier}: ` +
-        `${parts.join(', ')} in ${formatDurationMs(Date.now() - startedAt)}.`,
-      retrying + parked > 0,
-    );
+
+    logEvent({
+      level: parked > 0 ? 'error' : retrying + deferred > 0 ? 'warn' : 'info',
+      stage: 'queue',
+      event: 'batch.settled',
+      message: `@${batch.twitter_username} → ${mapping.bskyIdentifier}: ${parts.join(', ')} in ${formatDurationMs(Date.now() - startedAt)}.`,
+      durationMs: Date.now() - startedAt,
+      detail: { posted, skipped, repaired, deferred, retrying, parked, items: batch.items.length },
+      ...scope,
+    });
   }
 }
 
 function startPostWorkers(): void {
   if (postWorkersStarted) return;
   postWorkersStarted = true;
-  logPipeline('Queue', `🚚 Post workers started (up to ${POST_WORKER_CONCURRENCY} accounts posting in parallel).`);
+  logEvent({
+    level: 'info',
+    stage: 'queue',
+    event: 'workers.started',
+    message: `Post workers started; up to ${POST_WORKER_CONCURRENCY} accounts post in parallel.`,
+    detail: { concurrency: POST_WORKER_CONCURRENCY },
+  });
 
   void (async () => {
     while (true) {
@@ -2236,14 +3028,34 @@ function startPostWorkers(): void {
           });
 
           void runPostBatch(mapping, batch, 'post-worker')
-            .catch((err) => logPipeline('Queue', `❌ Post worker crashed: ${describeError(err)}`, true))
+            .catch((err) =>
+              // runPostBatch settles its own rows in a finally block, so reaching
+              // here means the settling itself threw. The claimed rows stay
+              // 'processing' and are re-armed by resetProcessing() on next boot.
+              logEvent({
+                level: 'error',
+                stage: 'queue',
+                event: 'worker.crashed',
+                message: `Post worker for ${mapping.bskyIdentifier} crashed while settling its batch.`,
+                mappingId: mapping.id,
+                bskyIdentifier: mapping.bskyIdentifier,
+                twitterUsername: batch.twitter_username,
+                error: toErrorDetail(err),
+              }),
+            )
             .finally(() => {
               activePostMappings.delete(mapping.id);
               updateJob(jobId, null);
             });
         }
       } catch (err) {
-        logPipeline('Queue', `❌ Worker scheduler error: ${describeError(err)}`, true);
+        logEvent({
+          level: 'error',
+          stage: 'queue',
+          event: 'worker.scheduler-error',
+          message: 'The post-worker scheduler hit an error while claiming work; it will try again shortly.',
+          error: toErrorDetail(err),
+        });
       }
       await new Promise((resolve) => setTimeout(resolve, launched ? 250 : 1000));
     }
@@ -2381,9 +3193,131 @@ const DEFAULT_SCHEDULED_ACCOUNT_TIMEOUT_MS = 20 * 60 * 1000;
 const PROFILE_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 let profileSyncStateWriteQueue: Promise<void> = Promise.resolve();
 
+// Errors reaching this pipeline come from four very different places — the AT
+// Protocol client (XRPCError: status + error code + message), axios (response
+// status and body), Node sockets (ECONNRESET/ETIMEDOUT via `code`) and our own
+// thrown Errors. `error.message` alone flattens all of that into text like
+// "Request failed", which is exactly why a parked tweet used to say nothing
+// useful. This pulls out every field worth keeping.
+function toErrorDetail(error: unknown): ErrorDetail {
+  const detail: ErrorDetail = {};
+
+  if (typeof error === 'string') {
+    detail.name = 'Error';
+    detail.message = error;
+    detail.retryable = isRetryableFailure(detail);
+    return detail;
+  }
+
+  if (!error || typeof error !== 'object') {
+    detail.name = 'Error';
+    detail.message = String(error);
+    detail.retryable = isRetryableFailure(detail);
+    return detail;
+  }
+
+  const anyError = error as Record<string, any>;
+  detail.name = typeof anyError.name === 'string' ? anyError.name : 'Error';
+  detail.message =
+    typeof anyError.message === 'string' && anyError.message.length > 0 ? anyError.message : String(error);
+
+  // XRPCError puts the HTTP status on `status`; axios nests it under `response`.
+  const status = anyError.status ?? anyError.statusCode ?? anyError.response?.status;
+  if (typeof status === 'number') detail.status = status;
+
+  // `code` is ECONNRESET/ETIMEDOUT on sockets, and the XRPC error name
+  // ("RateLimitExceeded", "InvalidRequest") on AT Protocol failures.
+  const code = anyError.code ?? anyError.error;
+  if (typeof code === 'string' && code.length > 0) detail.code = code;
+
+  if (typeof anyError.stack === 'string') detail.stack = anyError.stack;
+
+  // The server's own explanation is usually the most actionable part.
+  const body = anyError.response?.data ?? anyError.data ?? anyError.body;
+  if (body !== undefined && body !== null) {
+    detail.response = typeof body === 'string' ? body.slice(0, 2_000) : body;
+  }
+
+  // Walk `cause` so a wrapped failure keeps the underlying reason.
+  const causes: string[] = [];
+  let cause = anyError.cause;
+  let depth = 0;
+  while (cause && depth < 5) {
+    const causeAny = cause as Record<string, any>;
+    const text = typeof causeAny.message === 'string' ? causeAny.message : String(cause);
+    causes.push(causeAny.code ? `${causeAny.code}: ${text}` : text);
+    cause = causeAny.cause;
+    depth += 1;
+  }
+  if (causes.length > 0) detail.causes = causes;
+
+  detail.retryable = isRetryableFailure(detail);
+  return detail;
+}
+
+// Decides whether trying again could plausibly work. Getting this wrong in the
+// permissive direction is what made a malformed post burn eight attempts and
+// six hours of backoff before anyone could see why it was rejected.
+function isRetryableFailure(detail: ErrorDetail): boolean {
+  const status = detail.status;
+  if (typeof status === 'number') {
+    // 429 and 5xx are transient; other 4xx mean the request itself is wrong
+    // and will be rejected identically forever.
+    if (status === 429) return true;
+    if (status >= 500) return true;
+    if (status >= 400) return false;
+  }
+
+  const code = (detail.code || '').toLowerCase();
+  const message = (detail.message || '').toLowerCase();
+  const haystack = `${code} ${message}`;
+
+  // Network-level problems are always worth another go.
+  if (
+    /econnreset|etimedout|econnrefused|enotfound|eai_again|epipe|socket hang up|network|timed? out|aborted/.test(
+      haystack,
+    )
+  ) {
+    return true;
+  }
+  if (/ratelimit|rate limit|too many requests|upstream|unavailable|502|503|504/.test(haystack)) {
+    return true;
+  }
+  // Record-level rejections never change on retry.
+  if (
+    /invalidrequest|invalid request|record\/?key|malformed|badrequest|unsupported|blob.*too large|not a valid/.test(
+      haystack,
+    )
+  ) {
+    return false;
+  }
+  if (
+    /auth|unauthorized|forbidden|expired token|invalid.*password|account.*(deactivated|suspended|takendown)/.test(
+      haystack,
+    )
+  ) {
+    // Credential problems need a human, but they resolve without code changes,
+    // so keep retrying (with backoff) rather than parking the tweet forever.
+    return true;
+  }
+  return true;
+}
+
+/** Compact one-line reason suitable for a queue row or a log message. */
+function describeErrorDetail(detail: ErrorDetail): string {
+  const bits: string[] = [];
+  if (detail.name && detail.name !== 'Error') bits.push(detail.name);
+  if (typeof detail.status === 'number') bits.push(`HTTP ${detail.status}`);
+  if (detail.code && detail.code !== detail.name) bits.push(detail.code);
+  const prefix = bits.length > 0 ? `${bits.join(' ')}: ` : '';
+  const body = detail.message || 'Unknown error';
+  const cause = detail.causes?.[0] ? ` (caused by ${detail.causes[0]})` : '';
+  return `${prefix}${body}${cause}`;
+}
+
 const describeError = (error: unknown): string => {
-  if (error instanceof Error) {
-    return error.message;
+  if (error instanceof Error || (error && typeof error === 'object')) {
+    return describeErrorDetail(toErrorDetail(error));
   }
   if (typeof error === 'string') {
     return error;
@@ -3245,26 +4179,100 @@ async function main(): Promise<void> {
   );
   updateLastCheckTime(); // Initialize next time
 
+  logEvent({
+    level: 'info',
+    stage: 'system',
+    event: 'daemon.start',
+    message: `Scheduler started with a ${config.checkIntervalMinutes} minute base interval.`,
+    detail: {
+      checkIntervalMinutes: config.checkIntervalMinutes,
+      fetchConcurrency: FETCH_CONCURRENCY,
+      postWorkerConcurrency: POST_WORKER_CONCURRENCY,
+      scraperGapMs: SCRAPER_MIN_GAP_MS,
+      scraperJitterMs: SCRAPER_JITTER_MS,
+      pacingMs: [POST_PACING_MIN_MS, POST_PACING_MAX_MS],
+      queueMaxAttempts: QUEUE_MAX_ATTEMPTS,
+      mappings: config.mappings.length,
+      enabledMappings: config.mappings.filter((mapping) => mapping.enabled).length,
+    },
+  });
+
   // Durable queue startup: re-arm anything a previous run left mid-flight and
   // drop failed rows old enough that nobody is coming back for them.
   const recovered = postQueueService.resetProcessing();
   if (recovered > 0) {
-    logPipeline('Queue', `♻️ Recovered ${recovered} in-flight tweet(s) from a previous run.`);
+    logEvent({
+      level: 'info',
+      stage: 'queue',
+      event: 'queue.recovered',
+      message: `Recovered ${recovered} in-flight tweet(s) left behind by a previous run.`,
+      detail: { count: recovered },
+    });
   }
-  postQueueService.purgeFailedOlderThan(14 * 24 * 60 * 60 * 1000);
+
+  // Repair anything that reached Bluesky but never made it into the history
+  // table — typically a crash between the post and the write. Doing this at
+  // boot means a restart clears the backlog of phantom "failures" instead of
+  // re-posting them as duplicates.
+  reconcilePostedButUnrecorded();
+
+  purgeStaleFailedQueueRows();
   // Drop rows whose mapping was deleted while the app was down — nothing can
   // ever claim them.
   const knownMappingIds = new Set(getConfig().mappings.map((mapping) => mapping.id));
   for (const entry of postQueueService.getCounts().perMapping) {
     if (!knownMappingIds.has(entry.mapping_id)) {
-      postQueueService.deleteByMappingId(entry.mapping_id);
+      const removed = postQueueService.deleteByMappingId(entry.mapping_id);
+      logEvent({
+        level: 'info',
+        stage: 'queue',
+        event: 'queue.orphans-removed',
+        message: `Removed ${removed} queued tweet(s) for mapping ${entry.mapping_id}, which no longer exists in the config.`,
+        mappingId: entry.mapping_id,
+        detail: { removed },
+      });
     }
   }
   const startupCounts = postQueueService.getCounts();
-  if (startupCounts.pending > 0) {
-    logPipeline('Queue', `📬 ${startupCounts.pending} tweet(s) already queued; post workers will resume.`);
+  if (startupCounts.pending + startupCounts.failed > 0) {
+    logEvent({
+      level: startupCounts.failed > 0 ? 'warn' : 'info',
+      stage: 'queue',
+      event: 'queue.startup-state',
+      message:
+        `Queue at startup: ${startupCounts.ready} ready to post, ${startupCounts.backoff} waiting on retry backoff, ` +
+        `${startupCounts.failed} parked as failed.`,
+      detail: {
+        ready: startupCounts.ready,
+        backoff: startupCounts.backoff,
+        pending: startupCounts.pending,
+        processing: startupCounts.processing,
+        failed: startupCounts.failed,
+      },
+    });
   }
   startPostWorkers();
+
+  // Housekeeping the boot-only version never did: failed rows used to
+  // accumulate for the whole uptime of the process, which is how a long-running
+  // instance ends up showing hundreds of stale failures at once.
+  setInterval(
+    () => {
+      try {
+        reconcilePostedButUnrecorded();
+        purgeStaleFailedQueueRows();
+      } catch (err) {
+        logEvent({
+          level: 'error',
+          stage: 'system',
+          event: 'housekeeping.failed',
+          message: 'Queue housekeeping pass failed.',
+          error: toErrorDetail(err),
+        });
+      }
+    },
+    6 * 60 * 60 * 1000,
+  ).unref();
 
   let deferredScheduledRun = false;
   let lastWakeSignal = getSchedulerWakeSignal();

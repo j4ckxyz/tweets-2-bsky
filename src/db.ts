@@ -33,6 +33,17 @@ if (typeof db.pragma === 'function') {
   db.exec('PRAGMA journal_mode = WAL;');
 }
 
+// WAL lets readers and one writer coexist, but two writers still collide. With
+// several post workers, the fetch sweep and the event log all writing, an
+// unguarded connection throws SQLITE_BUSY instantly — which used to surface as
+// a "failed" tweet even when the Bluesky post had already gone out. Waiting a
+// few seconds for the lock turns those into ordinary short pauses.
+db.exec('PRAGMA busy_timeout = 8000;');
+
+// Shared handle for other modules (event log) so the whole process keeps using
+// one connection instead of competing for the same write lock.
+export const rawDb = db;
+
 // --- Migration Support ---
 const tableInfo = db.prepare('PRAGMA table_info(processed_tweets)').all() as any[];
 
@@ -179,6 +190,35 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_queue_mapping ON post_queue(mapping_id, status);
 `);
 
+// Columns added after the queue shipped. Each one is optional and nullable, so
+// existing databases upgrade in place with no data movement.
+//
+//   posted_uri / posted_cid / posted_at
+//     Stamped the instant Bluesky accepts the first chunk. Without this a post
+//     that lands but whose bookkeeping write is lost (crash, SQLITE_BUSY,
+//     watchdog timeout firing while the request is still in flight) looks
+//     identical to a post that never happened — it gets retried and eventually
+//     parked as "failed" while being plainly visible on Bluesky.
+//   failure_stage / last_error_detail
+//     Which part of the pipeline gave up, and the structured error behind it,
+//     so a failed row explains itself without digging through stdout.
+//   first_failed_at / last_attempt_at
+//     How long a row has been struggling, not just its attempt count.
+const queueColumns = new Set((db.prepare('PRAGMA table_info(post_queue)').all() as any[]).map((col) => col.name));
+for (const [column, definition] of [
+  ['posted_uri', 'TEXT'],
+  ['posted_cid', 'TEXT'],
+  ['posted_at', 'INTEGER'],
+  ['failure_stage', 'TEXT'],
+  ['last_error_detail', 'TEXT'],
+  ['first_failed_at', 'INTEGER'],
+  ['last_attempt_at', 'INTEGER'],
+] as const) {
+  if (!queueColumns.has(column)) {
+    db.exec(`ALTER TABLE post_queue ADD COLUMN ${column} ${definition};`);
+  }
+}
+
 export interface ProcessedTweet {
   twitter_id: string;
   twitter_username: string;
@@ -320,8 +360,12 @@ function scoreProcessedTweet(tweet: ProcessedTweet, query: string, tokens: strin
 
 export const dbService = {
   getTweet(twitterId: string, bskyIdentifier: string): ProcessedTweet | null {
+    // Records are always written lower-cased (saveProcessedTweet normalises),
+    // but callers pass whatever casing the mapping was configured with. Without
+    // normalising here, a mapping stored as "NintendoBotX.bsky.social" reads
+    // back as "no record" and the tweet gets posted (and retried) all over.
     const stmt = db.prepare('SELECT * FROM processed_tweets WHERE twitter_id = ? AND bsky_identifier = ?');
-    const row = stmt.get(twitterId, bskyIdentifier) as any;
+    const row = stmt.get(twitterId, bskyIdentifier.toLowerCase()) as any;
     if (!row) return null;
     return {
       twitter_id: row.twitter_id,
@@ -475,6 +519,16 @@ export interface QueueItem {
   last_error?: string;
   enqueued_at: number;
   updated_at: number;
+  /** Set as soon as Bluesky accepts the post, before any bookkeeping write. */
+  posted_uri?: string;
+  posted_cid?: string;
+  posted_at?: number;
+  /** Pipeline area that gave up: 'login' | 'media' | 'post' | 'record' | 'batch' | … */
+  failure_stage?: string;
+  /** JSON-encoded ErrorDetail from the event log, for the dashboard drill-down. */
+  last_error_detail?: string;
+  first_failed_at?: number;
+  last_attempt_at?: number;
 }
 
 export interface QueueEnqueueInput {
@@ -501,13 +555,21 @@ export interface QueueMappingCounts {
   pending: number;
   processing: number;
   failed: number;
+  /** Subset of `pending` that is claimable right now (not_before has passed). */
+  ready: number;
+  /** Subset of `pending` still serving retry backoff. */
+  backoff: number;
   oldest_enqueued_at: number | null;
+  /** When the earliest backed-off row becomes claimable again. */
+  next_retry_at: number | null;
 }
 
 export interface QueueCounts {
   pending: number;
   processing: number;
   failed: number;
+  ready: number;
+  backoff: number;
   perMapping: QueueMappingCounts[];
 }
 
@@ -535,6 +597,13 @@ const rowToQueueItem = (row: any): QueueItem => ({
   last_error: row.last_error ?? undefined,
   enqueued_at: row.enqueued_at,
   updated_at: row.updated_at,
+  posted_uri: row.posted_uri ?? undefined,
+  posted_cid: row.posted_cid ?? undefined,
+  posted_at: row.posted_at ?? undefined,
+  failure_stage: row.failure_stage ?? undefined,
+  last_error_detail: row.last_error_detail ?? undefined,
+  first_failed_at: row.first_failed_at ?? undefined,
+  last_attempt_at: row.last_attempt_at ?? undefined,
 });
 
 export const postQueueService = {
@@ -635,21 +704,115 @@ export const postQueueService = {
     );
   },
 
+  // Called the moment Bluesky accepts a tweet's first chunk, before alt-text,
+  // threading bookkeeping or the processed_tweets write. If anything after this
+  // point dies, the row still knows the post exists and must never be re-posted.
+  markPosted(twitterId: string, bskyIdentifier: string, uri: string, cid: string): void {
+    db.prepare(
+      'UPDATE post_queue SET posted_uri = ?, posted_cid = ?, posted_at = ?, updated_at = ? WHERE twitter_id = ? AND bsky_identifier = ?',
+    ).run(uri, cid, Date.now(), Date.now(), twitterId, bskyIdentifier.toLowerCase());
+  },
+
+  // Rows that reached Bluesky but never made it into processed_tweets. The
+  // caller repairs the permanent record from posted_uri/posted_cid instead of
+  // retrying, which would publish a duplicate.
+  listPostedButUnrecorded(limit = 500): QueueItem[] {
+    const rows = db
+      .prepare(
+        `SELECT * FROM post_queue
+         WHERE posted_uri IS NOT NULL
+         ORDER BY posted_at ASC
+         LIMIT ?`,
+      )
+      .all(Math.max(1, Math.min(limit, 5000))) as any[];
+    return rows.map(rowToQueueItem);
+  },
+
   // Failed attempt: exponential backoff (5 min doubling, capped at 6h), then
   // terminal 'failed' after maxAttempts so a poison tweet can't retry forever.
-  releaseForRetry(item: QueueItem, errorMessage: string, maxAttempts: number): void {
+  // `stage` and `detail` are what turn a parked row from "it didn't work" into
+  // an explanation the dashboard can show without anyone reading stdout.
+  releaseForRetry(
+    item: QueueItem,
+    errorMessage: string,
+    maxAttempts: number,
+    options: { stage?: string; detail?: unknown; retryable?: boolean } = {},
+  ): { status: 'pending' | 'failed'; attempts: number; retryAt: number | null } {
     const attempts = item.attempts + 1;
     const now = Date.now();
-    if (attempts >= maxAttempts) {
-      db.prepare(
-        "UPDATE post_queue SET status = 'failed', attempts = ?, last_error = ?, updated_at = ? WHERE twitter_id = ? AND bsky_identifier = ?",
-      ).run(attempts, errorMessage.slice(0, 500), now, item.twitter_id, item.bsky_identifier);
-      return;
+    const firstFailedAt = item.first_failed_at ?? now;
+    const stage = options.stage ?? 'unknown';
+    let detailJson: string | null = null;
+    if (options.detail !== undefined) {
+      try {
+        detailJson = JSON.stringify(options.detail).slice(0, 4000);
+      } catch {
+        detailJson = null;
+      }
     }
+
+    // A permanently-rejected post (malformed record, deleted account) will
+    // never succeed; park it now instead of burning seven more attempts and
+    // six hours of backoff on a guaranteed failure.
+    const park = attempts >= maxAttempts || options.retryable === false;
+
+    if (park) {
+      db.prepare(
+        `UPDATE post_queue
+         SET status = 'failed', attempts = ?, last_error = ?, failure_stage = ?, last_error_detail = ?,
+             first_failed_at = ?, last_attempt_at = ?, updated_at = ?
+         WHERE twitter_id = ? AND bsky_identifier = ?`,
+      ).run(
+        attempts,
+        errorMessage.slice(0, 1000),
+        stage,
+        detailJson,
+        firstFailedAt,
+        now,
+        now,
+        item.twitter_id,
+        item.bsky_identifier,
+      );
+      return { status: 'failed', attempts, retryAt: null };
+    }
+
     const backoffMs = Math.min(5 * 60 * 1000 * 2 ** (attempts - 1), 6 * 60 * 60 * 1000);
+    const retryAt = now + backoffMs;
     db.prepare(
-      "UPDATE post_queue SET status = 'pending', attempts = ?, not_before = ?, last_error = ?, updated_at = ? WHERE twitter_id = ? AND bsky_identifier = ?",
-    ).run(attempts, now + backoffMs, errorMessage.slice(0, 500), now, item.twitter_id, item.bsky_identifier);
+      `UPDATE post_queue
+       SET status = 'pending', attempts = ?, not_before = ?, last_error = ?, failure_stage = ?,
+           last_error_detail = ?, first_failed_at = ?, last_attempt_at = ?, updated_at = ?
+       WHERE twitter_id = ? AND bsky_identifier = ?`,
+    ).run(
+      attempts,
+      retryAt,
+      errorMessage.slice(0, 1000),
+      stage,
+      detailJson,
+      firstFailedAt,
+      now,
+      now,
+      item.twitter_id,
+      item.bsky_identifier,
+    );
+    return { status: 'pending', attempts, retryAt };
+  },
+
+  // Puts a claimed row back without counting it as an attempt. Used when the
+  // batch aborted before this tweet was ever tried (login failure, watchdog
+  // timeout on an earlier tweet) — those items did nothing wrong, and charging
+  // them an attempt each time is how untouched tweets used to reach the
+  // 8-attempt cap and get parked as "failed".
+  //
+  // `delayMs` is chosen by the caller from how many times this mapping has
+  // failed in a row, so a broken app password backs off instead of retrying
+  // every 30 seconds forever.
+  releaseUnattempted(item: QueueItem, reason: string, delayMs = 30_000): void {
+    db.prepare(
+      `UPDATE post_queue
+       SET status = 'pending', not_before = ?, last_error = ?, failure_stage = 'not-attempted', updated_at = ?
+       WHERE twitter_id = ? AND bsky_identifier = ?`,
+    ).run(Date.now() + delayMs, reason.slice(0, 1000), Date.now(), item.twitter_id, item.bsky_identifier);
   },
 
   // Crash recovery: anything left 'processing' by a previous run goes back to
@@ -660,49 +823,105 @@ export const postQueueService = {
   },
 
   getCounts(): QueueCounts {
+    const now = Date.now();
     const totals = db.prepare('SELECT status, COUNT(*) AS count FROM post_queue GROUP BY status').all() as {
       status: QueueItemStatus;
       count: number;
     }[];
+    // `pending` alone is ambiguous: a row serving a six-hour retry backoff looks
+    // exactly like one about to post. Splitting it means the dashboard can say
+    // "waiting to retry in 42m" instead of a number that never seems to move.
     const perMapping = db
       .prepare(`
         SELECT mapping_id, bsky_identifier,
           SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
           SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing,
           SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
-          MIN(CASE WHEN status IN ('pending', 'processing') THEN enqueued_at ELSE NULL END) AS oldest_enqueued_at
+          SUM(CASE WHEN status = 'pending' AND not_before <= ? THEN 1 ELSE 0 END) AS ready,
+          SUM(CASE WHEN status = 'pending' AND not_before > ? THEN 1 ELSE 0 END) AS backoff,
+          MIN(CASE WHEN status IN ('pending', 'processing') THEN enqueued_at ELSE NULL END) AS oldest_enqueued_at,
+          MIN(CASE WHEN status = 'pending' AND not_before > ? THEN not_before ELSE NULL END) AS next_retry_at
         FROM post_queue
         GROUP BY mapping_id, bsky_identifier
         ORDER BY oldest_enqueued_at ASC
       `)
-      .all() as QueueMappingCounts[];
+      .all(now, now, now) as QueueMappingCounts[];
     const byStatus = new Map(totals.map((row) => [row.status, row.count]));
     return {
       pending: byStatus.get('pending') ?? 0,
       processing: byStatus.get('processing') ?? 0,
       failed: byStatus.get('failed') ?? 0,
+      ready: perMapping.reduce((total, entry) => total + (entry.ready ?? 0), 0),
+      backoff: perMapping.reduce((total, entry) => total + (entry.backoff ?? 0), 0),
       perMapping,
     };
   },
 
   // Item listing for the dashboard; tweet_json is omitted to keep payloads small.
-  listItems(options: { mappingIds?: Set<string>; limit?: number } = {}): Omit<QueueItem, 'tweet_json'>[] {
+  listItems(
+    options: { mappingIds?: Set<string>; limit?: number; status?: QueueItemStatus } = {},
+  ): Omit<QueueItem, 'tweet_json'>[] {
     const limit = Math.max(1, Math.min(options.limit ?? 200, 1000));
+    const where = options.status ? 'WHERE status = ?' : '';
+    const params: unknown[] = options.status ? [options.status] : [];
     const rows = db
       .prepare(`
         SELECT twitter_id, bsky_identifier, mapping_id, twitter_username, kind, request_id, tweet_text,
-               status, attempts, not_before, last_error, enqueued_at, updated_at
+               status, attempts, not_before, last_error, enqueued_at, updated_at,
+               posted_uri, posted_cid, posted_at, failure_stage, last_error_detail, first_failed_at, last_attempt_at
         FROM post_queue
+        ${where}
         ORDER BY CASE status WHEN 'processing' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, enqueued_at ASC, ${TWEET_ID_ORDER}
         LIMIT ?
       `)
-      .all(limit * 4) as any[];
+      .all(...params, limit * 4) as any[];
     const filtered = options.mappingIds ? rows.filter((row) => options.mappingIds?.has(row.mapping_id)) : rows;
     return filtered.slice(0, limit).map((row) => {
       const item = rowToQueueItem({ ...row, tweet_json: '' });
       const { tweet_json: _omit, ...rest } = item;
       return rest;
     });
+  },
+
+  // "Why did 323 tweets fail?" answered in one query: the distinct reasons,
+  // how many rows share each, and a representative tweet for each group.
+  summarizeFailures(mappingIds?: Set<string>): {
+    stage: string;
+    reason: string;
+    count: number;
+    sampleTwitterId: string;
+    sampleTwitterUsername: string;
+    sampleBskyIdentifier: string;
+    lastSeenAt: number;
+  }[] {
+    const rows = db
+      .prepare(`
+        SELECT mapping_id,
+               IFNULL(failure_stage, 'unknown') AS stage,
+               IFNULL(last_error, 'No reason recorded') AS reason,
+               COUNT(*) AS count,
+               MAX(updated_at) AS last_seen_at,
+               MIN(twitter_id) AS sample_twitter_id,
+               MIN(twitter_username) AS sample_twitter_username,
+               MIN(bsky_identifier) AS sample_bsky_identifier
+        FROM post_queue
+        WHERE status = 'failed'
+        GROUP BY mapping_id, stage, reason
+        ORDER BY count DESC, last_seen_at DESC
+        LIMIT 200
+      `)
+      .all() as any[];
+    return rows
+      .filter((row) => !mappingIds || mappingIds.has(row.mapping_id))
+      .map((row) => ({
+        stage: row.stage,
+        reason: row.reason,
+        count: row.count,
+        sampleTwitterId: row.sample_twitter_id,
+        sampleTwitterUsername: row.sample_twitter_username,
+        sampleBskyIdentifier: row.sample_bsky_identifier,
+        lastSeenAt: row.last_seen_at,
+      }));
   },
 
   cancelPendingByRequestId(requestId: string): number {
@@ -738,7 +957,10 @@ export const postQueueService = {
 
   retryFailed(): number {
     db.prepare(
-      "UPDATE post_queue SET status = 'pending', attempts = 0, not_before = 0, updated_at = ? WHERE status = 'failed'",
+      `UPDATE post_queue
+       SET status = 'pending', attempts = 0, not_before = 0, last_error = NULL, failure_stage = NULL,
+           last_error_detail = NULL, first_failed_at = NULL, updated_at = ?
+       WHERE status = 'failed'`,
     ).run(Date.now());
     return changesCount();
   },

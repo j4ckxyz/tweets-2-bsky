@@ -34,7 +34,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
@@ -267,15 +267,91 @@ interface QueueMappingCounts {
   pending: number;
   processing: number;
   failed: number;
+  ready?: number;
+  backoff?: number;
   oldest_enqueued_at: number | null;
+  next_retry_at?: number | null;
 }
 
 interface QueueSummary {
   pending: number;
   processing: number;
   failed: number;
+  /** Pending items that can post right now. */
+  ready?: number;
+  /** Pending items still serving retry backoff. */
+  backoff?: number;
+  nextRetryAt?: number | null;
   oldestEnqueuedAt: number | null;
   perMapping: QueueMappingCounts[];
+}
+
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+interface LogErrorDetail {
+  name?: string;
+  message?: string;
+  status?: number;
+  code?: string;
+  stack?: string;
+}
+
+interface LogEntry {
+  id: number;
+  ts: number;
+  level: LogLevel;
+  stage: string;
+  event: string;
+  message: string;
+  mappingId?: string;
+  bskyIdentifier?: string;
+  twitterUsername?: string;
+  twitterId?: string;
+  jobId?: string;
+  attempt?: number;
+  durationMs?: number;
+  error?: LogErrorDetail;
+  detail?: Record<string, unknown>;
+}
+
+interface LogsResponse {
+  entries: LogEntry[];
+  hasMore: boolean;
+  retention?: { maxRows: number; maxAgeDays: number };
+}
+
+interface QueueFailureGroup {
+  stage: string;
+  reason: string;
+  count: number;
+  sampleTwitterId: string;
+  sampleTwitterUsername: string;
+  sampleBskyIdentifier: string;
+  lastSeenAt: number;
+}
+
+interface QueueFailureItem {
+  twitter_id: string;
+  bsky_identifier: string;
+  mapping_id: string;
+  twitter_username: string;
+  kind: string;
+  tweet_text?: string;
+  status: string;
+  attempts: number;
+  not_before: number;
+  last_error?: string;
+  failure_stage?: string;
+  last_error_detail?: string;
+  enqueued_at: number;
+  updated_at: number;
+  first_failed_at?: number;
+  posted_uri?: string;
+}
+
+interface QueueFailuresResponse {
+  summary: QueueFailureGroup[];
+  items: QueueFailureItem[];
 }
 
 interface StatusResponse {
@@ -528,6 +604,100 @@ function formatState(state: AppState): string {
     default:
       return 'Idle';
   }
+}
+
+// --- Log viewer helpers ---------------------------------------------------
+
+const LOG_LEVEL_BADGE: Record<LogLevel, string> = {
+  debug: 'text-muted-foreground',
+  info: 'text-sky-600 dark:text-sky-400',
+  warn: 'text-amber-600 dark:text-amber-400',
+  error: 'text-red-600 dark:text-red-400',
+};
+
+const LOG_LEVEL_ROW: Record<LogLevel, string> = {
+  debug: '',
+  info: '',
+  warn: 'bg-amber-500/5',
+  error: 'bg-red-500/5',
+};
+
+// Every stage the backend emits, in rough pipeline order so the dropdown reads
+// like the path a tweet actually takes.
+const LOG_STAGES = [
+  'sweep',
+  'twitter',
+  'queue',
+  'post',
+  'media',
+  'bluesky',
+  'ai',
+  'profile',
+  'backfill',
+  'system',
+  'http',
+  'auth',
+] as const;
+
+/**
+ * Mirrors the server's text export line-for-line so copied and downloaded logs
+ * are byte-identical for the same entries.
+ */
+function formatLogEntryForExport(entry: LogEntry): string {
+  const parts = [
+    new Date(entry.ts).toISOString(),
+    entry.level.toUpperCase().padEnd(5),
+    `[${entry.stage}]`,
+    entry.event,
+  ];
+  const scope: string[] = [];
+  if (entry.twitterUsername) scope.push(`@${entry.twitterUsername}`);
+  if (entry.bskyIdentifier) scope.push(`→${entry.bskyIdentifier}`);
+  if (entry.twitterId) scope.push(`tweet=${entry.twitterId}`);
+  if (typeof entry.attempt === 'number') scope.push(`attempt=${entry.attempt}`);
+  if (typeof entry.durationMs === 'number') scope.push(`took=${entry.durationMs}ms`);
+  if (scope.length > 0) parts.push(`(${scope.join(' ')})`);
+  parts.push('-', entry.message);
+  if (entry.error?.message) {
+    const status = entry.error.status ? ` http=${entry.error.status}` : '';
+    parts.push(`| error: ${entry.error.name || 'Error'}${status}: ${entry.error.message}`);
+  }
+  if (entry.detail && Object.keys(entry.detail).length > 0) {
+    parts.push(`| detail: ${JSON.stringify(entry.detail)}`);
+  }
+  return parts.join(' ');
+}
+
+/** Reads the server's suggested filename out of Content-Disposition. */
+function filenameFromResponse(response: { headers: Record<string, any> }, fallback: string): string {
+  const disposition = response.headers?.['content-disposition'];
+  if (typeof disposition === 'string') {
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    if (match?.[1]) return match[1];
+  }
+  return fallback;
+}
+
+function triggerBlobDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Release the object URL once the download has had a chance to start.
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function formatRelativeTime(timestamp: number): string {
+  const deltaMs = Date.now() - timestamp;
+  const absMs = Math.abs(deltaMs);
+  const suffix = deltaMs >= 0 ? 'ago' : 'from now';
+  if (absMs < 60_000) return `${Math.max(1, Math.round(absMs / 1000))}s ${suffix}`;
+  if (absMs < 3_600_000) return `${Math.round(absMs / 60_000)}m ${suffix}`;
+  if (absMs < 86_400_000) return `${Math.round(absMs / 3_600_000)}h ${suffix}`;
+  return `${Math.round(absMs / 86_400_000)}d ${suffix}`;
 }
 
 function getBskyPostUrl(activity: ActivityLog): string | null {
@@ -919,6 +1089,19 @@ function App() {
   const [localPostSearchResults, setLocalPostSearchResults] = useState<LocalPostSearchResult[]>([]);
   const [isSearchingLocalPosts, setIsSearchingLocalPosts] = useState(false);
   const [activityGroupFilter, setActivityGroupFilter] = useState('all');
+  // System log viewer state (Activity tab → "System log").
+  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [logHasMore, setLogHasMore] = useState(false);
+  const [logLevelFilter, setLogLevelFilter] = useState<'all' | LogLevel>('all');
+  const [logStageFilter, setLogStageFilter] = useState('all');
+  const [logSearch, setLogSearch] = useState('');
+  const [logLimit, setLogLimit] = useState(200);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logAutoRefresh, setLogAutoRefresh] = useState(true);
+  const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
+  const [activityView, setActivityView] = useState<'outcomes' | 'logs' | 'failures'>('outcomes');
+  const [queueFailures, setQueueFailures] = useState<QueueFailuresResponse>({ summary: [], items: [] });
+  const [queueFailuresLoading, setQueueFailuresLoading] = useState(false);
   const [groupDraftsByKey, setGroupDraftsByKey] = useState<Record<string, { name: string; emoji: string }>>({});
   const [isGroupActionBusy, setIsGroupActionBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -1123,6 +1306,59 @@ function App() {
       setRecentActivity(response.data);
     } catch (error) {
       handleAuthFailure(error, 'Failed to fetch activity.');
+    }
+  }, [authHeaders, handleAuthFailure]);
+
+  // Filters live in one place so the viewer, the clipboard copy and the file
+  // download always describe exactly the same set of entries.
+  const logQueryParams = useMemo(() => {
+    const params = new URLSearchParams();
+    if (logLevelFilter !== 'all') {
+      // Selecting a level means "this and worse", which is what people expect
+      // from a log level control.
+      const order: LogLevel[] = ['debug', 'info', 'warn', 'error'];
+      params.set('level', order.slice(order.indexOf(logLevelFilter)).join(','));
+    }
+    if (logStageFilter !== 'all') params.set('stage', logStageFilter);
+    if (logSearch.trim()) params.set('q', logSearch.trim());
+    return params;
+  }, [logLevelFilter, logStageFilter, logSearch]);
+
+  const fetchLogs = useCallback(
+    async (options: { silent?: boolean } = {}) => {
+      if (!authHeaders) {
+        return;
+      }
+      if (!options.silent) setLogsLoading(true);
+      try {
+        const params = new URLSearchParams(logQueryParams);
+        params.set('limit', String(logLimit));
+        const response = await axios.get<LogsResponse>(`/api/logs?${params.toString()}`, { headers: authHeaders });
+        setLogEntries(response.data.entries || []);
+        setLogHasMore(Boolean(response.data.hasMore));
+      } catch (error) {
+        handleAuthFailure(error, 'Failed to fetch logs.');
+      } finally {
+        if (!options.silent) setLogsLoading(false);
+      }
+    },
+    [authHeaders, handleAuthFailure, logLimit, logQueryParams],
+  );
+
+  const fetchQueueFailures = useCallback(async () => {
+    if (!authHeaders) {
+      return;
+    }
+    setQueueFailuresLoading(true);
+    try {
+      const response = await axios.get<QueueFailuresResponse>('/api/queue/failures?limit=200', {
+        headers: authHeaders,
+      });
+      setQueueFailures({ summary: response.data.summary || [], items: response.data.items || [] });
+    } catch (error) {
+      handleAuthFailure(error, 'Failed to fetch queue failures.');
+    } finally {
+      setQueueFailuresLoading(false);
     }
   }, [authHeaders, handleAuthFailure]);
 
@@ -1488,6 +1724,35 @@ function App() {
       }
     };
   }, [activeTab, token, fetchEnrichedPosts, fetchRecentActivity, fetchStatus]);
+
+  // The log viewer is only fetched while it is on screen. Refetch immediately
+  // whenever a filter changes so the list always matches the controls.
+  useEffect(() => {
+    if (!token || activeTab !== 'activity' || activityView !== 'logs') {
+      return;
+    }
+    void fetchLogs();
+  }, [token, activeTab, activityView, fetchLogs]);
+
+  useEffect(() => {
+    if (!token || activeTab !== 'activity' || activityView !== 'logs' || !logAutoRefresh) {
+      return;
+    }
+    // Silent refresh: no spinner, so a live tail does not flicker.
+    const interval = window.setInterval(() => {
+      void fetchLogs({ silent: true });
+    }, 5000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [token, activeTab, activityView, logAutoRefresh, fetchLogs]);
+
+  useEffect(() => {
+    if (!token || activeTab !== 'activity' || activityView !== 'failures') {
+      return;
+    }
+    void fetchQueueFailures();
+  }, [token, activeTab, activityView, fetchQueueFailures]);
 
   useEffect(() => {
     if (!token) {
@@ -2304,9 +2569,79 @@ function App() {
     try {
       const response = await axios.delete('/api/queue/failed', { headers: authHeaders });
       showNotice('success', response.data?.message || 'Failed tweets removed.');
-      await fetchStatus();
+      await Promise.all([fetchStatus(), fetchQueueFailures()]);
     } catch (error) {
       handleAuthFailure(error, 'Failed to clear failed tweets.');
+    }
+  };
+
+  // Copies exactly what is on screen, in the same one-line format the .log
+  // export uses, so a pasted snippet and a downloaded file look identical.
+  const copyLogsToClipboard = async () => {
+    if (logEntries.length === 0) {
+      showNotice('info', 'There are no log entries to copy.');
+      return;
+    }
+    // Screen order is newest-first; a copied log reads better oldest-first.
+    const text = [...logEntries].slice().reverse().map(formatLogEntryForExport).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      showNotice('success', `Copied ${logEntries.length} log entr${logEntries.length === 1 ? 'y' : 'ies'}.`);
+    } catch {
+      // Clipboard access is blocked outside secure contexts (plain http on a
+      // LAN address, for instance), which is a very common self-hosted setup.
+      showNotice('error', 'The browser blocked clipboard access. Use Download instead.');
+    }
+  };
+
+  const downloadLogs = async (format: 'txt' | 'json' | 'ndjson' | 'csv') => {
+    if (!authHeaders) {
+      return;
+    }
+    try {
+      const params = new URLSearchParams(logQueryParams);
+      params.set('format', format);
+      params.set('limit', '50000');
+      // The route needs the auth header, so fetch as a blob and save it
+      // client-side rather than pointing the browser straight at the URL.
+      const response = await axios.get(`/api/logs/export?${params.toString()}`, {
+        headers: authHeaders,
+        responseType: 'blob',
+      });
+      triggerBlobDownload(response.data as Blob, filenameFromResponse(response, `tweets-2-bsky-logs.${format}`));
+      showNotice('success', `Log export (${format}) downloaded.`);
+    } catch (error) {
+      handleAuthFailure(error, 'Failed to export logs.');
+    }
+  };
+
+  const downloadDiagnostics = async () => {
+    if (!authHeaders) {
+      return;
+    }
+    try {
+      const response = await axios.get('/api/logs/diagnostics', { headers: authHeaders, responseType: 'blob' });
+      triggerBlobDownload(response.data as Blob, filenameFromResponse(response, 'tweets-2-bsky-diagnostics.json'));
+      showNotice('success', 'Diagnostics bundle downloaded.');
+    } catch (error) {
+      handleAuthFailure(error, 'Failed to build the diagnostics bundle.');
+    }
+  };
+
+  const clearLogs = async () => {
+    if (!authHeaders) {
+      return;
+    }
+    const confirmed = window.confirm('Delete every stored log entry? Exports you have already downloaded are kept.');
+    if (!confirmed) {
+      return;
+    }
+    try {
+      const response = await axios.delete('/api/logs', { headers: authHeaders });
+      showNotice('success', response.data?.message || 'Logs cleared.');
+      await fetchLogs();
+    } catch (error) {
+      handleAuthFailure(error, 'Failed to clear logs.');
     }
   };
 
@@ -4723,14 +5058,30 @@ function App() {
                   <div className="flex flex-wrap items-center gap-3">
                     {activeJobs.length > 0 && queuedPostCount > 0 ? (
                       <p className="text-xs text-muted-foreground">
-                        {postQueue?.processing ?? 0} posting · {postQueue?.pending ?? 0} waiting
+                        {postQueue?.processing ?? 0} posting · {postQueue?.ready ?? postQueue?.pending ?? 0} ready
+                        {/* A pending item serving retry backoff is not "waiting to post" — calling
+                            both the same made the queue look permanently stuck. */}
+                        {(postQueue?.backoff ?? 0) > 0
+                          ? ` · ${postQueue?.backoff} waiting to retry${
+                              postQueue?.nextRetryAt ? ` (next ${formatRelativeTime(postQueue.nextRetryAt)})` : ''
+                            }`
+                          : ''}
                       </p>
                     ) : null}
                     {pendingBackfills.length > 0 ? (
                       <p className="text-xs text-muted-foreground">{pendingBackfills.length} backfill(s) queued</p>
                     ) : null}
                     {(postQueue?.failed ?? 0) > 0 ? (
-                      <p className="text-xs text-red-600 dark:text-red-400">{postQueue?.failed} failed</p>
+                      <button
+                        type="button"
+                        className="text-xs text-red-600 underline-offset-4 hover:underline dark:text-red-400"
+                        onClick={() => {
+                          setActiveTab('activity');
+                          setActivityView('failures');
+                        }}
+                      >
+                        {postQueue?.failed} failed — see why
+                      </button>
                     ) : null}
                     {isAdmin && (postQueue?.failed ?? 0) > 0 ? (
                       <span className="flex items-center gap-1">
@@ -6049,130 +6400,563 @@ function App() {
 
             {activeTab === 'activity' ? (
               <section className="space-y-6 animate-fade-in">
-                <Card className="">
-                  <CardHeader className="pb-3">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="space-y-1">
-                        <CardTitle className="flex items-center gap-2">
-                          <History className="h-4 w-4" />
-                          Recent Activity
-                        </CardTitle>
-                        <CardDescription>Latest migration outcomes from the processing database.</CardDescription>
-                      </div>
-                      <div className="w-full max-w-xs">
-                        <Label htmlFor="activity-group-filter">Filter group</Label>
-                        <select
-                          id="activity-group-filter"
-                          className={selectClassName}
-                          value={activityGroupFilter}
-                          onChange={(event) => setActivityGroupFilter(event.target.value)}
-                        >
-                          <option value="all">All folders</option>
-                          {groupOptions.map((group) => (
-                            <option key={`activity-filter-${group.key}`} value={group.key}>
-                              {group.emoji} {group.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <div className="overflow-x-auto">
-                      <table className="min-w-full text-left text-sm">
-                        <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
-                          <tr>
-                            <th className="px-2 py-3">Time</th>
-                            <th className="px-2 py-3">Twitter User</th>
-                            <th className="px-2 py-3">Group</th>
-                            <th className="px-2 py-3">Status</th>
-                            <th className="px-2 py-3">Details</th>
-                            <th className="px-2 py-3 text-right">Link</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredRecentActivity.map((activity, index) => {
-                            const href = getBskyPostUrl(activity);
-                            const sourceTweetUrl = getTwitterPostUrl(activity.twitter_username, activity.twitter_id);
-                            const mapping = resolveMappingForActivity(activity);
-                            const groupMeta = getMappingGroupMeta(mapping);
+                <div className="flex flex-wrap items-center gap-2">
+                  {[
+                    { id: 'outcomes' as const, label: 'Migration outcomes' },
+                    { id: 'logs' as const, label: 'System log' },
+                    {
+                      id: 'failures' as const,
+                      label: `Failed queue${(postQueue?.failed ?? 0) > 0 ? ` (${postQueue?.failed})` : ''}`,
+                    },
+                  ].map((view) => (
+                    <Button
+                      key={`activity-view-${view.id}`}
+                      size="sm"
+                      variant={activityView === view.id ? 'default' : 'outline'}
+                      onClick={() => setActivityView(view.id)}
+                    >
+                      {view.label}
+                    </Button>
+                  ))}
+                </div>
 
-                            return (
-                              <tr
-                                key={`${activity.twitter_id}-${activity.created_at || index}`}
-                                className="interactive-row border-b border-border/60 last:border-0"
-                              >
-                                <td className="px-2 py-3 align-top text-xs text-muted-foreground">
-                                  {activity.created_at
-                                    ? new Date(activity.created_at).toLocaleTimeString([], {
+                {activityView === 'logs' ? (
+                  <Card className="">
+                    <CardHeader className="pb-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <CardTitle className="flex items-center gap-2">
+                            <History className="h-4 w-4" />
+                            System log
+                          </CardTitle>
+                          <CardDescription>
+                            Everything the pipeline did, with the reason behind each outcome. Copy or download exactly
+                            what you have filtered.
+                          </CardDescription>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button size="sm" variant="outline" onClick={() => void fetchLogs()} disabled={logsLoading}>
+                            {logsLoading ? (
+                              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                            )}
+                            Refresh
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => void copyLogsToClipboard()}>
+                            <Save className="mr-1 h-3.5 w-3.5" />
+                            Copy
+                          </Button>
+                          <DropdownMenu
+                            trigger={
+                              <Button size="sm" variant="outline">
+                                <Download className="mr-1 h-3.5 w-3.5" />
+                                Download
+                                <ChevronDown className="ml-1 h-3.5 w-3.5" />
+                              </Button>
+                            }
+                          >
+                            <DropdownMenuLabel>Export current filter</DropdownMenuLabel>
+                            <DropdownMenuItem onClick={() => void downloadLogs('txt')}>
+                              Plain text (.log)
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => void downloadLogs('json')}>JSON</DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => void downloadLogs('ndjson')}>
+                              NDJSON (one entry per line)
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => void downloadLogs('csv')}>
+                              CSV (spreadsheet)
+                            </DropdownMenuItem>
+                            {isAdmin ? (
+                              <>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuLabel>Support</DropdownMenuLabel>
+                                <DropdownMenuItem onClick={() => void downloadDiagnostics()}>
+                                  Full diagnostics bundle
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem destructive onClick={() => void clearLogs()}>
+                                  Clear stored logs
+                                </DropdownMenuItem>
+                              </>
+                            ) : null}
+                          </DropdownMenu>
+                        </div>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-3 pt-0">
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <div>
+                          <Label htmlFor="log-level-filter">Minimum level</Label>
+                          <select
+                            id="log-level-filter"
+                            className={selectClassName}
+                            value={logLevelFilter}
+                            onChange={(event) => setLogLevelFilter(event.target.value as 'all' | LogLevel)}
+                          >
+                            <option value="all">Everything</option>
+                            <option value="debug">Debug and above</option>
+                            <option value="info">Info and above</option>
+                            <option value="warn">Warnings and errors</option>
+                            <option value="error">Errors only</option>
+                          </select>
+                        </div>
+                        <div>
+                          <Label htmlFor="log-stage-filter">Pipeline stage</Label>
+                          <select
+                            id="log-stage-filter"
+                            className={selectClassName}
+                            value={logStageFilter}
+                            onChange={(event) => setLogStageFilter(event.target.value)}
+                          >
+                            <option value="all">All stages</option>
+                            {LOG_STAGES.map((stage) => (
+                              <option key={`log-stage-${stage}`} value={stage}>
+                                {stage}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <Label htmlFor="log-search">Search</Label>
+                          <DebouncedInput
+                            id="log-search"
+                            placeholder="handle, tweet id, error text…"
+                            value={logSearch}
+                            onChange={setLogSearch}
+                          />
+                        </div>
+                        <div>
+                          <Label htmlFor="log-limit">Entries</Label>
+                          <select
+                            id="log-limit"
+                            className={selectClassName}
+                            value={String(logLimit)}
+                            onChange={(event) => setLogLimit(Number(event.target.value))}
+                          >
+                            <option value="100">100</option>
+                            <option value="200">200</option>
+                            <option value="500">500</option>
+                            <option value="1000">1000</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                        <label className="flex cursor-pointer items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={logAutoRefresh}
+                            onChange={(event) => setLogAutoRefresh(event.target.checked)}
+                          />
+                          Live tail (refresh every 5s)
+                        </label>
+                        <span>
+                          Showing {logEntries.length} entr{logEntries.length === 1 ? 'y' : 'ies'}
+                          {logHasMore ? ' (more available — raise the entry count)' : ''}
+                        </span>
+                      </div>
+
+                      <div className="overflow-x-auto rounded-md border border-border">
+                        <table className="min-w-full text-left text-xs">
+                          <thead className="border-b border-border bg-muted/40 uppercase tracking-wide text-muted-foreground">
+                            <tr>
+                              <th className="px-2 py-2">Time</th>
+                              <th className="px-2 py-2">Level</th>
+                              <th className="px-2 py-2">Stage</th>
+                              <th className="px-2 py-2">Account</th>
+                              <th className="px-2 py-2">What happened</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {logEntries.map((entry) => {
+                              const expanded = expandedLogId === entry.id;
+                              const hasDetail = Boolean(
+                                entry.error || (entry.detail && Object.keys(entry.detail).length > 0),
+                              );
+                              return (
+                                <Fragment key={`log-${entry.id}`}>
+                                  <tr
+                                    className={cn(
+                                      'border-b border-border/60 align-top last:border-0',
+                                      LOG_LEVEL_ROW[entry.level],
+                                    )}
+                                  >
+                                    <td className="whitespace-nowrap px-2 py-2 font-mono text-muted-foreground">
+                                      {new Date(entry.ts).toLocaleTimeString([], {
                                         hour: '2-digit',
                                         minute: '2-digit',
-                                      })
-                                    : '--'}
-                                </td>
-                                <td className="px-2 py-3 align-top font-medium">@{activity.twitter_username}</td>
-                                <td className="px-2 py-3 align-top">
-                                  <Badge variant="outline">
-                                    {groupMeta.emoji} {groupMeta.name}
-                                  </Badge>
-                                </td>
-                                <td className="px-2 py-3 align-top">
-                                  {activity.status === 'migrated' ? (
-                                    <Badge variant="success">Migrated</Badge>
-                                  ) : activity.status === 'skipped' ? (
-                                    <Badge variant="outline">Skipped</Badge>
-                                  ) : (
-                                    <Badge variant="danger">Failed</Badge>
-                                  )}
-                                </td>
-                                <td className="px-2 py-3 align-top text-xs text-muted-foreground">
-                                  <div className="max-w-[340px] truncate">
-                                    {activity.tweet_text || `Tweet ID: ${activity.twitter_id}`}
-                                  </div>
-                                </td>
-                                <td className="px-2 py-3 align-top text-right">
-                                  <div className="flex flex-col items-end gap-1">
-                                    {sourceTweetUrl ? (
-                                      <a
-                                        className="inline-flex items-center text-xs text-foreground underline-offset-4 hover:underline"
-                                        href={sourceTweetUrl}
-                                        target="_blank"
-                                        rel="noreferrer"
+                                        second: '2-digit',
+                                      })}
+                                    </td>
+                                    <td
+                                      className={cn(
+                                        'whitespace-nowrap px-2 py-2 font-semibold',
+                                        LOG_LEVEL_BADGE[entry.level],
+                                      )}
+                                    >
+                                      {entry.level.toUpperCase()}
+                                    </td>
+                                    <td className="whitespace-nowrap px-2 py-2 font-mono text-muted-foreground">
+                                      {entry.stage}
+                                    </td>
+                                    <td className="whitespace-nowrap px-2 py-2 font-mono">
+                                      {entry.twitterUsername ? `@${entry.twitterUsername}` : '--'}
+                                    </td>
+                                    <td className="px-2 py-2">
+                                      {/* The expander is a real button rather than a clickable row so
+                                          it stays reachable by keyboard and screen readers. */}
+                                      <button
+                                        type="button"
+                                        className="flex w-full items-start gap-1 text-left"
+                                        disabled={!hasDetail}
+                                        aria-expanded={hasDetail ? expanded : undefined}
+                                        onClick={() => setExpandedLogId(expanded ? null : entry.id)}
                                       >
-                                        Source
-                                        <ArrowUpRight className="ml-1 h-3 w-3" />
-                                      </a>
-                                    ) : null}
-                                    {href ? (
-                                      <a
-                                        className="inline-flex items-center text-xs text-foreground underline-offset-4 hover:underline"
-                                        href={href}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                      >
-                                        Bluesky
-                                        <ArrowUpRight className="ml-1 h-3 w-3" />
-                                      </a>
-                                    ) : (
-                                      <span className="text-xs text-muted-foreground">--</span>
-                                    )}
-                                  </div>
+                                        {hasDetail ? (
+                                          <ChevronRight
+                                            className={cn(
+                                              'mt-0.5 h-3 w-3 shrink-0 text-muted-foreground transition-transform',
+                                              expanded && 'rotate-90',
+                                            )}
+                                          />
+                                        ) : (
+                                          <span className="w-3 shrink-0" />
+                                        )}
+                                        <span className="min-w-0">
+                                          <span className="block break-words">{entry.message}</span>
+                                          <span className="mt-0.5 block font-mono text-[10px] text-muted-foreground">
+                                            {entry.event}
+                                            {entry.twitterId ? ` · tweet ${entry.twitterId}` : ''}
+                                            {typeof entry.attempt === 'number' ? ` · attempt ${entry.attempt}` : ''}
+                                            {typeof entry.durationMs === 'number' ? ` · ${entry.durationMs}ms` : ''}
+                                          </span>
+                                        </span>
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {expanded ? (
+                                    <tr className="border-b border-border/60">
+                                      <td colSpan={5} className="bg-muted/30 px-4 py-3">
+                                        {entry.error ? (
+                                          <div className="mb-2">
+                                            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                                              Error
+                                            </p>
+                                            <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px]">
+                                              {[
+                                                entry.error.name,
+                                                entry.error.status ? `HTTP ${entry.error.status}` : null,
+                                                entry.error.code,
+                                              ]
+                                                .filter(Boolean)
+                                                .join(' · ')}
+                                              {'\n'}
+                                              {entry.error.message}
+                                              {entry.error.stack ? `\n\n${entry.error.stack}` : ''}
+                                            </pre>
+                                          </div>
+                                        ) : null}
+                                        {entry.detail && Object.keys(entry.detail).length > 0 ? (
+                                          <div>
+                                            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                                              Detail
+                                            </p>
+                                            <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px]">
+                                              {JSON.stringify(entry.detail, null, 2)}
+                                            </pre>
+                                          </div>
+                                        ) : null}
+                                      </td>
+                                    </tr>
+                                  ) : null}
+                                </Fragment>
+                              );
+                            })}
+                            {logEntries.length === 0 ? (
+                              <tr>
+                                <td className="px-2 py-6 text-center text-sm text-muted-foreground" colSpan={5}>
+                                  {logsLoading ? 'Loading logs…' : 'No log entries match these filters.'}
                                 </td>
                               </tr>
-                            );
-                          })}
-                          {filteredRecentActivity.length === 0 ? (
-                            <tr>
-                              <td className="px-2 py-6 text-center text-sm text-muted-foreground" colSpan={6}>
-                                No activity for this filter.
-                              </td>
-                            </tr>
+                            ) : null}
+                          </tbody>
+                        </table>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : null}
+
+                {activityView === 'failures' ? (
+                  <Card className="">
+                    <CardHeader className="pb-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <CardTitle className="flex items-center gap-2">
+                            <History className="h-4 w-4" />
+                            Failed queue items
+                          </CardTitle>
+                          <CardDescription>
+                            Tweets the post queue gave up on, grouped by reason. Anything already live on Bluesky is
+                            repaired automatically rather than re-posted.
+                          </CardDescription>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void fetchQueueFailures()}
+                            disabled={queueFailuresLoading}
+                          >
+                            {queueFailuresLoading ? (
+                              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                            )}
+                            Refresh
+                          </Button>
+                          {isAdmin && queueFailures.items.length > 0 ? (
+                            <>
+                              <Button size="sm" variant="outline" onClick={retryFailedQueue}>
+                                Retry all
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={clearFailedQueue}>
+                                Clear all
+                              </Button>
+                            </>
                           ) : null}
-                        </tbody>
-                      </table>
-                    </div>
-                  </CardContent>
-                </Card>
+                        </div>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-4 pt-0">
+                      {queueFailures.summary.length > 0 ? (
+                        <div className="space-y-2">
+                          <p className="text-xs uppercase tracking-wide text-muted-foreground">Grouped by reason</p>
+                          <ul className="space-y-2">
+                            {queueFailures.summary.map((group, index) => (
+                              <li
+                                key={`failure-group-${group.stage}-${index}`}
+                                className="rounded-md border border-border px-3 py-2"
+                              >
+                                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                                  <span className="font-semibold">
+                                    {group.count} tweet{group.count === 1 ? '' : 's'}
+                                  </span>
+                                  <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                                    <Badge variant="outline">{group.stage}</Badge>
+                                    last seen {formatRelativeTime(group.lastSeenAt)}
+                                  </span>
+                                </div>
+                                <p className="mt-1 break-words text-sm text-muted-foreground">{group.reason}</p>
+                                <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+                                  e.g. @{group.sampleTwitterUsername} tweet {group.sampleTwitterId} →{' '}
+                                  {group.sampleBskyIdentifier}
+                                </p>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+
+                      <div className="overflow-x-auto rounded-md border border-border">
+                        <table className="min-w-full text-left text-xs">
+                          <thead className="border-b border-border bg-muted/40 uppercase tracking-wide text-muted-foreground">
+                            <tr>
+                              <th className="px-2 py-2">Failed</th>
+                              <th className="px-2 py-2">Account</th>
+                              <th className="px-2 py-2">Tweet</th>
+                              <th className="px-2 py-2">Attempts</th>
+                              <th className="px-2 py-2">Reason</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {queueFailures.items.map((item) => (
+                              <tr
+                                key={`failed-${item.twitter_id}-${item.bsky_identifier}`}
+                                className="border-b border-border/60 align-top last:border-0"
+                              >
+                                <td className="whitespace-nowrap px-2 py-2 text-muted-foreground">
+                                  {formatRelativeTime(item.updated_at)}
+                                </td>
+                                <td className="whitespace-nowrap px-2 py-2 font-mono">
+                                  @{item.twitter_username}
+                                  <span className="block text-[10px] text-muted-foreground">
+                                    → {item.bsky_identifier}
+                                  </span>
+                                </td>
+                                <td className="px-2 py-2">
+                                  <a
+                                    className="font-mono text-[11px] underline-offset-4 hover:underline"
+                                    href={`https://x.com/${item.twitter_username}/status/${item.twitter_id}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    {item.twitter_id}
+                                  </a>
+                                  {item.tweet_text ? (
+                                    <span className="mt-0.5 block max-w-[280px] truncate text-muted-foreground">
+                                      {item.tweet_text}
+                                    </span>
+                                  ) : null}
+                                </td>
+                                <td className="whitespace-nowrap px-2 py-2">
+                                  {item.attempts}
+                                  {item.failure_stage ? (
+                                    <span className="block text-[10px] text-muted-foreground">
+                                      at {item.failure_stage}
+                                    </span>
+                                  ) : null}
+                                </td>
+                                <td className="px-2 py-2">
+                                  <span className="break-words">{item.last_error || 'No reason recorded.'}</span>
+                                  {item.posted_uri ? (
+                                    <span className="mt-1 block text-[10px] text-amber-600 dark:text-amber-400">
+                                      This tweet is already live on Bluesky; it will be reconciled, not re-posted.
+                                    </span>
+                                  ) : null}
+                                </td>
+                              </tr>
+                            ))}
+                            {queueFailures.items.length === 0 ? (
+                              <tr>
+                                <td className="px-2 py-6 text-center text-sm text-muted-foreground" colSpan={5}>
+                                  {queueFailuresLoading ? 'Loading…' : 'Nothing in the queue has failed.'}
+                                </td>
+                              </tr>
+                            ) : null}
+                          </tbody>
+                        </table>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : null}
+
+                {activityView === 'outcomes' ? (
+                  <Card className="">
+                    <CardHeader className="pb-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="space-y-1">
+                          <CardTitle className="flex items-center gap-2">
+                            <History className="h-4 w-4" />
+                            Recent Activity
+                          </CardTitle>
+                          <CardDescription>Latest migration outcomes from the processing database.</CardDescription>
+                        </div>
+                        <div className="w-full max-w-xs">
+                          <Label htmlFor="activity-group-filter">Filter group</Label>
+                          <select
+                            id="activity-group-filter"
+                            className={selectClassName}
+                            value={activityGroupFilter}
+                            onChange={(event) => setActivityGroupFilter(event.target.value)}
+                          >
+                            <option value="all">All folders</option>
+                            {groupOptions.map((group) => (
+                              <option key={`activity-filter-${group.key}`} value={group.key}>
+                                {group.emoji} {group.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="pt-0">
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-left text-sm">
+                          <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+                            <tr>
+                              <th className="px-2 py-3">Time</th>
+                              <th className="px-2 py-3">Twitter User</th>
+                              <th className="px-2 py-3">Group</th>
+                              <th className="px-2 py-3">Status</th>
+                              <th className="px-2 py-3">Details</th>
+                              <th className="px-2 py-3 text-right">Link</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredRecentActivity.map((activity, index) => {
+                              const href = getBskyPostUrl(activity);
+                              const sourceTweetUrl = getTwitterPostUrl(activity.twitter_username, activity.twitter_id);
+                              const mapping = resolveMappingForActivity(activity);
+                              const groupMeta = getMappingGroupMeta(mapping);
+
+                              return (
+                                <tr
+                                  key={`${activity.twitter_id}-${activity.created_at || index}`}
+                                  className="interactive-row border-b border-border/60 last:border-0"
+                                >
+                                  <td className="px-2 py-3 align-top text-xs text-muted-foreground">
+                                    {activity.created_at
+                                      ? new Date(activity.created_at).toLocaleTimeString([], {
+                                          hour: '2-digit',
+                                          minute: '2-digit',
+                                        })
+                                      : '--'}
+                                  </td>
+                                  <td className="px-2 py-3 align-top font-medium">@{activity.twitter_username}</td>
+                                  <td className="px-2 py-3 align-top">
+                                    <Badge variant="outline">
+                                      {groupMeta.emoji} {groupMeta.name}
+                                    </Badge>
+                                  </td>
+                                  <td className="px-2 py-3 align-top">
+                                    {activity.status === 'migrated' ? (
+                                      <Badge variant="success">Migrated</Badge>
+                                    ) : activity.status === 'skipped' ? (
+                                      <Badge variant="outline">Skipped</Badge>
+                                    ) : (
+                                      <Badge variant="danger">Failed</Badge>
+                                    )}
+                                  </td>
+                                  <td className="px-2 py-3 align-top text-xs text-muted-foreground">
+                                    <div className="max-w-[340px] truncate">
+                                      {activity.tweet_text || `Tweet ID: ${activity.twitter_id}`}
+                                    </div>
+                                  </td>
+                                  <td className="px-2 py-3 align-top text-right">
+                                    <div className="flex flex-col items-end gap-1">
+                                      {sourceTweetUrl ? (
+                                        <a
+                                          className="inline-flex items-center text-xs text-foreground underline-offset-4 hover:underline"
+                                          href={sourceTweetUrl}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                        >
+                                          Source
+                                          <ArrowUpRight className="ml-1 h-3 w-3" />
+                                        </a>
+                                      ) : null}
+                                      {href ? (
+                                        <a
+                                          className="inline-flex items-center text-xs text-foreground underline-offset-4 hover:underline"
+                                          href={href}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                        >
+                                          Bluesky
+                                          <ArrowUpRight className="ml-1 h-3 w-3" />
+                                        </a>
+                                      ) : (
+                                        <span className="text-xs text-muted-foreground">--</span>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                            {filteredRecentActivity.length === 0 ? (
+                              <tr>
+                                <td className="px-2 py-6 text-center text-sm text-muted-foreground" colSpan={6}>
+                                  No activity for this filter.
+                                </td>
+                              </tr>
+                            ) : null}
+                          </tbody>
+                        </table>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : null}
               </section>
             ) : null}
 

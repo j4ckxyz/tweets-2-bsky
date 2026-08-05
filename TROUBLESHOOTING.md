@@ -4,6 +4,78 @@ A powerful tool to crosspost Tweets to Bluesky, supporting threads, videos, and 
 
 ## Troubleshooting
 
+### Start here: the log viewer
+
+Nearly every question below can be answered from **Activity → System log** in the
+dashboard. Every step of the pipeline writes a structured entry there with the
+reason behind its outcome, and each entry can be expanded to show the underlying
+error (HTTP status, provider error code, stack) and the context it happened in.
+
+- Filter by level (`Errors only`), stage (`post`, `media`, `bluesky`, `queue`, …),
+  or search for a handle, tweet id or error text.
+- **Copy** puts the currently filtered entries on your clipboard.
+- **Download** saves them as `.log`, JSON, NDJSON or CSV.
+- Admins also get **Full diagnostics bundle** — one JSON file with recent logs,
+  the queue state, grouped failure reasons and a redacted config summary. That is
+  the single most useful thing to attach to a bug report.
+
+Credentials are redacted before anything is written, so exports are safe to share.
+
+### The dashboard says tweets "failed" but I can see them on Bluesky
+
+This was possible in versions before 2.1: a tweet could be published, but if the
+process died, the database was locked, or the batch watchdog fired before the
+"we posted this" record was written, the queue concluded the post had never
+happened. It retried, and after eight attempts parked it as failed.
+
+The queue now stamps each row with its Bluesky URI the instant the post is
+accepted, before any other bookkeeping. Anything holding a stamp is repaired
+from that stamp instead of being re-posted, at startup and every six hours.
+
+If you are upgrading with a backlog of these:
+
+1. Restart the app. The startup reconciliation pass repairs anything that is
+   already live and clears it out of the failed count.
+2. For whatever remains, open **Activity → Failed queue**. Failures are grouped
+   by reason, so you can see at a glance whether you are looking at one broken
+   account or 300 unrelated problems.
+3. Use **Retry all** for transient causes (rate limits, network), or **Clear all**
+   to discard them.
+
+### A queue number never seems to move
+
+`pending` used to cover both "about to post" and "serving a retry backoff", and a
+backoff can be up to six hours. The dashboard now shows them separately —
+`N ready` versus `N waiting to retry (next 42m ago)` — so a stalled-looking
+number is either genuinely stuck or just waiting, and you can tell which.
+
+### Everything for one account fails
+
+Look for `login.failed` in the log. The message names the actual cause:
+
+- **HTTP 401** — the app password is wrong or was revoked. Generate a new one in
+  Bluesky settings and update the mapping.
+- **AuthFactorTokenRequired** — the account has 2FA on; use an app password, not
+  the account password.
+- **HTTP 429** — Bluesky is rate limiting sign-ins; it recovers by itself.
+
+Tweets are never parked as failed for this reason: a batch that stops before a
+tweet is attempted returns it to the queue without spending an attempt, backing
+off progressively (30s up to 15m) while the problem persists.
+
+### Log storage and tuning
+
+Logs live in the same SQLite database as everything else, capped by both age and
+row count, and pruned automatically.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EVENT_LOG_RETENTION_DAYS` | `30` | Maximum age of a stored log entry. |
+| `EVENT_LOG_MAX_ROWS` | `250000` | Hard row cap; oldest entries are dropped first. |
+| `EVENT_LOG_LEVEL` | `debug` | Minimum level recorded. Set to `info` to cut volume. |
+| `EVENT_LOG_FLUSH_MS` | `400` | Write-buffer interval. `0` writes synchronously. |
+| `QUEUE_FAILED_RETENTION_DAYS` | `14` | How long parked failures stay visible. |
+
 ### Update Failures / Git Conflicts
 If `./update.sh` fails with "Pulling is not possible because you have unmerged files" or similar git errors:
 

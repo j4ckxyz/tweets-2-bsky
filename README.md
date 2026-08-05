@@ -174,8 +174,46 @@ Tuning (optional `.env` values, sensible defaults built in):
 | `POST_PACING_MIN_MS` / `POST_PACING_MAX_MS` | `3000` / `8000` | Pause between posts within one account (cosmetic pacing; per-account only). |
 | `QUEUE_MAX_ATTEMPTS` | `8` | Retries (with exponential backoff) before a tweet is parked as failed. |
 | `SWEEP_FETCH_TIMEOUT_MS` | `180000` | Watchdog for a single account's timeline fetch. |
+| `QUEUE_FAILED_RETENTION_DAYS` | `14` | How long parked failures stay visible before being pruned. |
+
+A tweet is stamped with its Bluesky URI the moment the post is accepted, before any other bookkeeping. If the process dies (or the database is busy) between publishing and recording, the queue repairs the record from that stamp instead of re-posting — so a post that is live on Bluesky can never show up as "failed", and a retry can never duplicate it.
 
 Upgrading from an older version needs no manual steps: the queue table is created automatically on first boot and existing history is untouched (Docker users keep the same `data` volume; source installs just run `./update.sh`).
+
+## Logs and Diagnostics
+
+Every stage of the pipeline writes a structured entry to a queryable log stored alongside the rest of the data in `data/database.sqlite`. Console output is unchanged, so `pm2 logs` and `docker logs -f` still work as before — the stored copy is what the dashboard reads.
+
+In the dashboard, **Activity** has three views:
+
+- **Migration outcomes** — what was mirrored, skipped or failed, per tweet.
+- **System log** — the full event stream, filterable by level, pipeline stage, account, tweet id or free text. Expand any row for the underlying error: HTTP status, provider error code, cause chain and stack.
+- **Failed queue** — parked tweets grouped by reason, with attempt counts and the stage each one failed at.
+
+From the System log you can **Copy** the current selection to the clipboard, or **Download** it as plain text, JSON, NDJSON or CSV. Admins also get a **full diagnostics bundle**: one JSON file containing recent logs, the live queue state, grouped failure reasons and a redacted configuration summary — the right thing to attach to a bug report.
+
+Credentials (app passwords, `auth_token`, `ct0`, JWTs) are redacted before anything is written, so exports are safe to share.
+
+Retention is bounded by age and row count, and pruned automatically:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EVENT_LOG_RETENTION_DAYS` | `30` | Maximum age of a stored log entry. |
+| `EVENT_LOG_MAX_ROWS` | `250000` | Hard row cap; oldest entries drop first. |
+| `EVENT_LOG_LEVEL` | `debug` | Minimum level recorded. `info` cuts volume noticeably. |
+| `EVENT_LOG_FLUSH_MS` | `400` | Write-buffer interval. `0` writes synchronously. |
+
+API endpoints behind the same auth as the rest of the dashboard, scoped to the mappings the caller can see:
+
+```text
+GET    /api/logs?level=warn,error&stage=post&q=<text>&limit=200
+GET    /api/logs/stats
+GET    /api/logs/tweet/:twitterId      # everything recorded about one tweet
+GET    /api/logs/export?format=txt|json|ndjson|csv
+GET    /api/logs/diagnostics           # admin: full bundle
+GET    /api/queue/failures             # parked tweets, grouped by reason
+DELETE /api/logs                       # admin
+```
 
 ## CLI Quick Commands
 
