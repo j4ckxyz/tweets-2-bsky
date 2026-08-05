@@ -22,6 +22,8 @@ import {
 } from './config-manager.js';
 import { dbService, postQueueService } from './db.js';
 import type { ProcessedTweet } from './db.js';
+import type { LogExportFormat, LogLevel, LogQueryFilters, LogStage } from './event-log.js';
+import { eventLogService, exportLogs, logEvent } from './event-log.js';
 import {
   applyProfileMirrorSyncState,
   bridgeBlueskyAccountToFediverse,
@@ -2894,6 +2896,19 @@ app.get('/api/status', authenticateToken, (req: any, res) => {
     pending: scopedQueueMappings.reduce((total, entry) => total + entry.pending, 0),
     processing: scopedQueueMappings.reduce((total, entry) => total + entry.processing, 0),
     failed: scopedQueueMappings.reduce((total, entry) => total + entry.failed, 0),
+    // `pending` split into what can post now and what is serving retry backoff,
+    // so a stuck-looking number is self-explanatory in the UI.
+    ready: scopedQueueMappings.reduce((total, entry) => total + (entry.ready ?? 0), 0),
+    backoff: scopedQueueMappings.reduce((total, entry) => total + (entry.backoff ?? 0), 0),
+    nextRetryAt: scopedQueueMappings.reduce<number | null>(
+      (soonest, entry) =>
+        entry.next_retry_at !== null &&
+        entry.next_retry_at !== undefined &&
+        (soonest === null || entry.next_retry_at < soonest)
+          ? entry.next_retry_at
+          : soonest,
+      null,
+    ),
     oldestEnqueuedAt: scopedQueueMappings.reduce<number | null>(
       (oldest, entry) =>
         entry.oldest_enqueued_at !== null && (oldest === null || entry.oldest_enqueued_at < oldest)
@@ -2932,14 +2947,291 @@ app.get('/api/queue', authenticateToken, (req: any, res) => {
   });
 });
 
-app.post('/api/queue/retry-failed', authenticateToken, requireAdmin, (_req, res) => {
+// Why the failures happened, grouped by reason. This is the answer to "323
+// failed" that the counter alone can never give.
+app.get('/api/queue/failures', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const visibleMappingIds = getVisibleMappingIdSet(config, req.user);
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 100;
+
+  res.json({
+    summary: postQueueService.summarizeFailures(visibleMappingIds),
+    items: postQueueService.listItems({ mappingIds: visibleMappingIds, limit, status: 'failed' }),
+  });
+});
+
+app.post('/api/queue/retry-failed', authenticateToken, requireAdmin, (req: any, res) => {
   const retried = postQueueService.retryFailed();
+  logEvent({
+    level: 'info',
+    stage: 'queue',
+    event: 'queue.retry-failed',
+    message: `${getActorLabel(req.user)} requeued ${retried} failed tweet(s).`,
+    detail: { retried, actor: getActorLabel(req.user) },
+  });
   res.json({ success: true, message: `${retried} failed tweet(s) requeued.` });
 });
 
-app.delete('/api/queue/failed', authenticateToken, requireAdmin, (_req, res) => {
+app.delete('/api/queue/failed', authenticateToken, requireAdmin, (req: any, res) => {
   const cleared = postQueueService.clearFailed();
+  logEvent({
+    level: 'warn',
+    stage: 'queue',
+    event: 'queue.clear-failed',
+    message: `${getActorLabel(req.user)} discarded ${cleared} failed tweet(s) from the queue. They will not be retried.`,
+    detail: { cleared, actor: getActorLabel(req.user) },
+  });
   res.json({ success: true, message: `${cleared} failed tweet(s) removed from the queue.` });
+});
+
+// ============================================================================
+// Structured log access
+//
+// Non-admins only ever see entries attributable to a mapping they can view.
+// System-level entries (boot, scheduler, housekeeping) carry no account, so
+// they are admin-only rather than leaking cross-tenant activity.
+// ============================================================================
+
+const LOG_LEVELS = new Set<LogLevel>(['debug', 'info', 'warn', 'error']);
+
+function parseListParam(value: unknown): string[] | undefined {
+  if (typeof value !== 'string' || value.trim().length === 0) return undefined;
+  const parts = value
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  return parts.length > 0 ? parts.slice(0, 50) : undefined;
+}
+
+function parseTimestampParam(value: unknown): number | undefined {
+  if (typeof value !== 'string' || value.trim().length === 0) return undefined;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * Turns query params into a filter set, then narrows it to what this user is
+ * allowed to see. Returns null when the user can see nothing at all.
+ */
+function buildScopedLogFilters(req: any): LogQueryFilters | null {
+  const config = getConfig();
+  const filters: LogQueryFilters = {};
+
+  const levels = parseListParam(req.query.level)?.filter((level): level is LogLevel =>
+    LOG_LEVELS.has(level as LogLevel),
+  );
+  if (levels && levels.length > 0) filters.levels = levels;
+
+  const stages = parseListParam(req.query.stage) as LogStage[] | undefined;
+  if (stages && stages.length > 0) filters.stages = stages;
+
+  const events = parseListParam(req.query.event);
+  if (events) filters.events = events;
+
+  if (typeof req.query.q === 'string' && req.query.q.trim().length > 0) {
+    filters.search = req.query.q.trim().slice(0, 200);
+  }
+  if (typeof req.query.tweetId === 'string' && req.query.tweetId.trim().length > 0) {
+    filters.twitterId = req.query.tweetId.trim();
+  }
+  if (typeof req.query.jobId === 'string' && req.query.jobId.trim().length > 0) {
+    filters.jobId = req.query.jobId.trim();
+  }
+
+  const since = parseTimestampParam(req.query.since);
+  if (since !== undefined) filters.since = since;
+  const until = parseTimestampParam(req.query.until);
+  if (until !== undefined) filters.until = until;
+
+  const beforeId = Number(req.query.beforeId);
+  if (Number.isFinite(beforeId) && beforeId > 0) filters.beforeId = beforeId;
+
+  // Explicit account narrowing requested by the caller.
+  const requestedMappings = parseListParam(req.query.mappingId);
+  const requestedAccounts = parseListParam(req.query.account)?.map(normalizeActor);
+
+  if (canViewAllMappings(req.user)) {
+    if (requestedMappings) filters.mappingIds = requestedMappings;
+    if (requestedAccounts) filters.twitterUsernames = requestedAccounts;
+    return filters;
+  }
+
+  // Scoped users: intersect any request with what they own.
+  const visibleMappingIds = [...getVisibleMappingIdSet(config, req.user)];
+  if (visibleMappingIds.length === 0) return null;
+  filters.mappingIds = requestedMappings
+    ? requestedMappings.filter((id) => visibleMappingIds.includes(id))
+    : visibleMappingIds;
+  if (filters.mappingIds.length === 0) return null;
+
+  if (requestedAccounts) {
+    const visibleSets = getVisibleMappingIdentitySets(config, req.user);
+    const allowed = requestedAccounts.filter((account) => visibleSets.twitterUsernames.has(account));
+    if (allowed.length === 0) return null;
+    filters.twitterUsernames = allowed;
+  }
+
+  return filters;
+}
+
+app.get('/api/logs', authenticateToken, (req: any, res) => {
+  const filters = buildScopedLogFilters(req);
+  if (!filters) {
+    res.json({ entries: [], hasMore: false, retention: eventLogService.retention() });
+    return;
+  }
+
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 1000)) : 200;
+  // Ask for one extra row so the client knows whether to offer "load more"
+  // without a second count query.
+  const entries = eventLogService.query({ ...filters, limit: limit + 1 });
+  const hasMore = entries.length > limit;
+
+  res.json({
+    entries: hasMore ? entries.slice(0, limit) : entries,
+    hasMore,
+    retention: eventLogService.retention(),
+  });
+});
+
+app.get('/api/logs/stats', authenticateToken, (req: any, res) => {
+  const filters = buildScopedLogFilters(req);
+  if (!filters) {
+    res.json({ total: 0, byLevel: {}, byStage: {}, topEvents: [], oldestTs: null, newestTs: null });
+    return;
+  }
+  res.json(eventLogService.stats(filters));
+});
+
+// Everything recorded about one tweet, in order. Answers "what actually
+// happened to this post" in a single request.
+app.get('/api/logs/tweet/:twitterId', authenticateToken, (req: any, res) => {
+  const twitterId = String(req.params.twitterId || '').trim();
+  if (!twitterId) {
+    res.status(400).json({ error: 'A tweet id is required.' });
+    return;
+  }
+
+  const config = getConfig();
+  const entries = eventLogService.timelineForTweet(twitterId);
+  if (canViewAllMappings(req.user)) {
+    res.json({ twitterId, entries });
+    return;
+  }
+
+  const visibleSets = getVisibleMappingIdentitySets(config, req.user);
+  const visibleMappingIds = getVisibleMappingIdSet(config, req.user);
+  res.json({
+    twitterId,
+    entries: entries.filter(
+      (entry) =>
+        (entry.mappingId && visibleMappingIds.has(entry.mappingId)) ||
+        (entry.twitterUsername && visibleSets.twitterUsernames.has(normalizeActor(entry.twitterUsername))) ||
+        (entry.bskyIdentifier && visibleSets.bskyIdentifiers.has(normalizeActor(entry.bskyIdentifier))),
+    ),
+  });
+});
+
+// Downloadable export. `format` decides the rendering; every filter accepted by
+// /api/logs works here too, so what you are looking at is what you download.
+app.get('/api/logs/export', authenticateToken, (req: any, res) => {
+  const filters = buildScopedLogFilters(req);
+  const requestedFormat = String(req.query.format || 'txt').toLowerCase();
+  const format: LogExportFormat = (['json', 'ndjson', 'csv', 'txt'] as const).includes(requestedFormat as any)
+    ? (requestedFormat as LogExportFormat)
+    : 'txt';
+
+  const limitRaw = Number(req.query.limit);
+  const hardLimit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 200_000)) : 50_000;
+
+  const meta = {
+    generatedAt: new Date().toISOString(),
+    filters: filters ?? {},
+    appVersion: getRuntimeVersionInfo().version,
+    exportedBy: getActorLabel(req.user),
+  };
+
+  const { body, contentType, filename } = filters
+    ? exportLogs(format, filters, meta, hardLimit)
+    : exportLogs(format, { beforeId: 0 }, meta, 0);
+
+  logEvent({
+    level: 'info',
+    stage: 'http',
+    event: 'logs.exported',
+    message: `${getActorLabel(req.user)} exported logs as ${format}.`,
+    detail: { format, bytes: body.length, filters: filters ?? {} },
+    console: false,
+  });
+
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(body);
+});
+
+// One file with everything a bug report needs: recent logs, the current queue
+// state, failure groupings and a redacted config summary.
+app.get('/api/logs/diagnostics', authenticateToken, requireAdmin, (req: any, res) => {
+  const config = getConfig();
+  const queueCounts = postQueueService.getCounts();
+  const stats = eventLogService.stats({ since: Date.now() - 24 * 60 * 60 * 1000 });
+  const entries = eventLogService.query({ limit: 2_000 });
+
+  const bundle = {
+    meta: {
+      generatedAt: new Date().toISOString(),
+      generatedBy: getActorLabel(req.user),
+      appVersion: getRuntimeVersionInfo().version,
+      node: process.version,
+      platform: `${process.platform}/${process.arch}`,
+      uptimeSeconds: Math.round(process.uptime()),
+      logRetention: eventLogService.retention(),
+    },
+    // Shape only — no cookies, passwords or tokens.
+    configuration: {
+      checkIntervalMinutes: config.checkIntervalMinutes,
+      mappingCount: config.mappings.length,
+      enabledMappingCount: config.mappings.filter((mapping) => mapping.enabled).length,
+      twitterCookiesConfigured: Boolean(config.twitter?.authToken && config.twitter?.ct0),
+      backupCookiesConfigured: Boolean(config.twitter?.backupAuthToken && config.twitter?.backupCt0),
+      mappings: config.mappings.map((mapping) => ({
+        id: mapping.id,
+        bskyIdentifier: mapping.bskyIdentifier,
+        twitterUsernames: mapping.twitterUsernames,
+        enabled: mapping.enabled,
+      })),
+    },
+    queue: {
+      counts: queueCounts,
+      failureSummary: postQueueService.summarizeFailures(),
+      failedItems: postQueueService.listItems({ limit: 500, status: 'failed' }),
+    },
+    logStatsLast24h: stats,
+    recentEntries: entries,
+  };
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="tweets-2-bsky-diagnostics-${stamp}.json"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(`${JSON.stringify(bundle, null, 2)}\n`);
+});
+
+app.delete('/api/logs', authenticateToken, requireAdmin, (req: any, res) => {
+  const cleared = eventLogService.clear();
+  logEvent({
+    level: 'warn',
+    stage: 'system',
+    event: 'logs.cleared',
+    message: `${getActorLabel(req.user)} cleared the event log (${cleared} entries removed).`,
+    detail: { cleared },
+  });
+  res.json({ success: true, message: `Cleared ${cleared} log entr${cleared === 1 ? 'y' : 'ies'}.` });
 });
 
 app.get('/api/version', authenticateToken, (_req, res) => {
