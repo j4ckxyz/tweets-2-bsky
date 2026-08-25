@@ -89,7 +89,7 @@ interface ImageEmbed {
   aspectRatio?: AspectRatio;
 }
 
-import { dbService, postQueueService } from './db.js';
+import { accountHealthService, dbService, postQueueService } from './db.js';
 import type { QueueBatch } from './db.js';
 
 // ============================================================================
@@ -2756,8 +2756,13 @@ async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionK
     const agent = await getAgent(mapping);
     if (!agent) {
       batchStage = 'login';
+      // "Check the app password" is wrong and misleading when the account is
+      // taken down or deactivated — nothing in Settings fixes that.
+      const health = accountHealthService.get(mapping.bskyIdentifier);
       throw new Error(
-        `Bluesky login failed for ${mapping.bskyIdentifier}. Check the app password in Settings — every tweet for this account stays queued until it works.`,
+        health
+          ? `${health.reason} Posting is paused for this account; every tweet for it stays queued until it works again.`
+          : `Bluesky login failed for ${mapping.bskyIdentifier}. Check the app password in Settings — every tweet for this account stays queued until it works.`,
       );
     }
 
@@ -3035,7 +3040,15 @@ function startPostWorkers(): void {
       let launched = false;
       try {
         const config = getConfig();
-        const allowedMappingIds = new Set(config.mappings.filter((m) => m.enabled).map((m) => m.id));
+        // A mapping whose Bluesky account is down is not claimable at all:
+        // without this the workers keep claiming its rows, failing at login and
+        // re-deferring them several times a second.
+        const blockedIdentifiers = accountHealthService.blockedIdentifiers();
+        const allowedMappingIds = new Set(
+          config.mappings
+            .filter((m) => m.enabled && !blockedIdentifiers.has(m.bskyIdentifier.toLowerCase()))
+            .map((m) => m.id),
+        );
 
         while (activePostMappings.size < POST_WORKER_CONCURRENCY) {
           const batch = postQueueService.claimNextBatch(activePostMappings, allowedMappingIds);

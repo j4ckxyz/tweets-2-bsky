@@ -20,7 +20,7 @@ import {
   getDefaultUserPermissions,
   saveConfig,
 } from './config-manager.js';
-import { dbService, postQueueService } from './db.js';
+import { accountHealthService, dbService, postQueueService } from './db.js';
 import type { ProcessedTweet } from './db.js';
 import type { LogExportFormat, LogLevel, LogQueryFilters, LogStage } from './event-log.js';
 import { eventLogService, exportLogs, logEvent } from './event-log.js';
@@ -2341,6 +2341,47 @@ app.put('/api/mappings/:id', authenticateToken, (req: any, res) => {
   res.json(sanitizeMapping(updatedMapping, createUserLookupById(config), req.user));
 });
 
+// Forces the next login attempt for a down account to happen immediately,
+// instead of waiting out the escalating recheck schedule. This is the
+// dashboard's "Check again" button: the only thing to do after reactivating an
+// account or winning a takedown appeal.
+app.post('/api/mappings/:id/recheck-account', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+
+  if (!mapping) {
+    res.status(404).json({ error: 'Mapping not found' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have permission to update this mapping.' });
+    return;
+  }
+
+  const health = accountHealthService.get(mapping.bskyIdentifier);
+  if (!health) {
+    res.json({ ok: true, cleared: false, message: `${mapping.bskyIdentifier} is not currently flagged as down.` });
+    return;
+  }
+
+  accountHealthService.recheckNow(mapping.bskyIdentifier);
+  logEvent({
+    level: 'info',
+    stage: 'bluesky',
+    event: 'account.recheck-requested',
+    message: `Manual recheck requested for ${mapping.bskyIdentifier}; the next post batch will attempt a fresh sign-in.`,
+    mappingId: mapping.id,
+    bskyIdentifier: mapping.bskyIdentifier,
+    detail: { state: health.state, detectedAt: health.detected_at },
+  });
+
+  res.json({
+    ok: true,
+    cleared: true,
+    message: `Will retry ${mapping.bskyIdentifier} on the next post batch.`,
+  });
+});
+
 app.post('/api/mappings/:id/sync-profile-from-twitter', authenticateToken, async (req: any, res) => {
   const { id } = req.params;
   const config = getConfig();
@@ -2919,11 +2960,38 @@ app.get('/api/status', authenticateToken, (req: any, res) => {
     perMapping: scopedQueueMappings,
   };
 
+  // Accounts that cannot be posted to at all (taken down, suspended,
+  // deactivated). Surfaced here rather than only in the log because otherwise
+  // the queue just looks stuck for no visible reason.
+  const downAccounts = accountHealthService.list();
+  const accountAlerts = config.mappings
+    .filter((mapping) => visibleMappingIds.has(mapping.id))
+    .flatMap((mapping) => {
+      const health = downAccounts.find((row) => row.bsky_identifier === mapping.bskyIdentifier.toLowerCase());
+      if (!health) return [];
+      const queued = queueCounts.perMapping.find((entry) => entry.mapping_id === mapping.id);
+      return [
+        {
+          mappingId: mapping.id,
+          bskyIdentifier: mapping.bskyIdentifier,
+          twitterUsernames: mapping.twitterUsernames,
+          state: health.state,
+          status: health.status,
+          reason: health.reason,
+          detectedAt: health.detected_at,
+          lastCheckedAt: health.last_checked_at,
+          nextRecheckAt: health.next_recheck_at,
+          queuedTweets: (queued?.pending ?? 0) + (queued?.processing ?? 0),
+        },
+      ];
+    });
+
   res.json({
     lastCheckTime,
     nextCheckTime,
     nextCheckMinutes: Math.ceil(nextRunMs / 60000),
     checkIntervalMinutes: config.checkIntervalMinutes,
+    accountAlerts,
     pendingBackfills: scopedPendingBackfills.map((backfill, index) => ({
       ...backfill,
       position: index + 1,
