@@ -28,6 +28,7 @@ import {
   recoverCardData,
 } from './tweet-cards.js';
 import type { MediaEntity, TweetCard, TweetEntities } from './tweet-cards.js';
+import { MAX_VIDEO_DURATION_MS, MAX_VIDEO_UPLOAD_BYTES, selectVideoVariants } from './video-limits.js';
 
 // ESM __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -594,6 +595,14 @@ async function downloadMedia(url: string, maxDurationMs = 120000): Promise<Downl
   };
 }
 
+// Distinguishes "this variant could not be fetched" (retry a smaller one) from
+// "Bluesky refused the video" (every variant fails the same way).
+function isDownloadFailure(err: unknown): boolean {
+  if (axios.isAxiosError(err)) return true;
+  const name = (err as { name?: string } | null)?.name;
+  return name === 'AbortError' || name === 'TimeoutError';
+}
+
 const BLOB_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 
 async function uploadToBluesky(agent: BskyAgent, buffer: Buffer, mimeType: string): Promise<BlobRef> {
@@ -774,8 +783,16 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
   return null;
 }
 
+// 10-minute clips take Bluesky's transcoder far longer than the short ones this
+// used to allow for, so give a job 20 minutes before calling it dead.
+const VIDEO_POLL_INTERVAL_MS = 5000;
+const VIDEO_PROCESSING_TIMEOUT_MS = 20 * 60 * 1000;
+const VIDEO_POLL_MAX_ATTEMPTS = Math.ceil(VIDEO_PROCESSING_TIMEOUT_MS / VIDEO_POLL_INTERVAL_MS);
+const videoProcessingTimeoutError = () =>
+  new Error(`Video processing timed out after ${Math.round(VIDEO_PROCESSING_TIMEOUT_MS / 60000)} minutes.`);
+
 async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<BlobRef> {
-  console.log('[VIDEO] ⏳ Polling for processing completion (this can take a minute)...');
+  console.log('[VIDEO] ⏳ Polling for processing completion (this can take several minutes)...');
   let attempts = 0;
   let blob: BlobRef | undefined;
 
@@ -789,14 +806,14 @@ async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<
       statusResponse = await fetch(statusUrl, { signal: AbortSignal.timeout(30000) });
     } catch (err) {
       console.warn(`[VIDEO] ⚠️ Job status fetch errored (${(err as Error).message}), retrying...`);
-      if (attempts > 60) throw new Error('Video processing timed out after 5 minutes.');
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      if (attempts > VIDEO_POLL_MAX_ATTEMPTS) throw videoProcessingTimeoutError();
+      await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL_MS));
       continue;
     }
     if (!statusResponse.ok) {
       console.warn(`[VIDEO] ⚠️ Job status fetch failed (${statusResponse.status}), retrying...`);
-      if (attempts > 60) throw new Error('Video processing timed out after 5 minutes.');
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      if (attempts > VIDEO_POLL_MAX_ATTEMPTS) throw videoProcessingTimeoutError();
+      await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL_MS));
       continue;
     }
 
@@ -813,12 +830,11 @@ async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<
       throw new Error(`Video processing failed: ${statusData.jobStatus.error || 'Unknown error'}`);
     } else {
       // Wait before next poll
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL_MS));
     }
 
-    if (attempts > 60) {
-      // ~5 minute timeout
-      throw new Error('Video processing timed out after 5 minutes.');
+    if (attempts > VIDEO_POLL_MAX_ATTEMPTS) {
+      throw videoProcessingTimeoutError();
     }
   }
   return blob!;
@@ -1677,99 +1693,117 @@ async function processTweets(
       } else if (media.type === 'video' || media.type === 'animated_gif') {
         const variants = media.video_info?.variants || [];
         const duration = media.video_info?.duration_millis || 0;
+        const linkBackToTweet = () => {
+          const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
+          if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
+        };
 
-        if (duration > 180000) {
-          // 3 minutes
-          const reason = `Video is ${(duration / 1000).toFixed(1)}s, over Bluesky's 180s limit; linked back to the tweet instead.`;
+        if (duration > MAX_VIDEO_DURATION_MS) {
+          const limitSeconds = Math.round(MAX_VIDEO_DURATION_MS / 1000);
+          const reason = `Video is ${(duration / 1000).toFixed(1)}s, over Bluesky's ${limitSeconds}s limit; linked back to the tweet instead.`;
           logEvent({
             level: 'info',
             stage: 'media',
             event: 'video.too-long',
             message: `Tweet ${tweetId}: ${reason}`,
             twitterId: tweetId,
-            detail: { durationMs: duration, limitMs: 180000 },
+            detail: { durationMs: duration, limitMs: MAX_VIDEO_DURATION_MS },
             ...logScope,
           });
           droppedMedia.push({ type: 'video', reason });
-          const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
-          if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
+          linkBackToTweet();
           continue;
         }
 
-        const mp4s = variants
-          .filter((v) => v.content_type === 'video/mp4')
-          .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+        // Best-quality-first, minus the variants a 10-minute clip would blow the
+        // size ceiling with. Each is tried in turn so an oversized download steps
+        // down a rung instead of dropping the video entirely.
+        const candidates = selectVideoVariants(variants, duration);
 
-        if (mp4s.length > 0) {
-          const firstVariant = mp4s[0];
-          if (firstVariant) {
-            const videoUrl = firstVariant.url;
+        if (candidates.length > 0) {
+          let uploaded = false;
+          let lastFailure: { url: string; reason: string } | undefined;
+
+          for (const [index, variant] of candidates.entries()) {
+            const videoUrl = variant.url;
+            const hasFallbackVariant = index < candidates.length - 1;
             try {
               console.log(`[${twitterUsername}] 📥 Downloading video: ${videoUrl}`);
               updateAppStatus({ message: `Downloading video: ${path.basename(videoUrl)}` });
-              const { buffer, mimeType } = await downloadMedia(videoUrl, 30 * 60 * 1000);
+              const { buffer } = await downloadMedia(videoUrl, 30 * 60 * 1000);
 
-              // Bluesky accepts videos up to 300MB; stay slightly under for safety
-              // (280MiB = ~293.6M bytes, under the limit on either MB interpretation).
-              if (buffer.length <= 280 * 1024 * 1024) {
-                const filename = videoUrl.split('/').pop() || 'video.mp4';
-                if (dryRun) {
-                  console.log(
-                    `[${twitterUsername}] 🧪 [DRY RUN] Would upload video: ${filename} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`,
-                  );
-                  videoBlob = {
-                    ref: { toString: () => 'mock-video-blob' },
-                    mimeType: 'video/mp4',
-                    size: buffer.length,
-                  } as any;
-                } else {
-                  updateAppStatus({ message: 'Uploading video to Bluesky...' });
-                  videoBlob = await uploadVideoToBluesky(agent, buffer, filename);
-                }
-                videoAspectRatio = aspectRatio;
-                console.log(`[${twitterUsername}] ✅ Video upload process complete.`);
-                break; // Prioritize first video
+              if (buffer.length > MAX_VIDEO_UPLOAD_BYTES) {
+                const limitMb = Math.round(MAX_VIDEO_UPLOAD_BYTES / 1024 / 1024);
+                const sizeReason = `Video is ${(buffer.length / 1024 / 1024).toFixed(2)}MB, over the ${limitMb}MB upload ceiling.`;
+                logEvent({
+                  level: 'info',
+                  stage: 'media',
+                  event: 'video.too-large',
+                  message: `Tweet ${tweetId}: ${sizeReason}${hasFallbackVariant ? ' Trying a lower-bitrate variant.' : ' Linked back to the tweet instead.'}`,
+                  twitterId: tweetId,
+                  detail: { bytes: buffer.length, limitBytes: MAX_VIDEO_UPLOAD_BYTES, videoUrl },
+                  ...logScope,
+                });
+                lastFailure = {
+                  url: videoUrl,
+                  reason: `${sizeReason} Linked back to the tweet instead.`,
+                };
+                continue;
               }
 
-              const sizeReason = `Video is ${(buffer.length / 1024 / 1024).toFixed(2)}MB, over the 280MB upload ceiling; linked back to the tweet instead.`;
-              logEvent({
-                level: 'info',
-                stage: 'media',
-                event: 'video.too-large',
-                message: `Tweet ${tweetId}: ${sizeReason}`,
-                twitterId: tweetId,
-                detail: { bytes: buffer.length, limitBytes: 280 * 1024 * 1024 },
-                ...logScope,
-              });
-              droppedMedia.push({ type: 'video', url: videoUrl, reason: sizeReason });
-              const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
-              if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
+              const filename = videoUrl.split('/').pop() || 'video.mp4';
+              if (dryRun) {
+                console.log(
+                  `[${twitterUsername}] 🧪 [DRY RUN] Would upload video: ${filename} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`,
+                );
+                videoBlob = {
+                  ref: { toString: () => 'mock-video-blob' },
+                  mimeType: 'video/mp4',
+                  size: buffer.length,
+                } as any;
+              } else {
+                updateAppStatus({ message: 'Uploading video to Bluesky...' });
+                videoBlob = await uploadVideoToBluesky(agent, buffer, filename);
+              }
+              videoAspectRatio = aspectRatio;
+              uploaded = true;
+              console.log(`[${twitterUsername}] ✅ Video upload process complete.`);
+              break;
             } catch (err) {
               const videoDetail = toErrorDetail(err);
               // VIDEO_FALLBACK_503 is Bluesky's video service being busy — an
               // expected condition with a working fallback, so it stays at info.
               const expected = videoDetail.message === 'VIDEO_FALLBACK_503';
+              const willRetry = isDownloadFailure(err) && hasFallbackVariant;
+              const outcome = willRetry ? 'trying a lower-bitrate variant' : 'linked back to the tweet instead';
               logEvent({
                 level: expected ? 'info' : 'warn',
                 stage: 'media',
                 event: expected ? 'video.service-unavailable' : 'video.upload.failed',
                 message: expected
-                  ? `Tweet ${tweetId}: Bluesky's video service was unavailable; linked back to the tweet instead.`
-                  : `Tweet ${tweetId}: video upload failed; linked back to the tweet instead.`,
+                  ? `Tweet ${tweetId}: Bluesky's video service was unavailable; ${outcome}.`
+                  : `Tweet ${tweetId}: video upload failed; ${outcome}.`,
                 twitterId: tweetId,
                 error: expected ? undefined : videoDetail,
                 detail: { videoUrl },
                 ...logScope,
               });
-              droppedMedia.push({
-                type: 'video',
+              lastFailure = {
                 url: videoUrl,
                 reason: expected ? 'Bluesky video service unavailable' : describeErrorDetail(videoDetail),
-              });
-              const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
-              if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
+              };
+              // A download that never completed can still succeed at a lower
+              // bitrate; anything past the download (upload, transcode, auth)
+              // will fail the same way for every variant, so stop there.
+              if (!willRetry) break;
             }
           }
+
+          if (uploaded) break; // Prioritize first video
+          if (lastFailure) {
+            droppedMedia.push({ type: 'video', url: lastFailure.url, reason: lastFailure.reason });
+          }
+          linkBackToTweet();
         }
       }
     }

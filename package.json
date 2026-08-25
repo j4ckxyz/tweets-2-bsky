@@ -17,6 +17,7 @@
     "test:twitter-metadata": "bun scripts/test-twitter-profile-metadata.ts",
     "test:twitter-fetch": "bun scripts/test-twitter-fetch.ts",
     "test:ad-tweet": "bun scripts/test-ad-tweet.ts",
+    "test:video-limits": "bun scripts/test-video-limits.ts",
     "start": "bun dist/index.js",
     "cli": "bun src/cli.ts",
     "dev": "bun src/index.ts",
