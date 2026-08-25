@@ -130,6 +130,8 @@ console.log('Test 4: Aspect Ratio Calculation');
 }
 
 // Test 5: Video Variant Sorting
+// Duration-aware selection itself lives in src/video-limits.ts and is covered by
+// scripts/test-video-limits.ts; this only guards the best-first ranking.
 console.log('Test 5: Video Variant Sorting (Highest Quality First)');
 {
   const variants = [
