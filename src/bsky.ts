@@ -1,5 +1,7 @@
 import { BskyAgent } from '@atproto/api';
 import { getConfig } from './config-manager.js';
+import type { AccountHealthState } from './db.js';
+import { accountHealthService } from './db.js';
 import { logEvent } from './event-log.js';
 
 interface CachedAgent {
@@ -25,6 +27,65 @@ export function invalidateAgent(bskyIdentifier: string, bskyServiceUrl?: string)
   activeAgents.delete(cacheKeyFor(bskyIdentifier, serviceUrl));
 }
 
+// A suspended, taken-down or deactivated account rejects every login in exactly
+// the same way, forever. Recognising that is what stops the workers from
+// retrying several times a second — which on its own gets the handle rate
+// limited on top of being down.
+const DOWN_STATE_LABELS: Record<AccountHealthState, string> = {
+  takendown: 'has been taken down by Bluesky',
+  suspended: 'has been suspended by Bluesky',
+  deactivated: 'has been deactivated',
+  unknown: 'is no longer hosted by its PDS',
+};
+
+export function downStateFromStatus(status?: string): AccountHealthState | null {
+  if (status === 'takendown' || status === 'suspended' || status === 'deactivated') return status;
+  return status ? 'unknown' : null;
+}
+
+/** Classifies a failed login as an account-level outage, or null if it isn't one. */
+export function downStateFromLoginError(error: Record<string, any>): AccountHealthState | null {
+  const code = typeof error?.error === 'string' ? error.error : undefined;
+  if (code === 'AccountTakedown') return 'takendown';
+  if (code === 'AccountDeactivated') return 'deactivated';
+  if (code === 'AccountSuspended') return 'suspended';
+  const message = typeof error?.message === 'string' ? error.message.toLowerCase() : '';
+  if (message.includes('taken down')) return 'takendown';
+  if (message.includes('suspended')) return 'suspended';
+  if (message.includes('deactivated')) return 'deactivated';
+  return null;
+}
+
+function recordAccountDown(
+  mapping: { bskyIdentifier: string },
+  serviceUrl: string,
+  state: AccountHealthState,
+  status: string | undefined,
+  detail: string,
+): void {
+  const reason = `${mapping.bskyIdentifier} ${DOWN_STATE_LABELS[state]}.`;
+  const { firstDetection, row } = accountHealthService.markDown({
+    bskyIdentifier: mapping.bskyIdentifier,
+    serviceUrl,
+    state,
+    status,
+    reason,
+  });
+  logEvent({
+    // Only the first detection is loud. After that it is a known condition
+    // being re-confirmed on a slow schedule, not news.
+    level: firstDetection ? 'error' : 'warn',
+    stage: 'bluesky',
+    event: 'account.down',
+    message:
+      `${reason} Posting to it is paused until it works again; queued tweets stay queued. ` +
+      `Next automatic check ${new Date(row.next_recheck_at).toISOString()}.`,
+    bskyIdentifier: mapping.bskyIdentifier,
+    detail: { state, status, serviceUrl, detail, checks: row.checks, nextRecheckAt: row.next_recheck_at },
+    console: firstDetection,
+  });
+}
+
 export async function getAgent(mapping: {
   bskyIdentifier: string;
   bskyPassword: string;
@@ -37,11 +98,52 @@ export async function getAgent(mapping: {
     return existing.agent;
   }
 
+  // Known-down account, not yet due for its next check: fail without touching
+  // the network. Every caller already handles a null agent by leaving its work
+  // queued, so this pauses posting rather than losing anything.
+  const health = accountHealthService.get(mapping.bskyIdentifier);
+  if (health && health.next_recheck_at > Date.now()) {
+    logEvent({
+      level: 'debug',
+      stage: 'bluesky',
+      event: 'login.skipped',
+      message: `Skipped signing in to ${mapping.bskyIdentifier}: ${health.reason}`,
+      bskyIdentifier: mapping.bskyIdentifier,
+      detail: { state: health.state, nextRecheckAt: health.next_recheck_at, detectedAt: health.detected_at },
+      console: false,
+    });
+    return null;
+  }
+
   const startedAt = Date.now();
   const agent = new BskyAgent({ service: serviceUrl });
   try {
     await agent.login({ identifier: mapping.bskyIdentifier, password: mapping.bskyPassword });
+
+    // A deactivated (and sometimes a suspended) account still hands out a
+    // session — it just refuses every write. `active: false` is the only signal
+    // that separates it from a healthy login.
+    if (agent.session && agent.session.active === false) {
+      const state = downStateFromStatus(agent.session.status) ?? 'unknown';
+      activeAgents.delete(cacheKey);
+      recordAccountDown(mapping, serviceUrl, state, agent.session.status, 'createSession returned active: false');
+      return null;
+    }
+
     activeAgents.set(cacheKey, { agent, loggedInAt: Date.now() });
+    if (health) {
+      accountHealthService.markHealthy(mapping.bskyIdentifier);
+      logEvent({
+        level: 'info',
+        stage: 'bluesky',
+        event: 'account.recovered',
+        message:
+          `${mapping.bskyIdentifier} is usable again after ${health.state}; ` +
+          'posting resumes with everything that stayed queued.',
+        bskyIdentifier: mapping.bskyIdentifier,
+        detail: { previousState: health.state, downSinceMs: Date.now() - health.detected_at },
+      });
+    }
     logEvent({
       level: 'info',
       stage: 'bluesky',
@@ -56,6 +158,22 @@ export async function getAgent(mapping: {
   } catch (err) {
     const error = err as Record<string, any>;
     const status = error?.status ?? error?.response?.status;
+
+    // An account-level outage is not a login problem to retry — it is a state
+    // to record, so the workers stop and the dashboard can say why.
+    const downState = downStateFromLoginError(error);
+    if (downState) {
+      activeAgents.delete(cacheKey);
+      recordAccountDown(
+        mapping,
+        serviceUrl,
+        downState,
+        undefined,
+        typeof error?.message === 'string' ? error.message : String(err),
+      );
+      return null;
+    }
+
     // Bluesky returns 401 for a wrong app password and 400 with
     // AuthFactorTokenRequired when 2FA is on — very different fixes, so name
     // them rather than logging one generic "login failed".

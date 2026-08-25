@@ -354,6 +354,22 @@ interface QueueFailuresResponse {
   items: QueueFailureItem[];
 }
 
+// A Bluesky account the workers cannot post to at all: taken down, suspended or
+// deactivated. Distinct from a failed tweet — nothing here is retryable until
+// the account itself comes back.
+interface AccountAlert {
+  mappingId: string;
+  bskyIdentifier: string;
+  twitterUsernames: string[];
+  state: 'takendown' | 'suspended' | 'deactivated' | 'unknown';
+  status?: string;
+  reason: string;
+  detectedAt: number;
+  lastCheckedAt: number;
+  nextRecheckAt: number;
+  queuedTweets: number;
+}
+
 interface StatusResponse {
   lastCheckTime: number;
   nextCheckTime: number;
@@ -363,6 +379,7 @@ interface StatusResponse {
   currentStatus: StatusState;
   activeJobs?: ActiveJobView[];
   queue?: QueueSummary;
+  accountAlerts?: AccountAlert[];
 }
 
 interface UserPermissions {
@@ -1870,6 +1887,7 @@ function App() {
   const activeJobs = status?.activeJobs ?? [];
   const currentStatus = status?.currentStatus;
   const postQueue = status?.queue;
+  const accountAlerts = status?.accountAlerts ?? [];
   const queuedPostCount = (postQueue?.pending ?? 0) + (postQueue?.processing ?? 0);
   const latestActivity = recentActivity[0];
   const selectedMirrorPreview = selectedMirrorSourceUsername
@@ -2542,6 +2560,19 @@ function App() {
       await fetchStatus();
     } catch (error) {
       handleAuthFailure(error, 'Failed to clear backfill queue.');
+    }
+  };
+
+  const recheckAccount = async (mappingId: string, bskyIdentifier: string) => {
+    if (!authHeaders) {
+      return;
+    }
+    try {
+      const response = await axios.post(`/api/mappings/${mappingId}/recheck-account`, {}, { headers: authHeaders });
+      showNotice('success', response.data?.message || `Will retry ${bskyIdentifier} on the next post batch.`);
+      await fetchStatus();
+    } catch (error) {
+      handleAuthFailure(error, `Failed to schedule a recheck for ${bskyIdentifier}.`);
     }
   };
 
@@ -5038,6 +5069,47 @@ function App() {
               >
                 {notice.message}
               </div>
+            ) : null}
+
+            {accountAlerts.length > 0 ? (
+              <Card className="mb-6 border-red-500/40">
+                <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2.5">
+                  <p className="text-sm font-semibold text-red-700 dark:text-red-300">
+                    {accountAlerts.length === 1
+                      ? '1 Bluesky account is unavailable'
+                      : `${accountAlerts.length} Bluesky accounts are unavailable`}
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Posting to these is paused. Nothing is lost — their tweets stay queued until the account works
+                    again.
+                  </p>
+                </div>
+                <ul className="divide-y divide-border">
+                  {accountAlerts.map((alert) => (
+                    <li
+                      key={alert.mappingId}
+                      className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-sm"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{alert.reason}</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {alert.twitterUsernames.length > 0 ? `@${alert.twitterUsernames.join(', @')} · ` : ''}
+                          {alert.queuedTweets} tweet{alert.queuedTweets === 1 ? '' : 's'} waiting · detected{' '}
+                          {formatRelativeTime(alert.detectedAt)} · next automatic check{' '}
+                          {formatRelativeTime(alert.nextRecheckAt)}
+                        </p>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => recheckAccount(alert.mappingId, alert.bskyIdentifier)}
+                      >
+                        Check again
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </Card>
             ) : null}
 
             {activeJobs.length > 0 ||

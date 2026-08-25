@@ -219,6 +219,131 @@ for (const [column, definition] of [
   }
 }
 
+// --- Account health ---
+// Why a Bluesky account is unusable, and when to look again. A taken-down or
+// deactivated account fails every login identically and forever; without this
+// the workers re-login several times a second (which is also how an account
+// gets itself rate limited on top of being down). Keyed by identifier rather
+// than mapping id so several mappings pointing at the same handle share one
+// verdict.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS account_health (
+    bsky_identifier TEXT PRIMARY KEY,
+    service_url TEXT NOT NULL,
+    state TEXT NOT NULL,
+    status TEXT,
+    reason TEXT NOT NULL,
+    detected_at INTEGER NOT NULL,
+    last_checked_at INTEGER NOT NULL,
+    next_recheck_at INTEGER NOT NULL,
+    checks INTEGER NOT NULL DEFAULT 1
+  );
+`);
+
+/** Hosting states that make an account unusable until a human fixes it. */
+export type AccountHealthState = 'takendown' | 'suspended' | 'deactivated' | 'unknown';
+
+export interface AccountHealthRow {
+  bsky_identifier: string;
+  service_url: string;
+  state: AccountHealthState;
+  status?: string;
+  reason: string;
+  detected_at: number;
+  last_checked_at: number;
+  next_recheck_at: number;
+  checks: number;
+}
+
+// A takedown is usually permanent and a deactivation needs someone to click
+// "reactivate", so rechecks stretch out fast: 1h, 6h, then daily.
+const ACCOUNT_RECHECK_DELAYS_MS = [60 * 60 * 1000, 6 * 60 * 60 * 1000, 24 * 60 * 60 * 1000];
+
+const accountRecheckDelayMs = (checks: number): number =>
+  ACCOUNT_RECHECK_DELAYS_MS[Math.min(checks, ACCOUNT_RECHECK_DELAYS_MS.length) - 1] ??
+  ACCOUNT_RECHECK_DELAYS_MS[ACCOUNT_RECHECK_DELAYS_MS.length - 1]!;
+
+export const accountHealthService = {
+  get(bskyIdentifier: string): AccountHealthRow | null {
+    const row = db
+      .prepare('SELECT * FROM account_health WHERE bsky_identifier = ?')
+      .get(bskyIdentifier.toLowerCase()) as AccountHealthRow | undefined;
+    return row ? { ...row, status: row.status ?? undefined } : null;
+  },
+
+  list(): AccountHealthRow[] {
+    return (db.prepare('SELECT * FROM account_health ORDER BY detected_at ASC').all() as AccountHealthRow[]).map(
+      (row) => ({ ...row, status: row.status ?? undefined }),
+    );
+  },
+
+  /** Identifiers that must not be logged into yet. Excludes ones due a recheck. */
+  blockedIdentifiers(now = Date.now()): Set<string> {
+    const rows = db.prepare('SELECT bsky_identifier FROM account_health WHERE next_recheck_at > ?').all(now) as {
+      bsky_identifier: string;
+    }[];
+    return new Set(rows.map((row) => row.bsky_identifier));
+  },
+
+  /**
+   * Records an account as down. `detected_at` survives repeat calls so the
+   * dashboard can say how long it has been like this; every confirmation pushes
+   * the next recheck further out.
+   */
+  markDown(input: {
+    bskyIdentifier: string;
+    serviceUrl: string;
+    state: AccountHealthState;
+    status?: string;
+    reason: string;
+  }): { firstDetection: boolean; row: AccountHealthRow } {
+    const identifier = input.bskyIdentifier.toLowerCase();
+    const now = Date.now();
+    const existing = this.get(identifier);
+    const checks = (existing?.checks ?? 0) + 1;
+    db.prepare(
+      `INSERT INTO account_health
+         (bsky_identifier, service_url, state, status, reason, detected_at, last_checked_at, next_recheck_at, checks)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(bsky_identifier) DO UPDATE SET
+         service_url = excluded.service_url,
+         state = excluded.state,
+         status = excluded.status,
+         reason = excluded.reason,
+         last_checked_at = excluded.last_checked_at,
+         next_recheck_at = excluded.next_recheck_at,
+         checks = excluded.checks`,
+    ).run(
+      identifier,
+      input.serviceUrl,
+      input.state,
+      input.status ?? null,
+      input.reason.slice(0, 1000),
+      existing?.detected_at ?? now,
+      now,
+      now + accountRecheckDelayMs(checks),
+      checks,
+    );
+    return { firstDetection: !existing, row: this.get(identifier)! };
+  },
+
+  /** Clears a recorded outage. Returns the row it cleared, if there was one. */
+  markHealthy(bskyIdentifier: string): AccountHealthRow | null {
+    const identifier = bskyIdentifier.toLowerCase();
+    const existing = this.get(identifier);
+    if (existing) db.prepare('DELETE FROM account_health WHERE bsky_identifier = ?').run(identifier);
+    return existing;
+  },
+
+  /** Makes the next login attempt happen immediately (dashboard "Check again"). */
+  recheckNow(bskyIdentifier: string): boolean {
+    db.prepare('UPDATE account_health SET next_recheck_at = 0 WHERE bsky_identifier = ?').run(
+      bskyIdentifier.toLowerCase(),
+    );
+    return changesCount() > 0;
+  },
+};
+
 export interface ProcessedTweet {
   twitter_id: string;
   twitter_username: string;
