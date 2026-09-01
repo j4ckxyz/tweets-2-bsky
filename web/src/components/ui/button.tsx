@@ -29,13 +29,37 @@ const buttonVariants = cva(
 
 export interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {}
+    VariantProps<typeof buttonVariants> {
+  /**
+   * Render the child element with the button's styling instead of a <button>.
+   * Used for links that should look like buttons: nesting an <a> inside a
+   * <button> is invalid HTML and loses the link's keyboard and context-menu
+   * behaviour.
+   */
+  asChild?: boolean;
+}
 
-const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(({ className, variant, size, type, ...props }, ref) => {
-  return (
-    <button className={cn(buttonVariants({ variant, size, className }))} ref={ref} type={type ?? 'button'} {...props} />
-  );
-});
+const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, type, asChild, children, ...props }, ref) => {
+    const styles = cn(buttonVariants({ variant, size, className }));
+
+    if (asChild && React.isValidElement(children)) {
+      const child = children as React.ReactElement<{ className?: string }>;
+      return React.cloneElement(child, {
+        ...props,
+        ...child.props,
+        className: cn(styles, child.props.className),
+        ref,
+      } as React.Attributes);
+    }
+
+    return (
+      <button className={styles} ref={ref} type={type ?? 'button'} {...props}>
+        {children}
+      </button>
+    );
+  },
+);
 Button.displayName = 'Button';
 
 export { Button, buttonVariants };
