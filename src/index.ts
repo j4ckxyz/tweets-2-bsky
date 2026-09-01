@@ -19,7 +19,11 @@ import { generateAltText, isAltTextConfigured } from './ai-manager.js';
 import { getConfig, saveConfig } from './config-manager.js';
 import type { ErrorDetail } from './event-log.js';
 import { logEvent } from './event-log.js';
+import { planSweep } from './polling.js';
+import type { PreviewRequest, PreviewResult, PreviewTweet } from './preview.js';
+import { setPreviewRunner } from './preview.js';
 import { createTimedFetch, isRetryableScraperError } from './scraper-fetch.js';
+import { splitText } from './text-split.js';
 import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './profile-mirror.js';
 import {
   buildPollNote,
@@ -47,6 +51,10 @@ interface ProcessedTweetEntry {
   migrated?: boolean;
   skipped?: boolean;
   text?: string;
+  /** Epoch ms of the source tweet, paired with postedAt to measure mirror lag. */
+  tweetCreatedAt?: number;
+  /** Epoch ms the mirrored post landed on Bluesky. */
+  postedAt?: number;
 }
 
 interface ProcessedTweetsMap {
@@ -90,7 +98,7 @@ interface ImageEmbed {
   aspectRatio?: AspectRatio;
 }
 
-import { accountHealthService, dbService, postQueueService } from './db.js';
+import { accountHealthService, dbService, postQueueService, sourceActivityService } from './db.js';
 import type { QueueBatch } from './db.js';
 
 // ============================================================================
@@ -171,6 +179,8 @@ function saveProcessedTweet(
     bsky_tail_uri: entry.tail?.uri,
     bsky_tail_cid: entry.tail?.cid,
     status: entry.migrated || (entry.uri && entry.cid) ? 'migrated' : entry.skipped ? 'skipped' : 'failed',
+    tweet_created_at: entry.tweetCreatedAt,
+    posted_at: entry.postedAt,
   });
 }
 
@@ -1035,66 +1045,6 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
   }
 }
 
-function splitText(text: string, limit = 300): string[] {
-  if (text.length <= limit) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  // Reserve space for numbering like " (1/3)" -> approx 7 chars
-  // We apply this reservation to the limit check
-  const effectiveLimit = limit - 8;
-
-  while (remaining.length > 0) {
-    // Every chunk gets a " (i/n)" suffix appended later, so the final chunk
-    // must also respect the reserved-space limit or it would exceed 300 chars.
-    if (remaining.length <= effectiveLimit) {
-      chunks.push(remaining);
-      break;
-    }
-
-    // Smart splitting priority:
-    // 1. Double newline (paragraph)
-    // 2. Sentence end (.!?)
-    // 3. Space
-    // 4. Force split
-
-    let splitIndex = -1;
-
-    // Check paragraphs
-    let checkIndex = remaining.lastIndexOf('\n\n', effectiveLimit);
-    if (checkIndex !== -1) splitIndex = checkIndex;
-
-    // Check sentences
-    if (splitIndex === -1) {
-      // Look for punctuation followed by space
-      const sentenceMatches = Array.from(remaining.substring(0, effectiveLimit).matchAll(/[.!?]\s/g));
-      if (sentenceMatches.length > 0) {
-        const lastMatch = sentenceMatches[sentenceMatches.length - 1];
-        if (lastMatch && lastMatch.index !== undefined) {
-          splitIndex = lastMatch.index + 1; // Include punctuation
-        }
-      }
-    }
-
-    // Check spaces
-    if (splitIndex === -1) {
-      checkIndex = remaining.lastIndexOf(' ', effectiveLimit);
-      if (checkIndex !== -1) splitIndex = checkIndex;
-    }
-
-    // Force split if no good break point found
-    if (splitIndex === -1) {
-      splitIndex = effectiveLimit;
-    }
-
-    chunks.push(remaining.substring(0, splitIndex).trim());
-    remaining = remaining.substring(splitIndex).trim();
-  }
-
-  return chunks;
-}
-
 function utf16IndexToUtf8Index(text: string, index: number): number {
   return Buffer.byteLength(text.slice(0, index), 'utf8');
 }
@@ -1266,8 +1216,31 @@ export interface ProcessContext {
   outcomes?: Map<string, TweetOutcome>;
   /** Fired as soon as the PDS accepts a tweet's first chunk. */
   onPosted?: (twitterId: string, uri: string, cid: string) => void;
+  /**
+   * Fired once a tweet has been composed, before it is posted. The dry-run
+   * preview reads this so what the dashboard shows is the real composer's
+   * output rather than a second implementation of it.
+   */
+  onComposed?: (preview: ComposedTweet) => void;
+  /**
+   * Skip downloading media bytes, recording only what media the tweet has.
+   * The preview needs to know a tweet carries a video, not to pull 300MB of it
+   * on the way to a mock upload.
+   */
+  skipMediaDownload?: boolean;
   mappingId?: string;
   jobId?: string;
+}
+
+/** A composed tweet as it would be posted: the thread's chunks and its embeds. */
+export interface ComposedTweet {
+  twitterId: string;
+  chunks: string[];
+  images: number;
+  video: boolean;
+  quote: boolean;
+  linkCard: boolean;
+  isReply: boolean;
 }
 
 function recordOutcome(context: ProcessContext | undefined, twitterId: string, outcome: TweetOutcome): void {
@@ -1659,6 +1632,14 @@ async function processTweets(
       if (media.type === 'photo') {
         const url = media.media_url_https;
         if (!url) continue;
+        if (context?.skipMediaDownload) {
+          images.push({
+            alt: media.ext_alt_text || 'Image from Twitter',
+            image: { ref: { toString: () => 'preview-blob' }, mimeType: 'image/jpeg', size: 0 } as any,
+            aspectRatio,
+          });
+          continue;
+        }
         try {
           const highQualityUrl = url.includes('?') ? url.replace('?', ':orig?') : `${url}:orig`;
           console.log(`[${twitterUsername}] 📥 Downloading image (high quality): ${path.basename(highQualityUrl)}`);
@@ -1753,6 +1734,11 @@ async function processTweets(
         // size ceiling with. Each is tried in turn so an oversized download steps
         // down a rung instead of dropping the video entirely.
         const candidates = selectVideoVariants(variants, duration);
+
+        if (candidates.length > 0 && context?.skipMediaDownload) {
+          videoBlob = { ref: { toString: () => 'preview-blob' }, mimeType: 'video/mp4', size: 0 } as any;
+          continue;
+        }
 
         if (candidates.length > 0) {
           let uploaded = false;
@@ -1882,7 +1868,9 @@ async function processTweets(
           console.log(`[${twitterUsername}] 🔗 Quoted tweet is external: ${externalQuoteUrl}`);
 
           // Try to capture screenshot for external QTs if we have space for images
-          if (images.length < 4 && !videoBlob) {
+          // Screenshotting a quoted tweet launches a headless browser, which is
+          // far too heavy for a preview — the composed text is what matters there.
+          if (images.length < 4 && !videoBlob && !context?.skipMediaDownload) {
             const ssResult = await captureTweetScreenshot(externalQuoteUrl);
             if (ssResult) {
               try {
@@ -2009,6 +1997,15 @@ async function processTweets(
     }
 
     const chunks = splitText(text);
+    context?.onComposed?.({
+      twitterId: tweetId,
+      chunks,
+      images: images.length,
+      video: Boolean(videoBlob),
+      quote: Boolean(quoteEmbed),
+      linkCard: Boolean(linkCard),
+      isReply,
+    });
     logEvent({
       level: 'debug',
       stage: 'post',
@@ -2038,12 +2035,7 @@ async function processTweets(
     let lastChunkInfo: { uri: string; cid: string; root?: { uri: string; cid: string } } | null = null;
 
     for (let i = 0; i < chunks.length; i++) {
-      let chunk = chunks[i] as string;
-
-      // Add (i/n) if split
-      if (chunks.length > 1) {
-        chunk += ` (${i + 1}/${chunks.length})`;
-      }
+      const chunk = chunks[i] as string;
 
       console.log(`[${twitterUsername}] 📤 Posting chunk ${i + 1}/${chunks.length}...`);
       updateAppStatus({ message: `Posting chunk ${i + 1}/${chunks.length}...` });
@@ -2264,12 +2256,19 @@ async function processTweets(
 
     // Save to DB and Map
     if (firstChunkInfo && lastChunkInfo) {
+      // Both timestamps are stored so the dashboard can report real mirror lag.
+      // The tweet's own time is only recorded when Twitter gave us a parseable
+      // one; a missing value stays undefined rather than defaulting to now,
+      // which would report a zero delay that never happened.
+      const parsedTweetCreatedAt = tweet.created_at ? Date.parse(tweet.created_at) : Number.NaN;
       const entry: ProcessedTweetEntry = {
         uri: firstChunkInfo.uri,
         cid: firstChunkInfo.cid,
         root: firstChunkInfo.root,
         tail: { uri: lastChunkInfo.uri, cid: lastChunkInfo.cid }, // Save tail!
         text: tweetText,
+        tweetCreatedAt: Number.isFinite(parsedTweetCreatedAt) ? parsedTweetCreatedAt : undefined,
+        postedAt: Date.now(),
       };
 
       if (!dryRun) {
@@ -2476,23 +2475,63 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
 
   const fetchTimeoutMs = envInt('SWEEP_FETCH_TIMEOUT_MS', 180_000, 30_000, 1_800_000);
   const startedAt = Date.now();
+
+  // Adaptive polling: accounts that have been silent for a while earn a longer
+  // minimum interval, so each sweep spends its fetch budget on the accounts
+  // actually posting. Set ADAPTIVE_POLLING=0 to check everything every sweep.
+  const adaptivePolling = process.env.ADAPTIVE_POLLING !== '0';
+  // Mappings come and go; without this the activity table keeps a row for every
+  // source account ever mirrored.
+  sourceActivityService.pruneMissing(accounts.map((account) => account.twitterUsername));
+  const activity = sourceActivityService.getAll();
+  const plan = adaptivePolling
+    ? planSweep(
+        accounts,
+        (account) => activity.get(account.twitterUsername.toLowerCase()) ?? {},
+        startedAt,
+      )
+    : { due: accounts, skipped: [], tierCounts: {} };
+  const dueAccounts = plan.due;
+
   logEvent({
     level: 'info',
     stage: 'sweep',
     event: 'sweep.start',
-    message: `Checking ${accounts.length} source account(s) with a concurrency of ${FETCH_CONCURRENCY}.`,
-    detail: { accounts: accounts.length, concurrency: FETCH_CONCURRENCY, fetchTimeoutMs },
+    message: adaptivePolling
+      ? `Checking ${dueAccounts.length} of ${accounts.length} source account(s) with a concurrency of ${FETCH_CONCURRENCY}; ${plan.skipped.length} not due yet.`
+      : `Checking ${accounts.length} source account(s) with a concurrency of ${FETCH_CONCURRENCY}.`,
+    detail: {
+      accounts: dueAccounts.length,
+      totalAccounts: accounts.length,
+      skipped: plan.skipped.length,
+      tiers: plan.tierCounts,
+      adaptivePolling,
+      concurrency: FETCH_CONCURRENCY,
+      fetchTimeoutMs,
+    },
   });
+
+  if (dueAccounts.length === 0) {
+    logEvent({
+      level: 'info',
+      stage: 'sweep',
+      event: 'sweep.completed',
+      message: 'No source accounts were due for a check this sweep.',
+      durationMs: Date.now() - startedAt,
+      detail: { accountsChecked: 0, queued: 0, skipped: plan.skipped.length },
+    });
+    return 0;
+  }
 
   let cursor = 0;
   let enqueuedTotal = 0;
-  const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, accounts.length) }, async (_, slot) => {
+  const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, dueAccounts.length) }, async (_, slot) => {
     const sessionKey = `sweep-${slot + 1}`;
     while (true) {
       const index = cursor;
       cursor += 1;
-      if (index >= accounts.length) break;
-      const ref = accounts[index];
+      if (index >= dueAccounts.length) break;
+      const ref = dueAccounts[index];
       if (!ref) continue;
       const { mapping, twitterUsername } = ref;
       const checkJobId = `check:${mapping.id}:${twitterUsername.toLowerCase()}`;
@@ -2521,6 +2560,9 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
           inserted = enqueueTweetsForMapping(mapping, twitterUsername, fresh, 'scheduled');
           enqueuedTotal += inserted;
         }
+        // Drives the next sweep's tiering. `fresh` rather than `inserted`: a
+        // tweet deduped against the queue still proves the account is posting.
+        sourceActivityService.recordCheck(twitterUsername, fresh.length > 0);
         logEvent({
           level: 'info',
           stage: 'sweep',
@@ -2572,11 +2614,13 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
     stage: 'sweep',
     event: 'sweep.completed',
     message:
-      `Swept ${accounts.length} account(s) in ${formatDurationMs(Date.now() - startedAt)}; queued ${enqueuedTotal} new tweet(s). ` +
+      `Swept ${dueAccounts.length} of ${accounts.length} account(s) in ${formatDurationMs(Date.now() - startedAt)}; queued ${enqueuedTotal} new tweet(s). ` +
       `Queue now: ${counts.ready} ready, ${counts.backoff} waiting on retry backoff, ${counts.processing} posting, ${counts.failed} parked as failed.`,
     durationMs: Date.now() - startedAt,
     detail: {
-      accountsChecked: accounts.length,
+      accountsChecked: dueAccounts.length,
+      totalAccounts: accounts.length,
+      skipped: plan.skipped.length,
       queued: enqueuedTotal,
       queue: {
         ready: counts.ready,
@@ -4116,6 +4160,69 @@ import {
 } from './server.js';
 import type { PendingBackfill } from './server.js';
 
+/**
+ * Compose the most recent tweets for an account exactly as the mirror would,
+ * without posting anything. Runs the real processTweets path with dryRun set,
+ * against a mock agent so no blob is uploaded and no session is needed — the
+ * point is to answer "what would this mirror look like?" before committing to
+ * it, and a preview that used its own compose logic would eventually lie.
+ */
+async function previewTweetsForAccount(request: PreviewRequest): Promise<PreviewResult> {
+  const { twitterUsername, mappingId, limit } = request;
+  const config = getConfig();
+  const mapping = mappingId ? config.mappings.find((entry) => entry.id === mappingId) : undefined;
+  const bskyIdentifier = mapping?.bskyIdentifier ?? 'preview.invalid';
+
+  const tweets = await fetchUserTweets(twitterUsername, limit, undefined, 'preview');
+  if (tweets.length === 0) {
+    return { twitterUsername, fetched: 0, tweets: [] };
+  }
+
+  // A mock agent keeps the preview read-only: uploads return a fake blob ref and
+  // nothing is ever written to Bluesky. dryRun also stops processTweets touching
+  // the processed-tweets table, so previewing does not mark anything as mirrored.
+  // biome-ignore lint/suspicious/noExplicitAny: mock agent, same shape as the dry-run import path
+  const mockAgent: any = {
+    post: async () => ({ uri: 'at://did:plc:preview/app.bsky.feed.post/preview', cid: 'preview-cid' }),
+    uploadBlob: async () => ({ data: { blob: { ref: { toString: () => 'preview-blob' } } } }),
+    session: { did: 'did:plc:preview' },
+    com: { atproto: { repo: { describeRepo: async () => ({ data: {} }) } } },
+  };
+
+  const composed = new Map<string, ComposedTweet>();
+  const outcomes = new Map<string, TweetOutcome>();
+  await processTweets(mockAgent, twitterUsername, bskyIdentifier, tweets, true, undefined, undefined, 'preview', {
+    outcomes,
+    onComposed: (preview) => composed.set(preview.twitterId, preview),
+    skipMediaDownload: true,
+    mappingId: mapping?.id,
+  });
+
+  const previews: PreviewTweet[] = tweets.map((tweet) => {
+    const twitterId = String(tweet.id_str || tweet.id || '');
+    const entry = composed.get(twitterId);
+    const outcome = outcomes.get(twitterId);
+    return {
+      twitterId,
+      originalText: tweet.text ?? '',
+      createdAt: tweet.created_at,
+      chunks: (entry?.chunks ?? []).map((text) => ({ text, length: text.length })),
+      images: entry?.images ?? 0,
+      video: entry?.video ?? false,
+      quote: entry?.quote ?? false,
+      linkCard: entry?.linkCard ?? false,
+      isReply: entry?.isReply ?? false,
+      // A tweet with no composed output was filtered out — a retweet, a reply to
+      // someone else, an empty shell. Saying which is more useful than omitting it.
+      skipped: entry
+        ? undefined
+        : { stage: outcome?.stage ?? 'filter', reason: outcome?.reason ?? 'This tweet would not be mirrored.' },
+    };
+  });
+
+  return { twitterUsername, fetched: tweets.length, tweets: previews };
+}
+
 async function main(): Promise<void> {
   const program = new Command();
   program
@@ -4137,6 +4244,10 @@ async function main(): Promise<void> {
   const config = getConfig();
 
   await migrateJsonToSqlite();
+
+  // The dashboard's preview runs the real composer through this, so what it
+  // shows is what would actually be posted.
+  setPreviewRunner(previewTweetsForAccount);
 
   if (!options.web) {
     console.log('🌐 Web interface is disabled.');

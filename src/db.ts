@@ -160,6 +160,30 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_bsky_identifier ON processed_tweets(bsky_identifier);
 `);
 
+// --- Mirror lag ---
+// `created_at` records when the row was written, which is not the same thing as
+// how long a tweet waited to appear on Bluesky. Storing the source tweet's own
+// timestamp alongside the moment we posted makes the delay a plain subtraction,
+// so the dashboard can show real per-account lag instead of an eyeballed guess
+// from the log. Added as nullable columns: rows written before this stays NULL
+// and are simply excluded from the averages.
+const processedColumns = new Set(
+  (db.prepare('PRAGMA table_info(processed_tweets)').all() as any[]).map((col) => col.name),
+);
+for (const [column, definition] of [
+  ['tweet_created_at', 'INTEGER'],
+  ['posted_at', 'INTEGER'],
+] as const) {
+  if (!processedColumns.has(column)) {
+    db.exec(`ALTER TABLE processed_tweets ADD COLUMN ${column} ${definition};`);
+  }
+}
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_processed_lag
+    ON processed_tweets(bsky_identifier, posted_at)
+    WHERE posted_at IS NOT NULL AND tweet_created_at IS NOT NULL;
+`);
+
 // --- Post queue ---
 // Durable buffer between the Twitter fetch sweep and the Bluesky post workers.
 // Rows are deleted once the tweet lands in processed_tweets (that table stays
@@ -218,6 +242,68 @@ for (const [column, definition] of [
     db.exec(`ALTER TABLE post_queue ADD COLUMN ${column} ${definition};`);
   }
 }
+
+// --- Source account activity ---
+// What adaptive polling runs on: when each Twitter account was last checked and
+// when a check last produced new tweets. Keyed by username because the same
+// source account can feed several mappings, and its posting rhythm is a
+// property of the account, not of any one mirror.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS source_activity (
+    twitter_username TEXT PRIMARY KEY,
+    last_checked_at INTEGER,
+    last_found_at INTEGER,
+    empty_streak INTEGER NOT NULL DEFAULT 0
+  );
+`);
+
+export interface SourceActivityRow {
+  twitter_username: string;
+  last_checked_at?: number;
+  last_found_at?: number;
+  empty_streak: number;
+}
+
+export const sourceActivityService = {
+  /** Every account's activity, keyed by lower-cased username. */
+  getAll(): Map<string, SourceActivityRow> {
+    const rows = db.prepare('SELECT * FROM source_activity').all() as SourceActivityRow[];
+    return new Map(rows.map((row) => [row.twitter_username, row]));
+  },
+
+  /**
+   * Record the outcome of a check. `found` promotes the account back to the hot
+   * tier; an empty check only advances the streak, so an account that goes quiet
+   * cools down gradually rather than the moment one sweep finds nothing.
+   */
+  recordCheck(twitterUsername: string, found: boolean, at = Date.now()): void {
+    const username = twitterUsername.toLowerCase();
+    db.prepare(`
+      INSERT INTO source_activity (twitter_username, last_checked_at, last_found_at, empty_streak)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(twitter_username) DO UPDATE SET
+        last_checked_at = excluded.last_checked_at,
+        last_found_at = COALESCE(excluded.last_found_at, source_activity.last_found_at),
+        empty_streak = CASE WHEN excluded.last_found_at IS NULL THEN source_activity.empty_streak + 1 ELSE 0 END
+    `).run(username, at, found ? at : null, found ? 0 : 1);
+  },
+
+  /**
+   * Drops rows for accounts that are no longer mirrored. An empty list means
+   * nothing is mirrored any more, so every row goes — returning early there
+   * would strand the whole table the moment the last mapping is removed.
+   */
+  pruneMissing(activeUsernames: string[]): number {
+    if (activeUsernames.length === 0) {
+      return (db.prepare('DELETE FROM source_activity').run() as { changes: number }).changes;
+    }
+    const placeholders = activeUsernames.map(() => '?').join(',');
+    const result = db
+      .prepare(`DELETE FROM source_activity WHERE twitter_username NOT IN (${placeholders})`)
+      .run(...activeUsernames.map((name) => name.toLowerCase())) as { changes: number };
+    return result.changes;
+  },
+};
 
 // --- Account health ---
 // Why a Bluesky account is unusable, and when to look again. A taken-down or
@@ -357,6 +443,30 @@ export interface ProcessedTweet {
   bsky_tail_cid?: string;
   status: 'migrated' | 'skipped' | 'failed';
   created_at?: string;
+  /** Epoch ms of the source tweet itself, for measuring mirror lag. */
+  tweet_created_at?: number;
+  /** Epoch ms when the mirrored post landed on Bluesky. */
+  posted_at?: number;
+}
+
+/** Posting volume and recency per mirrored account, over a reporting window. */
+export interface AccountPostStats {
+  bsky_identifier: string;
+  total: number;
+  posted: number;
+  skipped: number;
+  failed: number;
+  last_posted_at: number | null;
+}
+
+/** Per-account mirror delay, measured from the source tweet to the Bluesky post. */
+export interface MirrorLagStats {
+  bsky_identifier: string;
+  samples: number;
+  averageLagMs: number;
+  medianLagMs: number;
+  p95LagMs: number;
+  worstLagMs: number;
 }
 
 export interface ProcessedTweetSearchResult extends ProcessedTweet {
@@ -510,9 +620,9 @@ export const dbService = {
 
   saveTweet(tweet: ProcessedTweet) {
     const stmt = db.prepare(`
-      INSERT OR REPLACE INTO processed_tweets 
-      (twitter_id, twitter_username, bsky_identifier, tweet_text, bsky_uri, bsky_cid, bsky_root_uri, bsky_root_cid, bsky_tail_uri, bsky_tail_cid, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO processed_tweets
+      (twitter_id, twitter_username, bsky_identifier, tweet_text, bsky_uri, bsky_cid, bsky_root_uri, bsky_root_cid, bsky_tail_uri, bsky_tail_cid, status, tweet_created_at, posted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       tweet.twitter_id,
@@ -526,7 +636,75 @@ export const dbService = {
       tweet.bsky_tail_uri || null,
       tweet.bsky_tail_cid || null,
       tweet.status,
+      tweet.tweet_created_at ?? null,
+      tweet.posted_at ?? null,
     );
+  },
+
+  // Mirror lag per Bluesky account: how long tweets waited between being posted
+  // on Twitter and appearing on Bluesky. Only rows carrying both timestamps
+  // count, so accounts mirrored before the columns existed simply report no
+  // samples rather than a wrong number. Backfills are excluded by the window —
+  // importing a two-year-old tweet is not a five-minute mirror delay, and
+  // averaging those in would swamp the signal.
+  getMirrorLagStats(windowMs = 7 * 24 * 60 * 60 * 1000, maxLagMs = 6 * 60 * 60 * 1000): MirrorLagStats[] {
+    const since = Date.now() - windowMs;
+    const rows = db
+      .prepare(`
+        SELECT
+          bsky_identifier,
+          posted_at - tweet_created_at AS lag_ms
+        FROM processed_tweets
+        WHERE posted_at IS NOT NULL
+          AND tweet_created_at IS NOT NULL
+          AND posted_at >= ?
+          AND posted_at - tweet_created_at BETWEEN 0 AND ?
+        ORDER BY bsky_identifier, lag_ms
+      `)
+      .all(since, maxLagMs) as { bsky_identifier: string; lag_ms: number }[];
+
+    const byAccount = new Map<string, number[]>();
+    for (const row of rows) {
+      const existing = byAccount.get(row.bsky_identifier);
+      if (existing) existing.push(row.lag_ms);
+      else byAccount.set(row.bsky_identifier, [row.lag_ms]);
+    }
+
+    return Array.from(byAccount.entries()).map(([bskyIdentifier, lags]) => {
+      // Rows arrive already sorted by lag within each account, so percentiles
+      // are a direct index rather than another sort per account.
+      const total = lags.reduce((sum, lag) => sum + lag, 0);
+      return {
+        bsky_identifier: bskyIdentifier,
+        samples: lags.length,
+        averageLagMs: Math.round(total / lags.length),
+        medianLagMs: lags[Math.floor((lags.length - 1) * 0.5)] ?? 0,
+        p95LagMs: lags[Math.floor((lags.length - 1) * 0.95)] ?? 0,
+        worstLagMs: lags[lags.length - 1] ?? 0,
+      };
+    });
+  },
+
+  // Posting counts and the last mirrored post per account, for the health card.
+  // One grouped scan rather than a query per mapping, so a dashboard with a
+  // hundred accounts still costs a single statement.
+  getAccountPostStats(sinceMs = 7 * 24 * 60 * 60 * 1000): AccountPostStats[] {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    return db
+      .prepare(`
+        SELECT
+          bsky_identifier,
+          COUNT(*) AS total,
+          SUM(CASE WHEN status = 'migrated' THEN 1 ELSE 0 END) AS posted,
+          SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+          MAX(CASE WHEN status = 'migrated' THEN COALESCE(posted_at, strftime('%s', created_at) * 1000) END)
+            AS last_posted_at
+        FROM processed_tweets
+        WHERE created_at >= ?
+        GROUP BY bsky_identifier
+      `)
+      .all(since) as AccountPostStats[];
   },
 
   getTweetsByBskyIdentifier(bskyIdentifier: string): Record<string, any> {

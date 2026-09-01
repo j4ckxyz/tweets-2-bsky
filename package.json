@@ -8,7 +8,7 @@
   "scripts": {
     "setup": "bun install && bun run build",
     "prebuild": "bash scripts/ensure-bun.sh",
-    "build": "tsc && vite build",
+    "build": "tsc && tsc --noEmit -p web/tsconfig.json && vite build",
     "build:server": "tsc",
     "build:web": "vite build",
     "rebuild:native": "bash scripts/rebuild-native.sh",
@@ -19,6 +19,9 @@
     "test:ad-tweet": "bun scripts/test-ad-tweet.ts",
     "test:video-limits": "bun scripts/test-video-limits.ts",
     "test:scraper-fetch": "bun scripts/test-scraper-fetch.ts",
+    "test:text-split": "bun scripts/test-text-split.ts",
+    "test:mirror-lag": "bun scripts/test-mirror-lag.ts",
+    "test:polling": "bun scripts/test-polling.ts",
     "test:account-health": "bun scripts/test-account-health.ts",
     "start": "bun dist/index.js",
     "cli": "bun src/cli.ts",
@@ -28,7 +31,7 @@
     "lint": "biome check --write .",
     "preview:web": "vite preview",
     "format": "biome format --write .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json"
   },
   "keywords": [
     "bluesky",
