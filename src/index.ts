@@ -250,6 +250,22 @@ function getActiveTwitterCredentials(): { authToken: string; ct0: string } | nul
   return { authToken, ct0 };
 }
 
+// Some accounts make the scraper's underlying request hang indefinitely
+// (no response, no error — just a dead socket) instead of failing fast. With
+// no timeout of its own, that hang was only ever caught by the outer 180s
+// sweep watchdog, which stalls a whole concurrency slot per attempt and can
+// turn a sweep of 86 accounts into 30+ minutes. Give every scraper request
+// its own short timeout so a stuck request fails fast and the account's own
+// retry logic (credential switch, 5s backoff) gets a chance to run.
+const SCRAPER_REQUEST_TIMEOUT_MS = envInt('SCRAPER_REQUEST_TIMEOUT_MS', 25_000, 5_000, 120_000);
+
+function timedFetch(...args: Parameters<typeof fetch>): ReturnType<typeof fetch> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SCRAPER_REQUEST_TIMEOUT_MS);
+  const [input, init] = args;
+  return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 async function getTwitterScraper(sessionKey = 'default', forceReset = false): Promise<Scraper | null> {
   const credentials = getActiveTwitterCredentials();
   if (!credentials) return null;
@@ -260,7 +276,7 @@ async function getTwitterScraper(sessionKey = 'default', forceReset = false): Pr
   const existingCookies = sessionCookies.get(sessionKey);
   if (!existingScraper || forceReset || existingCookies?.authToken !== authToken || existingCookies?.ct0 !== ct0) {
     console.log(`🔄 Initializing Twitter scraper with ${useBackupCredentials ? 'BACKUP' : 'PRIMARY'} credentials...`);
-    const scraper = new Scraper();
+    const scraper = new Scraper({ fetch: timedFetch as unknown as typeof fetch });
     await scraper.setCookies([`auth_token=${authToken}`, `ct0=${ct0}`]);
     scraperSessions.set(sessionKey, scraper);
     sessionCookies.set(sessionKey, {
@@ -605,11 +621,18 @@ function isDownloadFailure(err: unknown): boolean {
 
 const BLOB_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 
-async function uploadToBluesky(agent: BskyAgent, buffer: Buffer, mimeType: string): Promise<BlobRef> {
+async function uploadToBluesky(
+  agent: BskyAgent,
+  buffer: Buffer,
+  mimeType: string,
+  maxSize = 1900 * 1024,
+): Promise<BlobRef> {
   let finalBuffer = buffer;
   let finalMimeType = mimeType;
   // Bluesky accepts image blobs up to 2MB; stay slightly under for safety.
-  const MAX_SIZE = 1900 * 1024;
+  // Callers embedding the blob somewhere with a tighter limit (e.g. link card
+  // thumbnails, capped at 1,000,000 bytes) pass a smaller maxSize.
+  const MAX_SIZE = maxSize;
 
   const isPng = mimeType === 'image/png';
   const isJpeg = mimeType === 'image/jpeg' || mimeType === 'image/jpg';
@@ -867,9 +890,18 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<any> {
       }
       try {
         const { buffer, mimeType } = await downloadMedia(imageUrl);
-        thumbBlob = await uploadToBluesky(agent, buffer, mimeType);
+        // The og:image URL can 404/redirect into an HTML error page instead of
+        // an image (server still answers 200), and app.bsky.embed.external's
+        // thumb caps at 1,000,000 bytes — tighter than the 2MB post-image
+        // limit uploadToBluesky defaults to. Reject bad content types here and
+        // pass the thumb's real ceiling so both failure modes get skipped
+        // instead of reaching Bluesky as an InvalidRequest.
+        if (!mimeType.startsWith('image/')) {
+          throw new Error(`og:image was not an image (got ${mimeType})`);
+        }
+        thumbBlob = await uploadToBluesky(agent, buffer, mimeType, 950 * 1024);
       } catch (e) {
-        // SIlently fail thumbnail upload
+        // Silently fail thumbnail upload
       }
     }
 
