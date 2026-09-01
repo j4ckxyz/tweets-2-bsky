@@ -1222,6 +1222,12 @@ export interface ProcessContext {
    * output rather than a second implementation of it.
    */
   onComposed?: (preview: ComposedTweet) => void;
+  /**
+   * Skip downloading media bytes, recording only what media the tweet has.
+   * The preview needs to know a tweet carries a video, not to pull 300MB of it
+   * on the way to a mock upload.
+   */
+  skipMediaDownload?: boolean;
   mappingId?: string;
   jobId?: string;
 }
@@ -1626,6 +1632,14 @@ async function processTweets(
       if (media.type === 'photo') {
         const url = media.media_url_https;
         if (!url) continue;
+        if (context?.skipMediaDownload) {
+          images.push({
+            alt: media.ext_alt_text || 'Image from Twitter',
+            image: { ref: { toString: () => 'preview-blob' }, mimeType: 'image/jpeg', size: 0 } as any,
+            aspectRatio,
+          });
+          continue;
+        }
         try {
           const highQualityUrl = url.includes('?') ? url.replace('?', ':orig?') : `${url}:orig`;
           console.log(`[${twitterUsername}] 📥 Downloading image (high quality): ${path.basename(highQualityUrl)}`);
@@ -1720,6 +1734,11 @@ async function processTweets(
         // size ceiling with. Each is tried in turn so an oversized download steps
         // down a rung instead of dropping the video entirely.
         const candidates = selectVideoVariants(variants, duration);
+
+        if (candidates.length > 0 && context?.skipMediaDownload) {
+          videoBlob = { ref: { toString: () => 'preview-blob' }, mimeType: 'video/mp4', size: 0 } as any;
+          continue;
+        }
 
         if (candidates.length > 0) {
           let uploaded = false;
@@ -1849,7 +1868,9 @@ async function processTweets(
           console.log(`[${twitterUsername}] 🔗 Quoted tweet is external: ${externalQuoteUrl}`);
 
           // Try to capture screenshot for external QTs if we have space for images
-          if (images.length < 4 && !videoBlob) {
+          // Screenshotting a quoted tweet launches a headless browser, which is
+          // far too heavy for a preview — the composed text is what matters there.
+          if (images.length < 4 && !videoBlob && !context?.skipMediaDownload) {
             const ssResult = await captureTweetScreenshot(externalQuoteUrl);
             if (ssResult) {
               try {
@@ -4170,6 +4191,7 @@ async function previewTweetsForAccount(request: PreviewRequest): Promise<Preview
   await processTweets(mockAgent, twitterUsername, bskyIdentifier, tweets, true, undefined, undefined, 'preview', {
     outcomes,
     onComposed: (preview) => composed.set(preview.twitterId, preview),
+    skipMediaDownload: true,
     mappingId: mapping?.id,
   });
 

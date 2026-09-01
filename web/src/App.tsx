@@ -130,6 +130,8 @@ import {
 } from './lib/format';
 import { normalizeSearchValue, scoreAccountMapping, tokenizeSearchValue } from './lib/search';
 import { buildFacetSegments, formatCompactNumber } from './lib/facets';
+import { AccountHealth } from './components/AccountHealth';
+import { MirrorPreview } from './components/MirrorPreview';
 
 function App() {
   useEffect(() => {
@@ -4407,6 +4409,18 @@ function App() {
 
                 <Card className="">
                   <CardHeader>
+                    <CardTitle>Account health</CardTitle>
+                    <CardDescription>
+                      How quickly each mirror is keeping up, and which ones need attention.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <AccountHealth authHeaders={authHeaders} onAuthFailure={handleLogout} />
+                  </CardContent>
+                </Card>
+
+                <Card className="">
+                  <CardHeader>
                     <CardTitle>Quick Navigation</CardTitle>
                     <CardDescription>Use tabs to focus one workflow at a time, especially on mobile.</CardDescription>
                   </CardHeader>
@@ -6992,6 +7006,14 @@ function App() {
                             </p>
                           )}
                         </div>
+                        {selectedMirrorSourceUsername ? (
+                          <div className="rounded-lg border border-border/70 bg-muted/30 p-3">
+                            <MirrorPreview
+                              twitterUsername={selectedMirrorSourceUsername}
+                              authHeaders={authHeaders}
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
 
