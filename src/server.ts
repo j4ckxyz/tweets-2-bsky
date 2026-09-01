@@ -23,6 +23,7 @@ import {
 import { accountHealthService, dbService, postQueueService, sourceActivityService } from './db.js';
 import type { ProcessedTweet } from './db.js';
 import { decideCheck } from './polling.js';
+import { isPreviewAvailable, runPreview } from './preview.js';
 import type { LogExportFormat, LogLevel, LogQueryFilters, LogStage } from './event-log.js';
 import { eventLogService, exportLogs, logEvent } from './event-log.js';
 import {
@@ -3014,6 +3015,51 @@ app.get('/api/queue', authenticateToken, (req: any, res) => {
     counts: postQueueService.getCounts().perMapping.filter((entry) => visibleMappingIds.has(entry.mapping_id)),
     items: postQueueService.listItems({ mappingIds: visibleMappingIds, limit }),
   });
+});
+
+// Compose recent tweets exactly as the mirror would, without posting them, so
+// an account can be inspected before it is added rather than after it has
+// posted something surprising.
+app.post('/api/preview', authenticateToken, async (req: any, res) => {
+  const twitterUsername = normalizeActor(String(req.body?.twitterUsername ?? ''));
+  if (!twitterUsername) {
+    res.status(400).json({ error: 'A Twitter username is required.' });
+    return;
+  }
+
+  const limitRaw = Number(req.body?.limit);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 10)) : 5;
+
+  // Previewing against an existing mapping shows the thread exactly as that
+  // mirror would post it, so the mapping must be one this user can see.
+  const mappingId = req.body?.mappingId ? String(req.body.mappingId) : undefined;
+  if (mappingId) {
+    const config = getConfig();
+    if (!getVisibleMappingIdSet(config, req.user).has(mappingId)) {
+      res.status(404).json({ error: 'Mapping not found.' });
+      return;
+    }
+  }
+
+  if (!isPreviewAvailable()) {
+    res.status(503).json({ error: 'Preview is not available yet: the mirror process is still starting up.' });
+    return;
+  }
+
+  try {
+    const result = await runPreview({ twitterUsername, mappingId, limit });
+    res.json(result);
+  } catch (error) {
+    logEvent({
+      level: 'warn',
+      stage: 'post',
+      event: 'preview.failed',
+      message: `Could not preview @${twitterUsername}: ${(error as Error).message}`,
+      twitterUsername,
+      error: { message: (error as Error).message },
+    });
+    res.status(502).json({ error: `Could not preview @${twitterUsername}: ${(error as Error).message}` });
+  }
 });
 
 // One row per mirrored account, answering "is this mirror healthy?" without

@@ -20,6 +20,8 @@ import { getConfig, saveConfig } from './config-manager.js';
 import type { ErrorDetail } from './event-log.js';
 import { logEvent } from './event-log.js';
 import { planSweep } from './polling.js';
+import type { PreviewRequest, PreviewResult, PreviewTweet } from './preview.js';
+import { setPreviewRunner } from './preview.js';
 import { createTimedFetch, isRetryableScraperError } from './scraper-fetch.js';
 import { splitText } from './text-split.js';
 import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './profile-mirror.js';
@@ -1214,8 +1216,25 @@ export interface ProcessContext {
   outcomes?: Map<string, TweetOutcome>;
   /** Fired as soon as the PDS accepts a tweet's first chunk. */
   onPosted?: (twitterId: string, uri: string, cid: string) => void;
+  /**
+   * Fired once a tweet has been composed, before it is posted. The dry-run
+   * preview reads this so what the dashboard shows is the real composer's
+   * output rather than a second implementation of it.
+   */
+  onComposed?: (preview: ComposedTweet) => void;
   mappingId?: string;
   jobId?: string;
+}
+
+/** A composed tweet as it would be posted: the thread's chunks and its embeds. */
+export interface ComposedTweet {
+  twitterId: string;
+  chunks: string[];
+  images: number;
+  video: boolean;
+  quote: boolean;
+  linkCard: boolean;
+  isReply: boolean;
 }
 
 function recordOutcome(context: ProcessContext | undefined, twitterId: string, outcome: TweetOutcome): void {
@@ -1957,6 +1976,15 @@ async function processTweets(
     }
 
     const chunks = splitText(text);
+    context?.onComposed?.({
+      twitterId: tweetId,
+      chunks,
+      images: images.length,
+      video: Boolean(videoBlob),
+      quote: Boolean(quoteEmbed),
+      linkCard: Boolean(linkCard),
+      isReply,
+    });
     logEvent({
       level: 'debug',
       stage: 'post',
@@ -4108,6 +4136,68 @@ import {
 } from './server.js';
 import type { PendingBackfill } from './server.js';
 
+/**
+ * Compose the most recent tweets for an account exactly as the mirror would,
+ * without posting anything. Runs the real processTweets path with dryRun set,
+ * against a mock agent so no blob is uploaded and no session is needed — the
+ * point is to answer "what would this mirror look like?" before committing to
+ * it, and a preview that used its own compose logic would eventually lie.
+ */
+async function previewTweetsForAccount(request: PreviewRequest): Promise<PreviewResult> {
+  const { twitterUsername, mappingId, limit } = request;
+  const config = getConfig();
+  const mapping = mappingId ? config.mappings.find((entry) => entry.id === mappingId) : undefined;
+  const bskyIdentifier = mapping?.bskyIdentifier ?? 'preview.invalid';
+
+  const tweets = await fetchUserTweets(twitterUsername, limit, undefined, 'preview');
+  if (tweets.length === 0) {
+    return { twitterUsername, fetched: 0, tweets: [] };
+  }
+
+  // A mock agent keeps the preview read-only: uploads return a fake blob ref and
+  // nothing is ever written to Bluesky. dryRun also stops processTweets touching
+  // the processed-tweets table, so previewing does not mark anything as mirrored.
+  // biome-ignore lint/suspicious/noExplicitAny: mock agent, same shape as the dry-run import path
+  const mockAgent: any = {
+    post: async () => ({ uri: 'at://did:plc:preview/app.bsky.feed.post/preview', cid: 'preview-cid' }),
+    uploadBlob: async () => ({ data: { blob: { ref: { toString: () => 'preview-blob' } } } }),
+    session: { did: 'did:plc:preview' },
+    com: { atproto: { repo: { describeRepo: async () => ({ data: {} }) } } },
+  };
+
+  const composed = new Map<string, ComposedTweet>();
+  const outcomes = new Map<string, TweetOutcome>();
+  await processTweets(mockAgent, twitterUsername, bskyIdentifier, tweets, true, undefined, undefined, 'preview', {
+    outcomes,
+    onComposed: (preview) => composed.set(preview.twitterId, preview),
+    mappingId: mapping?.id,
+  });
+
+  const previews: PreviewTweet[] = tweets.map((tweet) => {
+    const twitterId = String(tweet.id_str || tweet.id || '');
+    const entry = composed.get(twitterId);
+    const outcome = outcomes.get(twitterId);
+    return {
+      twitterId,
+      originalText: tweet.text ?? '',
+      createdAt: tweet.created_at,
+      chunks: (entry?.chunks ?? []).map((text) => ({ text, length: text.length })),
+      images: entry?.images ?? 0,
+      video: entry?.video ?? false,
+      quote: entry?.quote ?? false,
+      linkCard: entry?.linkCard ?? false,
+      isReply: entry?.isReply ?? false,
+      // A tweet with no composed output was filtered out — a retweet, a reply to
+      // someone else, an empty shell. Saying which is more useful than omitting it.
+      skipped: entry
+        ? undefined
+        : { stage: outcome?.stage ?? 'filter', reason: outcome?.reason ?? 'This tweet would not be mirrored.' },
+    };
+  });
+
+  return { twitterUsername, fetched: tweets.length, tweets: previews };
+}
+
 async function main(): Promise<void> {
   const program = new Command();
   program
@@ -4129,6 +4219,10 @@ async function main(): Promise<void> {
   const config = getConfig();
 
   await migrateJsonToSqlite();
+
+  // The dashboard's preview runs the real composer through this, so what it
+  // shows is what would actually be posted.
+  setPreviewRunner(previewTweetsForAccount);
 
   if (!options.web) {
     console.log('🌐 Web interface is disabled.');
