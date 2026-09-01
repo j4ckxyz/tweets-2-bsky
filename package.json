@@ -18,6 +18,7 @@
     "test:twitter-fetch": "bun scripts/test-twitter-fetch.ts",
     "test:ad-tweet": "bun scripts/test-ad-tweet.ts",
     "test:video-limits": "bun scripts/test-video-limits.ts",
+    "test:scraper-fetch": "bun scripts/test-scraper-fetch.ts",
     "test:account-health": "bun scripts/test-account-health.ts",
     "start": "bun dist/index.js",
     "cli": "bun src/cli.ts",
