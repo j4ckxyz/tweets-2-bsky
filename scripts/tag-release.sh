@@ -17,12 +17,14 @@ fi
 
 branch="$(git rev-parse --abbrev-ref HEAD)"
 if [[ "$branch" != "master" && "$branch" != "main" ]]; then
-  echo "On branch '$branch'. Release from master unless you know why not." >&2
+  echo "On branch '$branch'. Release from master or main unless you know why not." >&2
   read -r -p "Continue anyway? [y/N] " reply
   [[ "$reply" =~ ^[Yy]$ ]] || exit 1
 fi
 
-if git rev-parse "$tag" >/dev/null 2>&1; then
+# refs/tags/ explicitly: a bare name also resolves branches, so a branch sharing
+# the tag's name would block a tag that does not exist yet.
+if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
   echo "Tag $tag already exists. Bump the version in package.json first." >&2
   exit 1
 fi
