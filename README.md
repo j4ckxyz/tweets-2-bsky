@@ -23,53 +23,53 @@ Do not do both on the same machine unless you intentionally want two separate de
 
 ### Option A: Docker (Recommended)
 
-Prerequisite: Docker Desktop (macOS/Windows) or Docker Engine (Linux).
+Prerequisites: `git`, and Docker Desktop (macOS/Windows) or Docker Engine (Linux).
 
-Start with the included compose file:
+Build the image from your own clone, so what runs is the code in this repo:
 
 ```bash
-docker compose up -d
+git clone https://github.com/j4ckxyz/tweets-2-bsky
+cd tweets-2-bsky
+docker compose up -d --build
 ```
 
 Open `http://localhost:3000`.
 
-If you prefer `docker run`:
-
-```bash
-docker run -d \
-  --name tweets-2-bsky \
-  -p 3000:3000 \
-  -v tweets2bsky_data:/app/data \
-  --restart unless-stopped \
-  j4ckxyz/tweets-2-bsky:latest
-```
-
-Important: keep a persistent volume (`-v tweets2bsky_data:/app/data`) so mappings/history survive container recreation.
+Important: keep the persistent volume (`tweets2bsky_data`, already declared in
+`docker-compose.yml`) so mappings and post history survive container recreation.
 
 Useful Docker commands:
 
 ```bash
-docker logs -f tweets-2-bsky
-docker exec -it tweets-2-bsky bun dist/cli.js status
-docker stop tweets-2-bsky
-docker start tweets-2-bsky
+docker compose logs -f
+docker compose exec tweets-2-bsky bun dist/cli.js status
+docker compose stop
+docker compose start
 ```
 
-Update Docker deployment:
+Update a Docker deployment — pull the code, rebuild, restart:
 
 ```bash
-docker pull j4ckxyz/tweets-2-bsky:latest
-docker stop tweets-2-bsky
-docker rm tweets-2-bsky
+git pull
+docker compose up -d --build
+```
+
+If you prefer `docker run` over compose, build the image first:
+
+```bash
+docker build -t tweets-2-bsky:local .
 docker run -d \
   --name tweets-2-bsky \
   -p 3000:3000 \
   -v tweets2bsky_data:/app/data \
   --restart unless-stopped \
-  j4ckxyz/tweets-2-bsky:latest
+  tweets-2-bsky:local
 ```
 
-Alternative image: `ghcr.io/j4ckxyz/tweets-2-bsky:latest`.
+Prebuilt images are also published to `ghcr.io/j4ckxyz/tweets-2-bsky:latest` and
+`j4ckxyz/tweets-2-bsky:latest`. Building locally is recommended instead: it is
+the only way to be certain you are running the current code, and it needs no
+registry availability.
 
 ### Option B: Source Install (PM2 or Manual)
 
@@ -174,7 +174,11 @@ Tuning (optional `.env` values, sensible defaults built in):
 | `POST_PACING_MIN_MS` / `POST_PACING_MAX_MS` | `3000` / `8000` | Pause between posts within one account (cosmetic pacing; per-account only). |
 | `QUEUE_MAX_ATTEMPTS` | `8` | Retries (with exponential backoff) before a tweet is parked as failed. |
 | `SWEEP_FETCH_TIMEOUT_MS` | `180000` | Watchdog for a single account's timeline fetch. |
+| `SCRAPER_REQUEST_TIMEOUT_MS` | `25000` | Deadline for one HTTP request to Twitter. Fails fast so a hung request retries instead of holding a fetch slot until the watchdog above fires. |
+| `ADAPTIVE_POLLING` | `1` | Check quiet accounts less often (see below). Set to `0` to check every account on every sweep. |
 | `QUEUE_FAILED_RETENTION_DAYS` | `14` | How long parked failures stay visible before being pruned. |
+
+**Adaptive polling.** Accounts are not all worth checking equally often, so each one earns a minimum interval from how recently it last posted: an active account (posted within 6 hours) is checked every sweep, then 10 minutes for the last day, 30 minutes for the last week, and hourly beyond that. Nothing is starved — the coldest tier still has an hourly ceiling, a newly added account starts in the hot tier so its first tweet mirrors immediately, and a single new tweet promotes an account straight back to the top. This keeps the sweep short for the accounts that are actually posting, which is what mirror delay depends on. Set `ADAPTIVE_POLLING=0` to check everything every sweep.
 
 A tweet is stamped with its Bluesky URI the moment the post is accepted, before any other bookkeeping. If the process dies (or the database is busy) between publishing and recording, the queue repairs the record from that stamp instead of re-posting — so a post that is live on Bluesky can never show up as "failed", and a retry can never duplicate it.
 
@@ -249,6 +253,16 @@ Useful flags:
 ./update.sh --skip-install --skip-build
 ```
 
+Docker installs:
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+The `tweets2bsky_data` volume is untouched by a rebuild, so mappings, users and
+post history carry over.
+
 ## Data and Security
 
 Important files:
@@ -275,6 +289,20 @@ bun run typecheck
 bun run lint
 ```
 
+`bun run build` and `bun run typecheck` cover both the server and the web
+dashboard.
+
+Offline tests (no network, no real database — each uses a throwaway data dir):
+
+```bash
+bun run test:scraper-fetch    # request timeout + retry classification
+bun run test:text-split       # post splitting and thread chunking
+bun run test:mirror-lag       # per-account mirror delay statistics
+bun run test:polling          # adaptive polling tiers and activity bookkeeping
+bun run test:video-limits     # Bluesky video size/duration ceilings
+bun run test:account-health    # account outage detection and backoff
+```
+
 ## Troubleshooting
 
 See `TROUBLESHOOTING.md`.
@@ -286,6 +314,26 @@ bun run rebuild:native
 bun run build
 bun run start
 ```
+
+Note on `better-sqlite3`: it is an optional dependency, listed only as a
+fallback for running under plain Node. On Bun — which is what `install.sh`,
+`update.sh` and the Docker image all use — the database goes through the
+built-in `bun:sqlite`, so `better-sqlite3` is intentionally installed without
+being compiled. A message about it not being built is not a problem.
+
+## Releasing
+
+Releases are cut from a version tag. Bump `version` in `package.json`, commit,
+then:
+
+```bash
+bun run release:tag
+```
+
+That tags the version and pushes it, which starts the `Release` workflow: it
+builds, type-checks, runs the offline tests, verifies the tag matches
+`package.json`, and publishes a GitHub release with generated notes. The Docker
+workflows build images for the same tag, so releases and images stay in step.
 
 ## License
 

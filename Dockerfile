@@ -6,9 +6,6 @@ WORKDIR /app
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    python3 \
-    make \
-    g++ \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
@@ -16,6 +13,11 @@ COPY package.json ./
 COPY bun.lock ./bun.lock
 COPY scripts ./scripts
 
+# No --omit=optional here: rollup and sharp ship their native code as optional
+# platform packages, and omitting those breaks the web build. better-sqlite3 is
+# kept from compiling by the empty trustedDependencies list in package.json
+# instead, which is what previously dragged a C++ toolchain into this image and
+# broke it outright once the builder moved to Node 26.
 RUN bun install --frozen-lockfile
 
 COPY . .
