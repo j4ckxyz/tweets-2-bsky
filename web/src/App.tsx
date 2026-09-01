@@ -118,6 +118,7 @@ import {
   getGroupKey,
   getGroupMeta,
   getMappingGroupMeta,
+  getAccountIdFromPath,
   getTabFromPath,
   getTwitterPostUrl,
   getUserLabel,
@@ -130,6 +131,7 @@ import {
 } from './lib/format';
 import { normalizeSearchValue, scoreAccountMapping, tokenizeSearchValue } from './lib/search';
 import { buildFacetSegments, formatCompactNumber } from './lib/facets';
+import { AccountDetail } from './components/AccountDetail';
 import { AccountHealth } from './components/AccountHealth';
 import { MirrorPreview } from './components/MirrorPreview';
 
@@ -167,6 +169,14 @@ function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatusInfo | null>(null);
   const [countdown, setCountdown] = useState('--');
   const [activeTab, setActiveTab] = useState<DashboardTab>(() => {
+    // The account detail route lives under the accounts tab but is not one of
+    // TAB_PATHS, so it has to select the tab itself — otherwise a refresh or a
+    // pasted /accounts/<id> link lands on whatever tab was last saved and the
+    // detail page never renders.
+    if (getAccountIdFromPath(window.location.pathname)) {
+      return 'accounts';
+    }
+
     const fromPath = getTabFromPath(window.location.pathname);
     if (fromPath) {
       return fromPath;
@@ -185,6 +195,11 @@ function App() {
     return 'overview';
   });
 
+  // The account detail page is a sub-route of the accounts tab rather than a
+  // tab of its own, so it keeps the tab highlighted and the back button works.
+  const [accountDetailId, setAccountDetailId] = useState<string | null>(() =>
+    getAccountIdFromPath(window.location.pathname),
+  );
   const [me, setMe] = useState<AuthUser | null>(null);
   const [editingMapping, setEditingMapping] = useState<AccountMapping | null>(null);
   const [newMapping, setNewMapping] = useState<MappingFormState>(defaultMappingForm);
@@ -754,21 +769,23 @@ function App() {
   }, [activeTab]);
 
   useEffect(() => {
-    const expectedPath = TAB_PATHS[activeTab];
+    const expectedPath = accountDetailId ? `/accounts/${accountDetailId}` : TAB_PATHS[activeTab];
     const currentPath = normalizePath(window.location.pathname);
     if (currentPath !== expectedPath) {
-      window.history.pushState({ tab: activeTab }, '', expectedPath);
+      window.history.pushState({ tab: activeTab, accountDetailId }, '', expectedPath);
     }
-  }, [activeTab]);
+  }, [activeTab, accountDetailId]);
 
   useEffect(() => {
     const onPopState = () => {
-      const tabFromPath = getTabFromPath(window.location.pathname);
-      if (tabFromPath) {
-        setActiveTab(tabFromPath);
-      } else {
-        setActiveTab('overview');
+      const accountId = getAccountIdFromPath(window.location.pathname);
+      setAccountDetailId(accountId);
+      if (accountId) {
+        setActiveTab('accounts');
+        return;
       }
+      const tabFromPath = getTabFromPath(window.location.pathname);
+      setActiveTab(tabFromPath ?? 'overview');
     };
 
     window.addEventListener('popstate', onPopState);
@@ -2579,7 +2596,14 @@ function App() {
                       </div>
                     )}
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-medium leading-none mb-0.5">{profileName}</p>
+                      <button
+                        type="button"
+                        className="mb-0.5 block max-w-full truncate text-left text-sm font-medium leading-none hover:underline"
+                        onClick={() => setAccountDetailId(mapping.id)}
+                        title={`Open ${profileName}`}
+                      >
+                        {profileName}
+                      </button>
                       <a
                         className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
                         href={profileUrl}
@@ -4141,7 +4165,10 @@ function App() {
                         ? 'bg-foreground text-background'
                         : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground',
                     )}
-                    onClick={() => setActiveTab(tab.id)}
+                    onClick={() => {
+                      setAccountDetailId(null);
+                      setActiveTab(tab.id);
+                    }}
                     type="button"
                   >
                     <Icon className="h-4 w-4" />
@@ -4441,7 +4468,16 @@ function App() {
               </section>
             ) : null}
 
-            {activeTab === 'accounts' ? (
+            {activeTab === 'accounts' && accountDetailId ? (
+              <AccountDetail
+                mappingId={accountDetailId}
+                authHeaders={authHeaders}
+                onBack={() => setAccountDetailId(null)}
+                onNotice={showNotice}
+              />
+            ) : null}
+
+            {activeTab === 'accounts' && !accountDetailId ? (
               <section className="grid gap-6 lg:grid-cols-[240px_1fr] animate-fade-in">
                 <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
                   <Card>
@@ -4916,7 +4952,14 @@ function App() {
                                           </div>
                                         )}
                                         <div className="min-w-0">
-                                          <p className="truncate text-sm font-medium">{profileName}</p>
+                                          <button
+                                            type="button"
+                                            className="block max-w-full truncate text-left text-sm font-medium hover:underline"
+                                            onClick={() => setAccountDetailId(mapping.id)}
+                                            title={`Open ${profileName}`}
+                                          >
+                                            {profileName}
+                                          </button>
                                           <a
                                             className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
                                             href={profileUrl}

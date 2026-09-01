@@ -3017,6 +3017,161 @@ app.get('/api/queue', authenticateToken, (req: any, res) => {
   });
 });
 
+// Everything about one mirrored account in a single payload: its configuration,
+// outage state, mirror lag, queue, recent posts and recent log lines. The
+// dashboard's per-account page renders this, so managing an account does not
+// mean hopping between four tabs and reading the log.
+//
+// Read access follows the same visibility rule as the account list; every
+// mutating action below re-checks canManageMapping rather than trusting the
+// `permissions` block in this response, which exists only so the UI can hide
+// what the user cannot do.
+app.get('/api/accounts/:id', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping || !getVisibleMappingIdSet(config, req.user).has(mapping.id)) {
+    // Same answer for "does not exist" and "not yours", so this cannot be used
+    // to enumerate other people's mappings.
+    res.status(404).json({ error: 'Account not found.' });
+    return;
+  }
+
+  const identifier = mapping.bskyIdentifier.toLowerCase();
+  const windowMs = 7 * 24 * 60 * 60 * 1000;
+  // Per-identifier queries rather than the whole-table aggregates the account
+  // list uses: this endpoint is polled every ten seconds by the detail page.
+  const lag = dbService.getMirrorLagForIdentifier(identifier, windowMs);
+  const posts = dbService.getPostStatsForIdentifier(identifier, windowMs);
+  const queueCounts = postQueueService.getCounts().perMapping.find((row) => row.mapping_id === mapping.id);
+  const health = accountHealthService.get(mapping.bskyIdentifier);
+  const activity = sourceActivityService.getAll();
+  const now = Date.now();
+
+  const canManage = canManageMapping(req.user, mapping);
+
+  res.json({
+    mapping: {
+      id: mapping.id,
+      bskyIdentifier: mapping.bskyIdentifier,
+      bskyServiceUrl: mapping.bskyServiceUrl,
+      twitterUsernames: mapping.twitterUsernames,
+      enabled: mapping.enabled,
+      owner: mapping.owner,
+      groupName: mapping.groupName,
+      groupEmoji: mapping.groupEmoji,
+      hasBotLabel: mapping.hasBotLabel,
+      profileSyncSourceUsername: mapping.profileSyncSourceUsername,
+      lastProfileSyncAt: mapping.lastProfileSyncAt,
+      lastPinnedTweetId: mapping.lastPinnedTweetId,
+      lastPinSyncAt: mapping.lastPinSyncAt,
+      // Deliberately absent: bskyPassword.
+    },
+    permissions: {
+      canManage,
+      canQueueBackfills: canManage && canQueueBackfills(req.user),
+      canRunNow: canRunNow(req.user),
+      isAdmin: isActorAdmin(req.user),
+    },
+    down: health
+      ? {
+          state: health.state,
+          status: health.status,
+          reason: health.reason,
+          detectedAt: health.detected_at,
+          lastCheckedAt: health.last_checked_at,
+          nextRecheckAt: health.next_recheck_at,
+          checks: health.checks,
+        }
+      : null,
+    lag: lag
+      ? {
+          samples: lag.samples,
+          averageMs: lag.averageLagMs,
+          medianMs: lag.medianLagMs,
+          p95Ms: lag.p95LagMs,
+          worstMs: lag.worstLagMs,
+        }
+      : null,
+    posts: {
+      posted: posts?.posted ?? 0,
+      skipped: posts?.skipped ?? 0,
+      failed: posts?.failed ?? 0,
+      lastPostedAt: posts?.last_posted_at ?? null,
+    },
+    queue: {
+      pending: queueCounts?.pending ?? 0,
+      ready: queueCounts?.ready ?? 0,
+      backoff: queueCounts?.backoff ?? 0,
+      processing: queueCounts?.processing ?? 0,
+      failed: queueCounts?.failed ?? 0,
+      nextRetryAt: queueCounts?.next_retry_at ?? null,
+      oldestEnqueuedAt: queueCounts?.oldest_enqueued_at ?? null,
+      items: postQueueService.listItems({ mappingIds: new Set([mapping.id]), limit: 50 }),
+    },
+    sources: mapping.twitterUsernames.map((username) => {
+      const row = activity.get(username.toLowerCase());
+      const decision = decideCheck(
+        { lastFoundAt: row?.last_found_at ?? undefined, lastCheckedAt: row?.last_checked_at ?? undefined },
+        now,
+      );
+      return {
+        twitterUsername: username,
+        tier: decision.tier,
+        dueInMs: decision.dueInMs,
+        lastCheckedAt: row?.last_checked_at ?? null,
+        lastFoundAt: row?.last_found_at ?? null,
+        emptyStreak: row?.empty_streak ?? 0,
+      };
+    }),
+    recentPosts: dbService.getRecentTweetsForIdentifier(mapping.bskyIdentifier, 25),
+    recentLogs: eventLogService.query({ mappingIds: [mapping.id], limit: 40 }),
+  });
+});
+
+// Re-arm rows this account left claimed. A worker that dies mid-batch leaves
+// them in `processing` with nothing working on them, and the account then looks
+// stuck until the whole process restarts.
+app.post('/api/accounts/:id/unjam', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const mapping = config.mappings.find((entry) => entry.id === req.params.id);
+  if (!mapping || !getVisibleMappingIdSet(config, req.user).has(mapping.id)) {
+    res.status(404).json({ error: 'Account not found.' });
+    return;
+  }
+  if (!canManageMapping(req.user, mapping)) {
+    res.status(403).json({ error: 'You do not have access to this account.' });
+    return;
+  }
+
+  // Only rows untouched for five minutes, so a batch that is genuinely still
+  // posting is never yanked out from under its worker.
+  const released = postQueueService.resetProcessingForMapping(mapping.id);
+  const retried = req.body?.includeFailed ? postQueueService.retryFailedForMapping(mapping.id) : 0;
+
+  if (released > 0 || retried > 0) {
+    signalSchedulerWake();
+    logEvent({
+      level: 'warn',
+      stage: 'queue',
+      event: 'queue.unjammed',
+      message: `${getActorLabel(req.user)} re-armed ${released} stuck and ${retried} failed queue item(s) for ${mapping.bskyIdentifier}.`,
+      mappingId: mapping.id,
+      bskyIdentifier: mapping.bskyIdentifier,
+      detail: { released, retried },
+    });
+  }
+
+  res.json({
+    success: true,
+    released,
+    retried,
+    message:
+      released === 0 && retried === 0
+        ? 'Nothing was stuck: no queue items needed re-arming.'
+        : `Re-armed ${released} stuck and ${retried} failed item(s).`,
+  });
+});
+
 // Compose recent tweets exactly as the mirror would, without posting them, so
 // an account can be inspected before it is added rather than after it has
 // posted something surprising.

@@ -93,6 +93,24 @@ console.log('\nClock skew\n');
   assert(stats === undefined, 'Negative lag from clock skew is discarded, not averaged in');
 }
 
+console.log('\nPer-account query\n');
+{
+  // The account page polls a single-account query rather than grouping the
+  // whole table; it must agree with the aggregate the account list uses.
+  const fromAggregate = dbService.getMirrorLagStats().find((row) => row.bsky_identifier === account);
+  const direct = dbService.getMirrorLagForIdentifier(account);
+  assert(direct !== null, 'The per-account query finds the account');
+  assert(direct?.samples === fromAggregate?.samples, 'Sample counts agree with the aggregate query');
+  assert(direct?.averageLagMs === fromAggregate?.averageLagMs, 'Averages agree with the aggregate query');
+  assert(direct?.worstLagMs === fromAggregate?.worstLagMs, 'Worst delays agree with the aggregate query');
+  assert(dbService.getMirrorLagForIdentifier('nobody.bsky.social') === null, 'An unknown account reports no lag');
+
+  const posts = dbService.getPostStatsForIdentifier(account);
+  assert(posts.posted === 5, `Per-account post counts are correct (got ${posts.posted})`);
+  const unknownPosts = dbService.getPostStatsForIdentifier('nobody.bsky.social');
+  assert(unknownPosts.posted === 0, 'An unknown account reports zero posts rather than throwing');
+}
+
 fs.rmSync(scratchDir, { recursive: true, force: true });
 
 console.log(`\n${passed} passed, ${failed} failed`);

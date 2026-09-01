@@ -699,6 +699,75 @@ export const dbService = {
     });
   },
 
+  /**
+   * Lag for a single account. The account page polls every ten seconds, and
+   * grouping the whole table only to pick one row out of the result does not
+   * scale with history.
+   */
+  getMirrorLagForIdentifier(
+    bskyIdentifier: string,
+    windowMs = 7 * 24 * 60 * 60 * 1000,
+    maxLagMs = 6 * 60 * 60 * 1000,
+  ): MirrorLagStats | null {
+    const lags = db
+      .prepare(`
+        SELECT posted_at - tweet_created_at AS lag_ms
+        FROM processed_tweets
+        WHERE bsky_identifier = ?
+          AND posted_at IS NOT NULL
+          AND tweet_created_at IS NOT NULL
+          AND posted_at >= ?
+          AND posted_at - tweet_created_at BETWEEN 0 AND ?
+        ORDER BY lag_ms
+      `)
+      .all(bskyIdentifier.toLowerCase(), Date.now() - windowMs, maxLagMs) as { lag_ms: number }[];
+
+    if (lags.length === 0) return null;
+    const values = lags.map((row) => row.lag_ms);
+    const total = values.reduce((sum, lag) => sum + lag, 0);
+    return {
+      bsky_identifier: bskyIdentifier.toLowerCase(),
+      samples: values.length,
+      averageLagMs: Math.round(total / values.length),
+      medianLagMs: values[Math.floor((values.length - 1) * 0.5)] ?? 0,
+      p95LagMs: values[Math.floor((values.length - 1) * 0.95)] ?? 0,
+      worstLagMs: values[values.length - 1] ?? 0,
+    };
+  },
+
+  /** Post counts for a single account, for the same reason as the lag query above. */
+  getPostStatsForIdentifier(bskyIdentifier: string, sinceMs = 7 * 24 * 60 * 60 * 1000): AccountPostStats {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = db
+      .prepare(`
+        SELECT
+          ? AS bsky_identifier,
+          COUNT(*) AS total,
+          -- COALESCE because SUM over zero rows is NULL, not 0: without it an
+          -- account with no history returns nulls where the type promises
+          -- numbers, and the UI renders blanks instead of zeroes.
+          COALESCE(SUM(CASE WHEN status = 'migrated' THEN 1 ELSE 0 END), 0) AS posted,
+          COALESCE(SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END), 0) AS skipped,
+          COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+          MAX(CASE WHEN status = 'migrated' THEN COALESCE(posted_at, strftime('%s', created_at) * 1000) END)
+            AS last_posted_at
+        FROM processed_tweets
+        WHERE bsky_identifier = ? AND created_at >= ?
+      `)
+      .get(bskyIdentifier.toLowerCase(), bskyIdentifier.toLowerCase(), since) as AccountPostStats | undefined;
+
+    return (
+      row ?? {
+        bsky_identifier: bskyIdentifier.toLowerCase(),
+        total: 0,
+        posted: 0,
+        skipped: 0,
+        failed: 0,
+        last_posted_at: null,
+      }
+    );
+  },
+
   // Posting counts and the last mirrored post per account, for the health card.
   // One grouped scan rather than a query per mapping, so a dashboard with a
   // hundred accounts still costs a single statement.
@@ -758,6 +827,18 @@ export const dbService = {
   getRecentProcessedTweets(limit = 50): ProcessedTweet[] {
     const stmt = db.prepare('SELECT * FROM processed_tweets ORDER BY datetime(created_at) DESC, rowid DESC LIMIT ?');
     return stmt.all(limit) as ProcessedTweet[];
+  },
+
+  /** Recent mirrored tweets for one Bluesky account, newest first. */
+  getRecentTweetsForIdentifier(bskyIdentifier: string, limit = 25): ProcessedTweet[] {
+    return db
+      .prepare(
+        `SELECT * FROM processed_tweets
+         WHERE bsky_identifier = ?
+         ORDER BY COALESCE(posted_at, strftime('%s', created_at) * 1000) DESC, rowid DESC
+         LIMIT ?`,
+      )
+      .all(bskyIdentifier.toLowerCase(), Math.max(1, Math.min(limit, 200))) as ProcessedTweet[];
   },
 
   searchMigratedTweets(query: string, limit = 60, scanLimit = 3000): ProcessedTweetSearchResult[] {
@@ -1269,6 +1350,34 @@ export const postQueueService = {
 
   clearFailed(): number {
     db.prepare("DELETE FROM post_queue WHERE status = 'failed'").run();
+    return changesCount();
+  },
+
+  /**
+   * Re-arm rows stuck in `processing` for one mapping. Rows are normally
+   * released when a batch settles, and any left over are re-armed at boot — but
+   * a worker that dies mid-batch (or a watchdog firing while a request is still
+   * in flight) leaves rows claimed with nothing working on them, and the account
+   * then looks jammed until the process restarts. `olderThanMs` guards against
+   * stealing rows from a batch that is genuinely still posting.
+   */
+  resetProcessingForMapping(mappingId: string, olderThanMs = 5 * 60 * 1000): number {
+    db.prepare(
+      `UPDATE post_queue
+       SET status = 'pending', not_before = 0, updated_at = ?
+       WHERE status = 'processing' AND mapping_id = ? AND updated_at < ?`,
+    ).run(Date.now(), mappingId, Date.now() - olderThanMs);
+    return changesCount();
+  },
+
+  /** Re-arm this mapping's parked failures, leaving every other account alone. */
+  retryFailedForMapping(mappingId: string): number {
+    db.prepare(
+      `UPDATE post_queue
+       SET status = 'pending', attempts = 0, not_before = 0, last_error = NULL, failure_stage = NULL,
+           last_error_detail = NULL, first_failed_at = NULL, updated_at = ?
+       WHERE status = 'failed' AND mapping_id = ?`,
+    ).run(Date.now(), mappingId);
     return changesCount();
   },
 

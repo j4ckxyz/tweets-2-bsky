@@ -153,6 +153,15 @@ export function getTabFromPath(pathname: string): DashboardTab | null {
   return entry ? entry[0] : null;
 }
 
+/**
+ * The account detail page lives under /accounts/<mapping id>, which is a level
+ * deeper than the tab routes. Returns the id when the path is one of those.
+ */
+export function getAccountIdFromPath(pathname: string): string | null {
+  const match = normalizePath(pathname).match(/^\/accounts\/([A-Za-z0-9_-]+)$/);
+  return match?.[1] ?? null;
+}
+
 export function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }

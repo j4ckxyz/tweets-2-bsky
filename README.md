@@ -301,6 +301,7 @@ bun run test:mirror-lag       # per-account mirror delay statistics
 bun run test:polling          # adaptive polling tiers and activity bookkeeping
 bun run test:video-limits     # Bluesky video size/duration ceilings
 bun run test:account-health    # account outage detection and backoff
+bun run test:account-access   # per-account page authorization between users
 ```
 
 ## Troubleshooting
