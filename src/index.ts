@@ -19,6 +19,7 @@ import { generateAltText, isAltTextConfigured } from './ai-manager.js';
 import { getConfig, saveConfig } from './config-manager.js';
 import type { ErrorDetail } from './event-log.js';
 import { logEvent } from './event-log.js';
+import { createTimedFetch, isRetryableScraperError } from './scraper-fetch.js';
 import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './profile-mirror.js';
 import {
   buildPollNote,
@@ -258,13 +259,7 @@ function getActiveTwitterCredentials(): { authToken: string; ct0: string } | nul
 // its own short timeout so a stuck request fails fast and the account's own
 // retry logic (credential switch, 5s backoff) gets a chance to run.
 const SCRAPER_REQUEST_TIMEOUT_MS = envInt('SCRAPER_REQUEST_TIMEOUT_MS', 25_000, 5_000, 120_000);
-
-function timedFetch(...args: Parameters<typeof fetch>): ReturnType<typeof fetch> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SCRAPER_REQUEST_TIMEOUT_MS);
-  const [input, init] = args;
-  return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
-}
+const timedFetch = createTimedFetch(SCRAPER_REQUEST_TIMEOUT_MS);
 
 async function getTwitterScraper(sessionKey = 'default', forceReset = false): Promise<Scraper | null> {
   const credentials = getActiveTwitterCredentials();
@@ -276,7 +271,7 @@ async function getTwitterScraper(sessionKey = 'default', forceReset = false): Pr
   const existingCookies = sessionCookies.get(sessionKey);
   if (!existingScraper || forceReset || existingCookies?.authToken !== authToken || existingCookies?.ct0 !== ct0) {
     console.log(`🔄 Initializing Twitter scraper with ${useBackupCredentials ? 'BACKUP' : 'PRIMARY'} credentials...`);
-    const scraper = new Scraper({ fetch: timedFetch as unknown as typeof fetch });
+    const scraper = new Scraper({ fetch: timedFetch });
     await scraper.setCookies([`auth_token=${authToken}`, `ct0=${ct0}`]);
     scraperSessions.set(sessionKey, scraper);
     sessionCookies.set(sessionKey, {
@@ -621,18 +616,26 @@ function isDownloadFailure(err: unknown): boolean {
 
 const BLOB_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 
+// app.bsky.embed.images caps an image blob at 2,000,000 bytes; stay under it.
+const DEFAULT_IMAGE_MAX_SIZE = 1900 * 1024;
+// app.bsky.embed.external caps its thumb at 1,000,000 bytes — tighter than a
+// post image, and the limit that was parking link-card tweets.
+const EXTERNAL_THUMB_MAX_SIZE = 950 * 1024;
+
 async function uploadToBluesky(
   agent: BskyAgent,
   buffer: Buffer,
   mimeType: string,
-  maxSize = 1900 * 1024,
+  maxSize = DEFAULT_IMAGE_MAX_SIZE,
 ): Promise<BlobRef> {
   let finalBuffer = buffer;
   let finalMimeType = mimeType;
   // Bluesky accepts image blobs up to 2MB; stay slightly under for safety.
   // Callers embedding the blob somewhere with a tighter limit (e.g. link card
-  // thumbnails, capped at 1,000,000 bytes) pass a smaller maxSize.
-  const MAX_SIZE = maxSize;
+  // thumbnails, capped at 1,000,000 bytes) pass a smaller maxSize. A larger one
+  // is clamped rather than honoured: the record would be rejected at post time
+  // and the tweet parked, which is exactly the failure this ceiling prevents.
+  const MAX_SIZE = Math.min(maxSize, DEFAULT_IMAGE_MAX_SIZE);
 
   const isPng = mimeType === 'image/png';
   const isJpeg = mimeType === 'image/jpeg' || mimeType === 'image/jpg';
@@ -899,7 +902,7 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<any> {
         if (!mimeType.startsWith('image/')) {
           throw new Error(`og:image was not an image (got ${mimeType})`);
         }
-        thumbBlob = await uploadToBluesky(agent, buffer, mimeType, 950 * 1024);
+        thumbBlob = await uploadToBluesky(agent, buffer, mimeType, EXTERNAL_THUMB_MAX_SIZE);
       } catch (e) {
         // Silently fail thumbnail upload
       }
@@ -1184,11 +1187,10 @@ async function fetchUserTweets(
       return tweets;
     } catch (e: any) {
       retries--;
-      const isRetryable =
-        e.message?.includes('ServiceUnavailable') ||
-        e.message?.includes('Timeout') ||
-        e.message?.includes('429') ||
-        e.message?.includes('401');
+      // Shared with the fetch timeout that produces one of these, so a timed-out
+      // request actually takes the retry/credential-switch path rather than
+      // failing fast and reporting the account as having no new tweets.
+      const isRetryable = isRetryableScraperError(e);
 
       // Check for Twitter Internal Server Error (often returns 400 with specific body)
       if (e?.response?.status === 400 && JSON.stringify(e?.response?.data || {}).includes('InternalServerError')) {
