@@ -288,9 +288,15 @@ export const sourceActivityService = {
     `).run(username, at, found ? at : null, found ? 0 : 1);
   },
 
-  /** Drops rows for accounts that are no longer mirrored. */
+  /**
+   * Drops rows for accounts that are no longer mirrored. An empty list means
+   * nothing is mirrored any more, so every row goes — returning early there
+   * would strand the whole table the moment the last mapping is removed.
+   */
   pruneMissing(activeUsernames: string[]): number {
-    if (activeUsernames.length === 0) return 0;
+    if (activeUsernames.length === 0) {
+      return (db.prepare('DELETE FROM source_activity').run() as { changes: number }).changes;
+    }
     const placeholders = activeUsernames.map(() => '?').join(',');
     const result = db
       .prepare(`DELETE FROM source_activity WHERE twitter_username NOT IN (${placeholders})`)

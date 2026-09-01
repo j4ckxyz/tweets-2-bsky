@@ -2480,6 +2480,9 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
   // minimum interval, so each sweep spends its fetch budget on the accounts
   // actually posting. Set ADAPTIVE_POLLING=0 to check everything every sweep.
   const adaptivePolling = process.env.ADAPTIVE_POLLING !== '0';
+  // Mappings come and go; without this the activity table keeps a row for every
+  // source account ever mirrored.
+  sourceActivityService.pruneMissing(accounts.map((account) => account.twitterUsername));
   const activity = sourceActivityService.getAll();
   const plan = adaptivePolling
     ? planSweep(

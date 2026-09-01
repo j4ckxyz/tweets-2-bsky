@@ -77,7 +77,12 @@ export function MirrorPreview({
             Composes the last {limit} tweets exactly as they would post. Nothing is posted or recorded.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void run()} disabled={loading || !twitterUsername}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void run()}
+          disabled={loading || !twitterUsername || !authHeaders}
+        >
           <Eye className="mr-2 h-4 w-4" />
           {loading ? 'Composing…' : result ? 'Refresh' : 'Preview'}
         </Button>

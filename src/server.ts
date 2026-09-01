@@ -3050,15 +3050,18 @@ app.post('/api/preview', authenticateToken, async (req: any, res) => {
     const result = await runPreview({ twitterUsername, mappingId, limit });
     res.json(result);
   } catch (error) {
+    // Not everything thrown is an Error; reading .message off a string or an
+    // object would report the failure as "undefined".
+    const message = error instanceof Error ? error.message : String(error);
     logEvent({
       level: 'warn',
       stage: 'post',
       event: 'preview.failed',
-      message: `Could not preview @${twitterUsername}: ${(error as Error).message}`,
+      message: `Could not preview @${twitterUsername}: ${message}`,
       twitterUsername,
-      error: { message: (error as Error).message },
+      error: { message },
     });
-    res.status(502).json({ error: `Could not preview @${twitterUsername}: ${(error as Error).message}` });
+    res.status(502).json({ error: `Could not preview @${twitterUsername}: ${message}` });
   }
 });
 
@@ -3073,8 +3076,14 @@ app.get('/api/account-health', authenticateToken, (req: any, res) => {
   const windowDays = Number.isFinite(windowDaysRaw) ? Math.max(1, Math.min(windowDaysRaw, 90)) : 7;
   const windowMs = windowDays * 24 * 60 * 60 * 1000;
 
-  const lagByAccount = new Map(dbService.getMirrorLagStats(windowMs).map((row) => [row.bsky_identifier, row]));
-  const postsByAccount = new Map(dbService.getAccountPostStats(windowMs).map((row) => [row.bsky_identifier, row]));
+  // Keys are normalised because rows written before identifiers were lower-cased
+  // would otherwise miss the lookup below and silently report no stats at all.
+  const lagByAccount = new Map(
+    dbService.getMirrorLagStats(windowMs).map((row) => [row.bsky_identifier.toLowerCase(), row]),
+  );
+  const postsByAccount = new Map(
+    dbService.getAccountPostStats(windowMs).map((row) => [row.bsky_identifier.toLowerCase(), row]),
+  );
   const queueByMapping = new Map(postQueueService.getCounts().perMapping.map((row) => [row.mapping_id, row]));
   const activity = sourceActivityService.getAll();
   const now = Date.now();

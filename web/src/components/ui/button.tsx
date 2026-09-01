@@ -43,7 +43,10 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant, size, type, asChild, children, ...props }, ref) => {
     const styles = cn(buttonVariants({ variant, size, className }));
 
-    if (asChild && React.isValidElement(children)) {
+    // Only DOM elements are cloned: forwarding a ref and button props into a
+    // component that may not accept either is how asChild turns into a runtime
+    // warning rather than a link that looks like a button.
+    if (asChild && React.isValidElement(children) && typeof children.type === 'string') {
       const child = children as React.ReactElement<{ className?: string }>;
       return React.cloneElement(child, {
         ...props,

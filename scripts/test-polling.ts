@@ -90,5 +90,38 @@ console.log('\nNothing is starved\n');
   assert(decideCheck(overdue, now).check, 'An account past its interval is checked no matter how dormant');
 }
 
+console.log('\nActivity bookkeeping\n');
+{
+  // The activity table drives tiering, so stale rows for removed mappings would
+  // keep answering for accounts that are no longer mirrored.
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tweets2bsky-polling-'));
+  process.env.TWEETS2BSKY_DATA_DIR = scratchDir;
+  const { sourceActivityService } = await import('../src/db.js');
+
+  sourceActivityService.recordCheck('keeper', true);
+  sourceActivityService.recordCheck('removed', false);
+  assert(sourceActivityService.getAll().size === 2, 'Checks are recorded per source account');
+
+  sourceActivityService.recordCheck('keeper', false);
+  const keeper = sourceActivityService.getAll().get('keeper');
+  assert(keeper?.last_found_at !== null, 'An empty check keeps the last time the account posted');
+  assert(keeper?.empty_streak === 1, 'An empty check advances the streak');
+
+  sourceActivityService.pruneMissing(['keeper']);
+  const afterPrune = sourceActivityService.getAll();
+  assert(afterPrune.has('keeper'), 'Pruning keeps accounts that are still mirrored');
+  assert(!afterPrune.has('removed'), 'Pruning drops accounts that are no longer mirrored');
+
+  // The case that regressed: with nothing mirrored, every row should go rather
+  // than the table being left untouched.
+  sourceActivityService.pruneMissing([]);
+  assert(sourceActivityService.getAll().size === 0, 'Pruning with no mirrored accounts empties the table');
+
+  fs.rmSync(scratchDir, { recursive: true, force: true });
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
