@@ -13,16 +13,17 @@ COPY package.json ./
 COPY bun.lock ./bun.lock
 COPY scripts ./scripts
 
-# --omit=optional skips better-sqlite3, which exists only as a plain-Node
-# fallback: this image runs on Bun, which uses its built-in bun:sqlite. Building
-# it here needed a C++ toolchain and, since its supported Node range stopped at
-# 25, broke the image build outright once the builder moved to Node 26.
-RUN bun install --frozen-lockfile --omit=optional
+# No --omit=optional here: rollup and sharp ship their native code as optional
+# platform packages, and omitting those breaks the web build. better-sqlite3 is
+# kept from compiling by the empty trustedDependencies list in package.json
+# instead, which is what previously dragged a C++ toolchain into this image and
+# broke it outright once the builder moved to Node 26.
+RUN bun install --frozen-lockfile
 
 COPY . .
 
 RUN bun run build \
-  && bun install --frozen-lockfile --production --omit=optional
+  && bun install --frozen-lockfile --production
 
 
 FROM oven/bun:1-slim AS runtime

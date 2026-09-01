@@ -315,6 +315,12 @@ bun run build
 bun run start
 ```
 
+Note on `better-sqlite3`: it is an optional dependency, listed only as a
+fallback for running under plain Node. On Bun — which is what `install.sh`,
+`update.sh` and the Docker image all use — the database goes through the
+built-in `bun:sqlite`, so `better-sqlite3` is intentionally installed without
+being compiled. A message about it not being built is not a problem.
+
 ## Releasing
 
 Releases are cut from a version tag. Bump `version` in `package.json`, commit,
