@@ -760,6 +760,18 @@ export const dbService = {
     return stmt.all(limit) as ProcessedTweet[];
   },
 
+  /** Recent mirrored tweets for one Bluesky account, newest first. */
+  getRecentTweetsForIdentifier(bskyIdentifier: string, limit = 25): ProcessedTweet[] {
+    return db
+      .prepare(
+        `SELECT * FROM processed_tweets
+         WHERE bsky_identifier = ?
+         ORDER BY COALESCE(posted_at, strftime('%s', created_at) * 1000) DESC, rowid DESC
+         LIMIT ?`,
+      )
+      .all(bskyIdentifier.toLowerCase(), Math.max(1, Math.min(limit, 200))) as ProcessedTweet[];
+  },
+
   searchMigratedTweets(query: string, limit = 60, scanLimit = 3000): ProcessedTweetSearchResult[] {
     const normalizedQuery = normalizeSearchValue(query || '');
     if (!normalizedQuery) {
@@ -1269,6 +1281,34 @@ export const postQueueService = {
 
   clearFailed(): number {
     db.prepare("DELETE FROM post_queue WHERE status = 'failed'").run();
+    return changesCount();
+  },
+
+  /**
+   * Re-arm rows stuck in `processing` for one mapping. Rows are normally
+   * released when a batch settles, and any left over are re-armed at boot — but
+   * a worker that dies mid-batch (or a watchdog firing while a request is still
+   * in flight) leaves rows claimed with nothing working on them, and the account
+   * then looks jammed until the process restarts. `olderThanMs` guards against
+   * stealing rows from a batch that is genuinely still posting.
+   */
+  resetProcessingForMapping(mappingId: string, olderThanMs = 5 * 60 * 1000): number {
+    db.prepare(
+      `UPDATE post_queue
+       SET status = 'pending', not_before = 0, updated_at = ?
+       WHERE status = 'processing' AND mapping_id = ? AND updated_at < ?`,
+    ).run(Date.now(), mappingId, Date.now() - olderThanMs);
+    return changesCount();
+  },
+
+  /** Re-arm this mapping's parked failures, leaving every other account alone. */
+  retryFailedForMapping(mappingId: string): number {
+    db.prepare(
+      `UPDATE post_queue
+       SET status = 'pending', attempts = 0, not_before = 0, last_error = NULL, failure_stage = NULL,
+           last_error_detail = NULL, first_failed_at = NULL, updated_at = ?
+       WHERE status = 'failed' AND mapping_id = ?`,
+    ).run(Date.now(), mappingId);
     return changesCount();
   },
 

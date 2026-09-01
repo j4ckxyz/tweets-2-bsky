@@ -32,7 +32,8 @@
     "preview:web": "vite preview",
     "format": "biome format --write .",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
-    "release:tag": "bash scripts/tag-release.sh"
+    "release:tag": "bash scripts/tag-release.sh",
+    "test:account-access": "bun scripts/test-account-access.ts"
   },
   "keywords": [
     "bluesky",
