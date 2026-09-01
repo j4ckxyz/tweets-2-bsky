@@ -20,6 +20,7 @@ import { getConfig, saveConfig } from './config-manager.js';
 import type { ErrorDetail } from './event-log.js';
 import { logEvent } from './event-log.js';
 import { createTimedFetch, isRetryableScraperError } from './scraper-fetch.js';
+import { splitText } from './text-split.js';
 import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './profile-mirror.js';
 import {
   buildPollNote,
@@ -47,6 +48,10 @@ interface ProcessedTweetEntry {
   migrated?: boolean;
   skipped?: boolean;
   text?: string;
+  /** Epoch ms of the source tweet, paired with postedAt to measure mirror lag. */
+  tweetCreatedAt?: number;
+  /** Epoch ms the mirrored post landed on Bluesky. */
+  postedAt?: number;
 }
 
 interface ProcessedTweetsMap {
@@ -171,6 +176,8 @@ function saveProcessedTweet(
     bsky_tail_uri: entry.tail?.uri,
     bsky_tail_cid: entry.tail?.cid,
     status: entry.migrated || (entry.uri && entry.cid) ? 'migrated' : entry.skipped ? 'skipped' : 'failed',
+    tweet_created_at: entry.tweetCreatedAt,
+    posted_at: entry.postedAt,
   });
 }
 
@@ -1033,66 +1040,6 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
     console.error('[VIDEO] ❌ Error in uploadVideoToBluesky:', (err as Error).message);
     throw err;
   }
-}
-
-function splitText(text: string, limit = 300): string[] {
-  if (text.length <= limit) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  // Reserve space for numbering like " (1/3)" -> approx 7 chars
-  // We apply this reservation to the limit check
-  const effectiveLimit = limit - 8;
-
-  while (remaining.length > 0) {
-    // Every chunk gets a " (i/n)" suffix appended later, so the final chunk
-    // must also respect the reserved-space limit or it would exceed 300 chars.
-    if (remaining.length <= effectiveLimit) {
-      chunks.push(remaining);
-      break;
-    }
-
-    // Smart splitting priority:
-    // 1. Double newline (paragraph)
-    // 2. Sentence end (.!?)
-    // 3. Space
-    // 4. Force split
-
-    let splitIndex = -1;
-
-    // Check paragraphs
-    let checkIndex = remaining.lastIndexOf('\n\n', effectiveLimit);
-    if (checkIndex !== -1) splitIndex = checkIndex;
-
-    // Check sentences
-    if (splitIndex === -1) {
-      // Look for punctuation followed by space
-      const sentenceMatches = Array.from(remaining.substring(0, effectiveLimit).matchAll(/[.!?]\s/g));
-      if (sentenceMatches.length > 0) {
-        const lastMatch = sentenceMatches[sentenceMatches.length - 1];
-        if (lastMatch && lastMatch.index !== undefined) {
-          splitIndex = lastMatch.index + 1; // Include punctuation
-        }
-      }
-    }
-
-    // Check spaces
-    if (splitIndex === -1) {
-      checkIndex = remaining.lastIndexOf(' ', effectiveLimit);
-      if (checkIndex !== -1) splitIndex = checkIndex;
-    }
-
-    // Force split if no good break point found
-    if (splitIndex === -1) {
-      splitIndex = effectiveLimit;
-    }
-
-    chunks.push(remaining.substring(0, splitIndex).trim());
-    remaining = remaining.substring(splitIndex).trim();
-  }
-
-  return chunks;
 }
 
 function utf16IndexToUtf8Index(text: string, index: number): number {
@@ -2038,12 +1985,7 @@ async function processTweets(
     let lastChunkInfo: { uri: string; cid: string; root?: { uri: string; cid: string } } | null = null;
 
     for (let i = 0; i < chunks.length; i++) {
-      let chunk = chunks[i] as string;
-
-      // Add (i/n) if split
-      if (chunks.length > 1) {
-        chunk += ` (${i + 1}/${chunks.length})`;
-      }
+      const chunk = chunks[i] as string;
 
       console.log(`[${twitterUsername}] 📤 Posting chunk ${i + 1}/${chunks.length}...`);
       updateAppStatus({ message: `Posting chunk ${i + 1}/${chunks.length}...` });
@@ -2264,12 +2206,19 @@ async function processTweets(
 
     // Save to DB and Map
     if (firstChunkInfo && lastChunkInfo) {
+      // Both timestamps are stored so the dashboard can report real mirror lag.
+      // The tweet's own time is only recorded when Twitter gave us a parseable
+      // one; a missing value stays undefined rather than defaulting to now,
+      // which would report a zero delay that never happened.
+      const parsedTweetCreatedAt = tweet.created_at ? Date.parse(tweet.created_at) : Number.NaN;
       const entry: ProcessedTweetEntry = {
         uri: firstChunkInfo.uri,
         cid: firstChunkInfo.cid,
         root: firstChunkInfo.root,
         tail: { uri: lastChunkInfo.uri, cid: lastChunkInfo.cid }, // Save tail!
         text: tweetText,
+        tweetCreatedAt: Number.isFinite(parsedTweetCreatedAt) ? parsedTweetCreatedAt : undefined,
+        postedAt: Date.now(),
       };
 
       if (!dryRun) {

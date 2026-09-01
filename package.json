@@ -19,6 +19,8 @@
     "test:ad-tweet": "bun scripts/test-ad-tweet.ts",
     "test:video-limits": "bun scripts/test-video-limits.ts",
     "test:scraper-fetch": "bun scripts/test-scraper-fetch.ts",
+    "test:text-split": "bun scripts/test-text-split.ts",
+    "test:mirror-lag": "bun scripts/test-mirror-lag.ts",
     "test:account-health": "bun scripts/test-account-health.ts",
     "start": "bun dist/index.js",
     "cli": "bun src/cli.ts",

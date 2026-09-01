@@ -160,6 +160,30 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_bsky_identifier ON processed_tweets(bsky_identifier);
 `);
 
+// --- Mirror lag ---
+// `created_at` records when the row was written, which is not the same thing as
+// how long a tweet waited to appear on Bluesky. Storing the source tweet's own
+// timestamp alongside the moment we posted makes the delay a plain subtraction,
+// so the dashboard can show real per-account lag instead of an eyeballed guess
+// from the log. Added as nullable columns: rows written before this stays NULL
+// and are simply excluded from the averages.
+const processedColumns = new Set(
+  (db.prepare('PRAGMA table_info(processed_tweets)').all() as any[]).map((col) => col.name),
+);
+for (const [column, definition] of [
+  ['tweet_created_at', 'INTEGER'],
+  ['posted_at', 'INTEGER'],
+] as const) {
+  if (!processedColumns.has(column)) {
+    db.exec(`ALTER TABLE processed_tweets ADD COLUMN ${column} ${definition};`);
+  }
+}
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_processed_lag
+    ON processed_tweets(bsky_identifier, posted_at)
+    WHERE posted_at IS NOT NULL AND tweet_created_at IS NOT NULL;
+`);
+
 // --- Post queue ---
 // Durable buffer between the Twitter fetch sweep and the Bluesky post workers.
 // Rows are deleted once the tweet lands in processed_tweets (that table stays
@@ -357,6 +381,20 @@ export interface ProcessedTweet {
   bsky_tail_cid?: string;
   status: 'migrated' | 'skipped' | 'failed';
   created_at?: string;
+  /** Epoch ms of the source tweet itself, for measuring mirror lag. */
+  tweet_created_at?: number;
+  /** Epoch ms when the mirrored post landed on Bluesky. */
+  posted_at?: number;
+}
+
+/** Per-account mirror delay, measured from the source tweet to the Bluesky post. */
+export interface MirrorLagStats {
+  bsky_identifier: string;
+  samples: number;
+  averageLagMs: number;
+  medianLagMs: number;
+  p95LagMs: number;
+  worstLagMs: number;
 }
 
 export interface ProcessedTweetSearchResult extends ProcessedTweet {
@@ -510,9 +548,9 @@ export const dbService = {
 
   saveTweet(tweet: ProcessedTweet) {
     const stmt = db.prepare(`
-      INSERT OR REPLACE INTO processed_tweets 
-      (twitter_id, twitter_username, bsky_identifier, tweet_text, bsky_uri, bsky_cid, bsky_root_uri, bsky_root_cid, bsky_tail_uri, bsky_tail_cid, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO processed_tweets
+      (twitter_id, twitter_username, bsky_identifier, tweet_text, bsky_uri, bsky_cid, bsky_root_uri, bsky_root_cid, bsky_tail_uri, bsky_tail_cid, status, tweet_created_at, posted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       tweet.twitter_id,
@@ -526,7 +564,53 @@ export const dbService = {
       tweet.bsky_tail_uri || null,
       tweet.bsky_tail_cid || null,
       tweet.status,
+      tweet.tweet_created_at ?? null,
+      tweet.posted_at ?? null,
     );
+  },
+
+  // Mirror lag per Bluesky account: how long tweets waited between being posted
+  // on Twitter and appearing on Bluesky. Only rows carrying both timestamps
+  // count, so accounts mirrored before the columns existed simply report no
+  // samples rather than a wrong number. Backfills are excluded by the window —
+  // importing a two-year-old tweet is not a five-minute mirror delay, and
+  // averaging those in would swamp the signal.
+  getMirrorLagStats(windowMs = 7 * 24 * 60 * 60 * 1000, maxLagMs = 6 * 60 * 60 * 1000): MirrorLagStats[] {
+    const since = Date.now() - windowMs;
+    const rows = db
+      .prepare(`
+        SELECT
+          bsky_identifier,
+          posted_at - tweet_created_at AS lag_ms
+        FROM processed_tweets
+        WHERE posted_at IS NOT NULL
+          AND tweet_created_at IS NOT NULL
+          AND posted_at >= ?
+          AND posted_at - tweet_created_at BETWEEN 0 AND ?
+        ORDER BY bsky_identifier, lag_ms
+      `)
+      .all(since, maxLagMs) as { bsky_identifier: string; lag_ms: number }[];
+
+    const byAccount = new Map<string, number[]>();
+    for (const row of rows) {
+      const existing = byAccount.get(row.bsky_identifier);
+      if (existing) existing.push(row.lag_ms);
+      else byAccount.set(row.bsky_identifier, [row.lag_ms]);
+    }
+
+    return Array.from(byAccount.entries()).map(([bskyIdentifier, lags]) => {
+      // Rows arrive already sorted by lag within each account, so percentiles
+      // are a direct index rather than another sort per account.
+      const total = lags.reduce((sum, lag) => sum + lag, 0);
+      return {
+        bsky_identifier: bskyIdentifier,
+        samples: lags.length,
+        averageLagMs: Math.round(total / lags.length),
+        medianLagMs: lags[Math.floor((lags.length - 1) * 0.5)] ?? 0,
+        p95LagMs: lags[Math.floor((lags.length - 1) * 0.95)] ?? 0,
+        worstLagMs: lags[lags.length - 1] ?? 0,
+      };
+    });
   },
 
   getTweetsByBskyIdentifier(bskyIdentifier: string): Record<string, any> {
