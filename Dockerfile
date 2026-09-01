@@ -6,9 +6,6 @@ WORKDIR /app
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    python3 \
-    make \
-    g++ \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
@@ -16,12 +13,16 @@ COPY package.json ./
 COPY bun.lock ./bun.lock
 COPY scripts ./scripts
 
-RUN bun install --frozen-lockfile
+# --omit=optional skips better-sqlite3, which exists only as a plain-Node
+# fallback: this image runs on Bun, which uses its built-in bun:sqlite. Building
+# it here needed a C++ toolchain and, since its supported Node range stopped at
+# 25, broke the image build outright once the builder moved to Node 26.
+RUN bun install --frozen-lockfile --omit=optional
 
 COPY . .
 
 RUN bun run build \
-  && bun install --frozen-lockfile --production
+  && bun install --frozen-lockfile --production --omit=optional
 
 
 FROM oven/bun:1-slim AS runtime

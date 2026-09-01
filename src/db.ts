@@ -22,8 +22,22 @@ const db: DbLike = await (async () => {
     return new sqliteModule.Database(DB_PATH) as unknown as DbLike;
   }
 
-  const betterSqliteModule = await import('better-sqlite3');
-  return new betterSqliteModule.default(DB_PATH) as unknown as DbLike;
+  // better-sqlite3 is an optional dependency: it exists only for plain Node, and
+  // its native build can fail (or be skipped) without that being a problem for
+  // the supported Bun runtime. Say so plainly rather than surfacing a bare
+  // module-not-found from deep inside startup.
+  try {
+    const betterSqliteModule = await import('better-sqlite3');
+    return new betterSqliteModule.default(DB_PATH) as unknown as DbLike;
+  } catch (error) {
+    throw new Error(
+      'No SQLite driver available. tweets-2-bsky runs on Bun, which provides bun:sqlite built in — ' +
+        'install Bun (https://bun.sh) and start with `bun dist/index.js`. ' +
+        `Running under plain Node additionally requires the optional better-sqlite3 package (${
+          error instanceof Error ? error.message : String(error)
+        }).`,
+    );
+  }
 })();
 
 // Enable WAL mode for better concurrency

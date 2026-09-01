@@ -237,8 +237,13 @@ ensure_node_modules_present() {
   fi
 }
 
+# Checks the database driver the app actually uses. Under Bun that is the
+# built-in bun:sqlite, not better-sqlite3 — which is an optional fallback for
+# plain Node and, at v13, aborts the process if Bun loads it. Probing the wrong
+# module made every run look like a native-module mismatch and forced a
+# pointless reinstall.
 native_module_compatible() {
-  run_bun -e "try{require('better-sqlite3');process.exit(0)}catch(e){console.error(e && e.message ? e.message : e);process.exit(1)}" >/dev/null 2>&1
+  run_bun -e "try{require('bun:sqlite');process.exit(0)}catch(e){console.error(e && e.message ? e.message : e);process.exit(1)}" >/dev/null 2>&1
 }
 
 run_native_rebuild() {

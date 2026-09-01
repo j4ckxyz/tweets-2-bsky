@@ -31,7 +31,8 @@
     "lint": "biome check --write .",
     "preview:web": "vite preview",
     "format": "biome format --write .",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
+    "release:tag": "bash scripts/tag-release.sh"
   },
   "keywords": [
     "bluesky",
@@ -49,7 +50,6 @@
     "@the-convocation/twitter-scraper": "^0.21.1",
     "axios": "^1.13.2",
     "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^12.5.0",
     "cheerio": "^1.1.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -70,24 +70,27 @@
     "tailwind-merge": "^3.3.1"
   },
   "devDependencies": {
-    "@types/react": "^19.2.6",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.0",
     "@biomejs/biome": "^1.9.4",
     "@types/bcryptjs": "^2.4.6",
-    "@types/better-sqlite3": "^7.6.13",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/cheerio": "^0.22.35",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/inquirer": "^9.0.9",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.10.2",
+    "@types/react": "^19.2.6",
+    "@types/react-dom": "^19.2.3",
     "@types/sharp": "^0.31.1",
+    "@vitejs/plugin-react": "^5.1.0",
     "autoprefixer": "^10.4.21",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.18",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^7.1.12"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^13.0.3"
   }
 }
