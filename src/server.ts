@@ -3038,8 +3038,10 @@ app.get('/api/accounts/:id', authenticateToken, (req: any, res) => {
 
   const identifier = mapping.bskyIdentifier.toLowerCase();
   const windowMs = 7 * 24 * 60 * 60 * 1000;
-  const lag = dbService.getMirrorLagStats(windowMs).find((row) => row.bsky_identifier.toLowerCase() === identifier);
-  const posts = dbService.getAccountPostStats(windowMs).find((row) => row.bsky_identifier.toLowerCase() === identifier);
+  // Per-identifier queries rather than the whole-table aggregates the account
+  // list uses: this endpoint is polled every ten seconds by the detail page.
+  const lag = dbService.getMirrorLagForIdentifier(identifier, windowMs);
+  const posts = dbService.getPostStatsForIdentifier(identifier, windowMs);
   const queueCounts = postQueueService.getCounts().perMapping.find((row) => row.mapping_id === mapping.id);
   const health = accountHealthService.get(mapping.bskyIdentifier);
   const activity = sourceActivityService.getAll();

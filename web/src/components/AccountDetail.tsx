@@ -167,10 +167,36 @@ export function AccountDetail({
   }, [load]);
 
   // The queue and log move while the page is open, so a slow poll keeps it
-  // honest without the page needing a manual refresh to be trusted.
+  // honest without the page needing a manual refresh to be trusted. It pauses
+  // while the tab is hidden: this endpoint aggregates on the server, and a
+  // backgrounded dashboard should not keep asking for work.
   useEffect(() => {
-    const timer = setInterval(() => void load(), 10000);
-    return () => clearInterval(timer);
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const start = () => {
+      if (timer === null) timer = setInterval(() => void load(), 10000);
+    };
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void load();
+        start();
+      } else {
+        stop();
+      }
+    };
+
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [load]);
 
   const act = useCallback(
@@ -210,7 +236,13 @@ export function AccountDetail({
 
   const { mapping, permissions, down, lag, posts, queue, sources, recentPosts, recentLogs } = data;
   const canManage = permissions.canManage;
-  const stuck = queue.processing > 0;
+  // Matches what unjam acts on — rows claimed and untouched for five minutes.
+  // Counting every in-flight post as stuck would flag a perfectly healthy batch.
+  const STUCK_AFTER_MS = 5 * 60 * 1000;
+  const stuckItems = queue.items.filter(
+    (item) => item.status === 'processing' && Date.now() - item.updated_at > STUCK_AFTER_MS,
+  );
+  const stuck = stuckItems.length > 0;
 
   return (
     <section className="space-y-4 animate-fade-in">
@@ -482,6 +514,9 @@ export function AccountDetail({
             <div>
               <p className="text-muted-foreground text-xs">Posting</p>
               <p className={cn('font-semibold', stuck && 'text-amber-600 dark:text-amber-400')}>{queue.processing}</p>
+              {stuck ? (
+                <p className="text-[10px] text-amber-600 dark:text-amber-400">{stuckItems.length} stuck</p>
+              ) : null}
             </div>
             <div>
               <p className="text-muted-foreground text-xs">Parked</p>

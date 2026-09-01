@@ -169,6 +169,14 @@ function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatusInfo | null>(null);
   const [countdown, setCountdown] = useState('--');
   const [activeTab, setActiveTab] = useState<DashboardTab>(() => {
+    // The account detail route lives under the accounts tab but is not one of
+    // TAB_PATHS, so it has to select the tab itself — otherwise a refresh or a
+    // pasted /accounts/<id> link lands on whatever tab was last saved and the
+    // detail page never renders.
+    if (getAccountIdFromPath(window.location.pathname)) {
+      return 'accounts';
+    }
+
     const fromPath = getTabFromPath(window.location.pathname);
     if (fromPath) {
       return fromPath;

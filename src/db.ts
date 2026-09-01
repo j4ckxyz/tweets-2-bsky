@@ -699,6 +699,75 @@ export const dbService = {
     });
   },
 
+  /**
+   * Lag for a single account. The account page polls every ten seconds, and
+   * grouping the whole table only to pick one row out of the result does not
+   * scale with history.
+   */
+  getMirrorLagForIdentifier(
+    bskyIdentifier: string,
+    windowMs = 7 * 24 * 60 * 60 * 1000,
+    maxLagMs = 6 * 60 * 60 * 1000,
+  ): MirrorLagStats | null {
+    const lags = db
+      .prepare(`
+        SELECT posted_at - tweet_created_at AS lag_ms
+        FROM processed_tweets
+        WHERE bsky_identifier = ?
+          AND posted_at IS NOT NULL
+          AND tweet_created_at IS NOT NULL
+          AND posted_at >= ?
+          AND posted_at - tweet_created_at BETWEEN 0 AND ?
+        ORDER BY lag_ms
+      `)
+      .all(bskyIdentifier.toLowerCase(), Date.now() - windowMs, maxLagMs) as { lag_ms: number }[];
+
+    if (lags.length === 0) return null;
+    const values = lags.map((row) => row.lag_ms);
+    const total = values.reduce((sum, lag) => sum + lag, 0);
+    return {
+      bsky_identifier: bskyIdentifier.toLowerCase(),
+      samples: values.length,
+      averageLagMs: Math.round(total / values.length),
+      medianLagMs: values[Math.floor((values.length - 1) * 0.5)] ?? 0,
+      p95LagMs: values[Math.floor((values.length - 1) * 0.95)] ?? 0,
+      worstLagMs: values[values.length - 1] ?? 0,
+    };
+  },
+
+  /** Post counts for a single account, for the same reason as the lag query above. */
+  getPostStatsForIdentifier(bskyIdentifier: string, sinceMs = 7 * 24 * 60 * 60 * 1000): AccountPostStats {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = db
+      .prepare(`
+        SELECT
+          ? AS bsky_identifier,
+          COUNT(*) AS total,
+          -- COALESCE because SUM over zero rows is NULL, not 0: without it an
+          -- account with no history returns nulls where the type promises
+          -- numbers, and the UI renders blanks instead of zeroes.
+          COALESCE(SUM(CASE WHEN status = 'migrated' THEN 1 ELSE 0 END), 0) AS posted,
+          COALESCE(SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END), 0) AS skipped,
+          COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+          MAX(CASE WHEN status = 'migrated' THEN COALESCE(posted_at, strftime('%s', created_at) * 1000) END)
+            AS last_posted_at
+        FROM processed_tweets
+        WHERE bsky_identifier = ? AND created_at >= ?
+      `)
+      .get(bskyIdentifier.toLowerCase(), bskyIdentifier.toLowerCase(), since) as AccountPostStats | undefined;
+
+    return (
+      row ?? {
+        bsky_identifier: bskyIdentifier.toLowerCase(),
+        total: 0,
+        posted: 0,
+        skipped: 0,
+        failed: 0,
+        last_posted_at: null,
+      }
+    );
+  },
+
   // Posting counts and the last mirrored post per account, for the health card.
   // One grouped scan rather than a query per mapping, so a dashboard with a
   // hundred accounts still costs a single statement.

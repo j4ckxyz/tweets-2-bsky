@@ -7,13 +7,14 @@ import path from 'node:path';
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'tweets2bsky-authz-'));
 process.env.TWEETS2BSKY_DATA_DIR = scratch;
-process.env.PORT = process.env.TEST_PORT ?? '8901';
+const port = process.env.TEST_PORT ?? '8901';
+process.env.PORT = port;
 
 const { startServer } = await import('../src/server.js');
 startServer();
 await new Promise((r) => setTimeout(r, 1200));
 
-const base = 'http://127.0.0.1:8901';
+const base = `http://127.0.0.1:${port}`;
 let failures = 0;
 function check(condition: boolean, message: string) {
   console.log(`  ${condition ? '✓' : '✗'} ${message}`);
