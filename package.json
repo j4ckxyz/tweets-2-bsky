@@ -1,6 +1,6 @@
 {
   "name": "tweets-2-bsky",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "A powerful tool to crosspost Tweets to Bluesky, supporting threads, videos, and high-quality images.",
   "packageManager": "bun@1.3.9",
   "type": "module",
