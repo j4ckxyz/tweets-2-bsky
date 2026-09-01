@@ -21,6 +21,7 @@
     "test:scraper-fetch": "bun scripts/test-scraper-fetch.ts",
     "test:text-split": "bun scripts/test-text-split.ts",
     "test:mirror-lag": "bun scripts/test-mirror-lag.ts",
+    "test:polling": "bun scripts/test-polling.ts",
     "test:account-health": "bun scripts/test-account-health.ts",
     "start": "bun dist/index.js",
     "cli": "bun src/cli.ts",

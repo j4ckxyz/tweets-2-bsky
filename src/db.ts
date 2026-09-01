@@ -243,6 +243,62 @@ for (const [column, definition] of [
   }
 }
 
+// --- Source account activity ---
+// What adaptive polling runs on: when each Twitter account was last checked and
+// when a check last produced new tweets. Keyed by username because the same
+// source account can feed several mappings, and its posting rhythm is a
+// property of the account, not of any one mirror.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS source_activity (
+    twitter_username TEXT PRIMARY KEY,
+    last_checked_at INTEGER,
+    last_found_at INTEGER,
+    empty_streak INTEGER NOT NULL DEFAULT 0
+  );
+`);
+
+export interface SourceActivityRow {
+  twitter_username: string;
+  last_checked_at?: number;
+  last_found_at?: number;
+  empty_streak: number;
+}
+
+export const sourceActivityService = {
+  /** Every account's activity, keyed by lower-cased username. */
+  getAll(): Map<string, SourceActivityRow> {
+    const rows = db.prepare('SELECT * FROM source_activity').all() as SourceActivityRow[];
+    return new Map(rows.map((row) => [row.twitter_username, row]));
+  },
+
+  /**
+   * Record the outcome of a check. `found` promotes the account back to the hot
+   * tier; an empty check only advances the streak, so an account that goes quiet
+   * cools down gradually rather than the moment one sweep finds nothing.
+   */
+  recordCheck(twitterUsername: string, found: boolean, at = Date.now()): void {
+    const username = twitterUsername.toLowerCase();
+    db.prepare(`
+      INSERT INTO source_activity (twitter_username, last_checked_at, last_found_at, empty_streak)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(twitter_username) DO UPDATE SET
+        last_checked_at = excluded.last_checked_at,
+        last_found_at = COALESCE(excluded.last_found_at, source_activity.last_found_at),
+        empty_streak = CASE WHEN excluded.last_found_at IS NULL THEN source_activity.empty_streak + 1 ELSE 0 END
+    `).run(username, at, found ? at : null, found ? 0 : 1);
+  },
+
+  /** Drops rows for accounts that are no longer mirrored. */
+  pruneMissing(activeUsernames: string[]): number {
+    if (activeUsernames.length === 0) return 0;
+    const placeholders = activeUsernames.map(() => '?').join(',');
+    const result = db
+      .prepare(`DELETE FROM source_activity WHERE twitter_username NOT IN (${placeholders})`)
+      .run(...activeUsernames.map((name) => name.toLowerCase())) as { changes: number };
+    return result.changes;
+  },
+};
+
 // --- Account health ---
 // Why a Bluesky account is unusable, and when to look again. A taken-down or
 // deactivated account fails every login identically and forever; without this
@@ -385,6 +441,16 @@ export interface ProcessedTweet {
   tweet_created_at?: number;
   /** Epoch ms when the mirrored post landed on Bluesky. */
   posted_at?: number;
+}
+
+/** Posting volume and recency per mirrored account, over a reporting window. */
+export interface AccountPostStats {
+  bsky_identifier: string;
+  total: number;
+  posted: number;
+  skipped: number;
+  failed: number;
+  last_posted_at: number | null;
 }
 
 /** Per-account mirror delay, measured from the source tweet to the Bluesky post. */
@@ -611,6 +677,28 @@ export const dbService = {
         worstLagMs: lags[lags.length - 1] ?? 0,
       };
     });
+  },
+
+  // Posting counts and the last mirrored post per account, for the health card.
+  // One grouped scan rather than a query per mapping, so a dashboard with a
+  // hundred accounts still costs a single statement.
+  getAccountPostStats(sinceMs = 7 * 24 * 60 * 60 * 1000): AccountPostStats[] {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    return db
+      .prepare(`
+        SELECT
+          bsky_identifier,
+          COUNT(*) AS total,
+          SUM(CASE WHEN status = 'migrated' THEN 1 ELSE 0 END) AS posted,
+          SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+          MAX(CASE WHEN status = 'migrated' THEN COALESCE(posted_at, strftime('%s', created_at) * 1000) END)
+            AS last_posted_at
+        FROM processed_tweets
+        WHERE created_at >= ?
+        GROUP BY bsky_identifier
+      `)
+      .all(since) as AccountPostStats[];
   },
 
   getTweetsByBskyIdentifier(bskyIdentifier: string): Record<string, any> {

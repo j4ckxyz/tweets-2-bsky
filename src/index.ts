@@ -19,6 +19,7 @@ import { generateAltText, isAltTextConfigured } from './ai-manager.js';
 import { getConfig, saveConfig } from './config-manager.js';
 import type { ErrorDetail } from './event-log.js';
 import { logEvent } from './event-log.js';
+import { planSweep } from './polling.js';
 import { createTimedFetch, isRetryableScraperError } from './scraper-fetch.js';
 import { splitText } from './text-split.js';
 import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './profile-mirror.js';
@@ -95,7 +96,7 @@ interface ImageEmbed {
   aspectRatio?: AspectRatio;
 }
 
-import { accountHealthService, dbService, postQueueService } from './db.js';
+import { accountHealthService, dbService, postQueueService, sourceActivityService } from './db.js';
 import type { QueueBatch } from './db.js';
 
 // ============================================================================
@@ -2425,23 +2426,60 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
 
   const fetchTimeoutMs = envInt('SWEEP_FETCH_TIMEOUT_MS', 180_000, 30_000, 1_800_000);
   const startedAt = Date.now();
+
+  // Adaptive polling: accounts that have been silent for a while earn a longer
+  // minimum interval, so each sweep spends its fetch budget on the accounts
+  // actually posting. Set ADAPTIVE_POLLING=0 to check everything every sweep.
+  const adaptivePolling = process.env.ADAPTIVE_POLLING !== '0';
+  const activity = sourceActivityService.getAll();
+  const plan = adaptivePolling
+    ? planSweep(
+        accounts,
+        (account) => activity.get(account.twitterUsername.toLowerCase()) ?? {},
+        startedAt,
+      )
+    : { due: accounts, skipped: [], tierCounts: {} };
+  const dueAccounts = plan.due;
+
   logEvent({
     level: 'info',
     stage: 'sweep',
     event: 'sweep.start',
-    message: `Checking ${accounts.length} source account(s) with a concurrency of ${FETCH_CONCURRENCY}.`,
-    detail: { accounts: accounts.length, concurrency: FETCH_CONCURRENCY, fetchTimeoutMs },
+    message: adaptivePolling
+      ? `Checking ${dueAccounts.length} of ${accounts.length} source account(s) with a concurrency of ${FETCH_CONCURRENCY}; ${plan.skipped.length} not due yet.`
+      : `Checking ${accounts.length} source account(s) with a concurrency of ${FETCH_CONCURRENCY}.`,
+    detail: {
+      accounts: dueAccounts.length,
+      totalAccounts: accounts.length,
+      skipped: plan.skipped.length,
+      tiers: plan.tierCounts,
+      adaptivePolling,
+      concurrency: FETCH_CONCURRENCY,
+      fetchTimeoutMs,
+    },
   });
+
+  if (dueAccounts.length === 0) {
+    logEvent({
+      level: 'info',
+      stage: 'sweep',
+      event: 'sweep.completed',
+      message: 'No source accounts were due for a check this sweep.',
+      durationMs: Date.now() - startedAt,
+      detail: { accountsChecked: 0, queued: 0, skipped: plan.skipped.length },
+    });
+    return 0;
+  }
 
   let cursor = 0;
   let enqueuedTotal = 0;
-  const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, accounts.length) }, async (_, slot) => {
+  const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, dueAccounts.length) }, async (_, slot) => {
     const sessionKey = `sweep-${slot + 1}`;
     while (true) {
       const index = cursor;
       cursor += 1;
-      if (index >= accounts.length) break;
-      const ref = accounts[index];
+      if (index >= dueAccounts.length) break;
+      const ref = dueAccounts[index];
       if (!ref) continue;
       const { mapping, twitterUsername } = ref;
       const checkJobId = `check:${mapping.id}:${twitterUsername.toLowerCase()}`;
@@ -2470,6 +2508,9 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
           inserted = enqueueTweetsForMapping(mapping, twitterUsername, fresh, 'scheduled');
           enqueuedTotal += inserted;
         }
+        // Drives the next sweep's tiering. `fresh` rather than `inserted`: a
+        // tweet deduped against the queue still proves the account is posting.
+        sourceActivityService.recordCheck(twitterUsername, fresh.length > 0);
         logEvent({
           level: 'info',
           stage: 'sweep',
@@ -2521,11 +2562,13 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
     stage: 'sweep',
     event: 'sweep.completed',
     message:
-      `Swept ${accounts.length} account(s) in ${formatDurationMs(Date.now() - startedAt)}; queued ${enqueuedTotal} new tweet(s). ` +
+      `Swept ${dueAccounts.length} of ${accounts.length} account(s) in ${formatDurationMs(Date.now() - startedAt)}; queued ${enqueuedTotal} new tweet(s). ` +
       `Queue now: ${counts.ready} ready, ${counts.backoff} waiting on retry backoff, ${counts.processing} posting, ${counts.failed} parked as failed.`,
     durationMs: Date.now() - startedAt,
     detail: {
-      accountsChecked: accounts.length,
+      accountsChecked: dueAccounts.length,
+      totalAccounts: accounts.length,
+      skipped: plan.skipped.length,
       queued: enqueuedTotal,
       queue: {
         ready: counts.ready,

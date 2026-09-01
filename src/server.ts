@@ -20,8 +20,9 @@ import {
   getDefaultUserPermissions,
   saveConfig,
 } from './config-manager.js';
-import { accountHealthService, dbService, postQueueService } from './db.js';
+import { accountHealthService, dbService, postQueueService, sourceActivityService } from './db.js';
 import type { ProcessedTweet } from './db.js';
+import { decideCheck } from './polling.js';
 import type { LogExportFormat, LogLevel, LogQueryFilters, LogStage } from './event-log.js';
 import { eventLogService, exportLogs, logEvent } from './event-log.js';
 import {
@@ -3012,6 +3013,103 @@ app.get('/api/queue', authenticateToken, (req: any, res) => {
   res.json({
     counts: postQueueService.getCounts().perMapping.filter((entry) => visibleMappingIds.has(entry.mapping_id)),
     items: postQueueService.listItems({ mappingIds: visibleMappingIds, limit }),
+  });
+});
+
+// One row per mirrored account, answering "is this mirror healthy?" without
+// reading the log: how fast it mirrors, when it last posted, what is queued or
+// parked, whether the Bluesky account is down, and which polling tier its
+// sources currently sit in.
+app.get('/api/account-health', authenticateToken, (req: any, res) => {
+  const config = getConfig();
+  const visibleMappingIds = getVisibleMappingIdSet(config, req.user);
+  const windowDaysRaw = Number(req.query.days);
+  const windowDays = Number.isFinite(windowDaysRaw) ? Math.max(1, Math.min(windowDaysRaw, 90)) : 7;
+  const windowMs = windowDays * 24 * 60 * 60 * 1000;
+
+  const lagByAccount = new Map(dbService.getMirrorLagStats(windowMs).map((row) => [row.bsky_identifier, row]));
+  const postsByAccount = new Map(dbService.getAccountPostStats(windowMs).map((row) => [row.bsky_identifier, row]));
+  const queueByMapping = new Map(postQueueService.getCounts().perMapping.map((row) => [row.mapping_id, row]));
+  const activity = sourceActivityService.getAll();
+  const now = Date.now();
+
+  const accounts = config.mappings
+    .filter((mapping) => visibleMappingIds.has(mapping.id))
+    .map((mapping) => {
+      const identifier = mapping.bskyIdentifier.toLowerCase();
+      const lag = lagByAccount.get(identifier);
+      const posts = postsByAccount.get(identifier);
+      const queue = queueByMapping.get(mapping.id);
+      const health = accountHealthService.get(mapping.bskyIdentifier);
+
+      // Each mapping can pull from several Twitter accounts, so the card shows
+      // the hottest tier among them — that is what sets the mirror's cadence.
+      const sources = mapping.twitterUsernames.map((username) => {
+        const row = activity.get(username.toLowerCase());
+        const decision = decideCheck(
+          { lastFoundAt: row?.last_found_at ?? undefined, lastCheckedAt: row?.last_checked_at ?? undefined },
+          now,
+        );
+        return {
+          twitterUsername: username,
+          tier: decision.tier,
+          lastCheckedAt: row?.last_checked_at ?? null,
+          lastFoundAt: row?.last_found_at ?? null,
+          dueInMs: decision.dueInMs,
+        };
+      });
+
+      return {
+        mappingId: mapping.id,
+        bskyIdentifier: mapping.bskyIdentifier,
+        twitterUsernames: mapping.twitterUsernames,
+        enabled: mapping.enabled,
+        groupName: mapping.groupName,
+        groupEmoji: mapping.groupEmoji,
+        down: health ? { state: health.state, reason: health.reason, detectedAt: health.detected_at } : null,
+        lag: lag
+          ? {
+              samples: lag.samples,
+              averageMs: lag.averageLagMs,
+              medianMs: lag.medianLagMs,
+              p95Ms: lag.p95LagMs,
+              worstMs: lag.worstLagMs,
+            }
+          : null,
+        posts: {
+          posted: posts?.posted ?? 0,
+          skipped: posts?.skipped ?? 0,
+          failed: posts?.failed ?? 0,
+          lastPostedAt: posts?.last_posted_at ?? null,
+        },
+        queue: {
+          pending: queue?.pending ?? 0,
+          processing: queue?.processing ?? 0,
+          failed: queue?.failed ?? 0,
+        },
+        sources,
+      };
+    });
+
+  // Instance-wide lag is sample-weighted: averaging per-account averages would
+  // let a mirror with two posts count as much as one with two hundred.
+  const withLag = accounts.filter((account) => account.lag && account.lag.samples > 0);
+  const totalSamples = withLag.reduce((sum, account) => sum + (account.lag?.samples ?? 0), 0);
+  const weightedLag = withLag.reduce(
+    (sum, account) => sum + (account.lag?.averageMs ?? 0) * (account.lag?.samples ?? 0),
+    0,
+  );
+
+  res.json({
+    windowDays,
+    accounts,
+    summary: {
+      accounts: accounts.length,
+      down: accounts.filter((account) => account.down).length,
+      averageLagMs: totalSamples > 0 ? Math.round(weightedLag / totalSamples) : null,
+      lagSamples: totalSamples,
+      postedInWindow: accounts.reduce((sum, account) => sum + account.posts.posted, 0),
+    },
   });
 });
 
