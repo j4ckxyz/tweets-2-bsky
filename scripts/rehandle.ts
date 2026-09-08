@@ -56,6 +56,7 @@ const heading = (message: string) => log(`\n${bold(message)}\n${dim('-'.repeat(m
 
 export interface Options {
   domain: string;
+  zoneId: string | null;
   limit: number;
   all: boolean;
   only: string[];
@@ -73,6 +74,7 @@ export interface Options {
 export function parseArgs(argv: string[]): Options {
   const options: Options = {
     domain: 'j4ck.xyz',
+    zoneId: null,
     limit: 3,
     all: false,
     only: [],
@@ -154,6 +156,8 @@ ${bold('rehandle')} - migrate tweets-2-bsky accounts to <twitter-handle>.<domain
 
   --check-cloudflare    Verify the Cloudflare token, zone and DNS write access, then exit
   --domain <name>       Base domain for the new handles (default: j4ck.xyz)
+  --zone-id <id>        Cloudflare zone id, to skip the zone lookup (or set CLOUDFLARE_ZONE_ID).
+                        Lets the token get by with only Zone -> DNS -> Edit.
   --limit <n>           How many accounts to act on (default: 3)
   --all                 Act on every mapping instead of a random sample
   --only <handle>       Target a specific account by Bluesky handle or Twitter username (repeatable)
@@ -166,7 +170,9 @@ ${bold('rehandle')} - migrate tweets-2-bsky accounts to <twitter-handle>.<domain
   --no-write-test       During --check-cloudflare, skip the temporary record write/delete
   --help, -h            Show this message
 
-  Set CLOUDFLARE_API_TOKEN in .env or the environment (needs Zone -> DNS -> Edit).
+  Set CLOUDFLARE_API_TOKEN in .env or the environment.
+  Token needs Zone -> DNS -> Edit, plus Zone -> Zone -> Read unless you supply
+  CLOUDFLARE_ZONE_ID (copy it from the domain's Overview page in the dashboard).
 `;
 
 // ---------------------------------------------------------------------------
@@ -421,12 +427,22 @@ async function checkCloudflare(options: Options, token: string): Promise<{ clien
   log(`  ${green('OK')} Token is valid (id ${status.id.slice(0, 8)}..., status: ${status.status})`);
   if (status.expires_on) log(`  ${yellow('!')}  Token expires on ${status.expires_on}`);
 
-  const zone = await client.getZone(options.domain);
-  log(`  ${green('OK')} Zone found: ${zone.name} (id ${zone.id.slice(0, 8)}..., status: ${zone.status})`);
+  // Looking a zone up by name needs Zone -> Zone -> Read. When the zone id is
+  // supplied we skip that call entirely, so the token only needs DNS -> Edit.
+  const suppliedZoneId = options.zoneId ?? process.env.CLOUDFLARE_ZONE_ID?.trim() ?? null;
+  let zoneId: string;
+  if (suppliedZoneId) {
+    zoneId = suppliedZoneId;
+    log(`  ${green('OK')} Using the zone id you supplied (${zoneId.slice(0, 8)}...); skipping the zone lookup`);
+  } else {
+    const zone = await client.getZone(options.domain);
+    log(`  ${green('OK')} Zone found: ${zone.name} (id ${zone.id.slice(0, 8)}..., status: ${zone.status})`);
+    zoneId = zone.id;
+  }
 
   if (!options.writeTest) {
     log(`  ${dim('.  Write test skipped (--no-write-test). Read access confirmed only.')}`);
-    return { client, zoneId: zone.id };
+    return { client, zoneId };
   }
 
   // Read access does not prove Zone:DNS:Edit, so create and delete a scratch record.
@@ -434,11 +450,11 @@ async function checkCloudflare(options: Options, token: string): Promise<{ clien
   const testValue = `rehandle-check=${Date.now()}`;
   log(`  ${dim(`.  Write test: creating temporary TXT ${testName}`)}`);
 
-  const stale = await client.findTxtRecord(zone.id, testName);
-  if (stale) await client.deleteRecord(zone.id, stale.id);
+  const stale = await client.findTxtRecord(zoneId, testName);
+  if (stale) await client.deleteRecord(zoneId, stale.id);
 
   const record = await client.createTxtRecord(
-    zone.id,
+    zoneId,
     testName,
     testValue,
     60,
@@ -456,11 +472,11 @@ async function checkCloudflare(options: Options, token: string): Promise<{ clien
   } catch (error) {
     log(`  ${yellow('!')}  Public DNS check failed: ${(error as Error).message}`);
   } finally {
-    await client.deleteRecord(zone.id, record.id);
+    await client.deleteRecord(zoneId, record.id);
     log(`  ${green('OK')} Temporary record deleted`);
   }
 
-  return { client, zoneId: zone.id };
+  return { client, zoneId };
 }
 
 // ---------------------------------------------------------------------------

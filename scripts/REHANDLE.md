@@ -9,15 +9,33 @@ and then calling `com.atproto.identity.updateHandle` on each account.
 ## Setup on the Pi
 
 1. Create a Cloudflare API token at
-   <https://dash.cloudflare.com/profile/api-tokens> using the **Edit zone DNS**
-   template, scoped to `j4ck.xyz`. It needs `Zone -> DNS -> Edit`.
-2. Add it to `.env` in the tweets-2-bsky directory:
+   <https://dash.cloudflare.com/profile/api-tokens> -> **Create Token** ->
+   **Edit zone DNS** template.
+
+   | Setting | Value |
+   |---|---|
+   | Permissions | `Zone` / `DNS` / **Edit** |
+   | Permissions | `Zone` / `Zone` / **Read** *(only needed for the zone lookup - see below)* |
+   | Zone Resources | **Include** / **Specific zone** / `j4ck.xyz` |
+   | TTL | set an expiry date - a week is plenty for a migration |
+   | Client IP Filtering | optional: the Pi's public IP |
+
+   Pick **Specific zone**, not *All zones*. The token can then only touch DNS in
+   `j4ck.xyz` and nothing else in your Cloudflare account.
+
+2. **Optional, to drop `Zone:Read`:** the script only needs `Zone -> Zone -> Read`
+   to look the zone up by name. Copy the **Zone ID** from the right-hand column
+   of the `j4ck.xyz` Overview page in the dashboard, put it in `.env`, and the
+   lookup is skipped entirely - `Zone -> DNS -> Edit` alone is then enough.
+
+3. Add the token to `.env` in the tweets-2-bsky directory:
 
    ```
    CLOUDFLARE_API_TOKEN=your_token_here
+   CLOUDFLARE_ZONE_ID=your_zone_id_here   # optional, lets you drop Zone:Read
    ```
 
-3. Confirm the token works. This verifies the token, finds the zone, then
+4. Confirm the token works. This verifies the token, resolves the zone, then
    **creates and deletes** a temporary `_rehandle-check.j4ck.xyz` TXT record,
    because read access alone does not prove the token can write DNS:
 
