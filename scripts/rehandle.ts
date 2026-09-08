@@ -1,0 +1,795 @@
+#!/usr/bin/env bun
+/**
+ * Bulk-migrate tweets-2-bsky mappings onto `<twitter-handle>.<domain>` handles.
+ *
+ * Dry run is the default. Nothing is written to Cloudflare, Bluesky or
+ * config.json unless you pass --apply.
+ *
+ * Usage (from the tweets-2-bsky directory):
+ *   bun scripts/rehandle.ts --check-cloudflare
+ *   bun scripts/rehandle.ts                       # dry run, 3 random accounts
+ *   bun scripts/rehandle.ts --all                 # dry run, every account
+ *   bun scripts/rehandle.ts --apply --limit 3     # do it, 3 random accounts
+ *   bun scripts/rehandle.ts --apply --only alice --only bob
+ *
+ * Requires CLOUDFLARE_API_TOKEN (in .env or the environment) with
+ * Zone -> DNS -> Edit on the target zone.
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { AtpAgent } from '@atproto/api';
+import { type AccountMapping, getConfig, saveConfig } from '../src/config-manager.js';
+import { DATA_DIR } from '../src/storage-paths.js';
+import {
+  CloudflareClient,
+  type DnsRecord,
+  resolveTxt,
+  unquoteTxt,
+  upsertTxtRecord,
+  waitForTxt,
+} from './lib/cloudflare.js';
+import { type HandleConversion, convertHandle, findCollisions } from './lib/handle-map.js';
+
+const APP_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// ---------------------------------------------------------------------------
+// Output helpers
+// ---------------------------------------------------------------------------
+
+const useColor = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
+const paint = (code: string) => (text: string) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text);
+const bold = paint('1');
+const dim = paint('2');
+const red = paint('31');
+const green = paint('32');
+const yellow = paint('33');
+const cyan = paint('36');
+
+const log = (message = '') => console.log(message);
+const heading = (message: string) => log(`\n${bold(message)}\n${dim('-'.repeat(message.length))}`);
+
+// ---------------------------------------------------------------------------
+// Arguments
+// ---------------------------------------------------------------------------
+
+export interface Options {
+  domain: string;
+  limit: number;
+  all: boolean;
+  only: string[];
+  apply: boolean;
+  yes: boolean;
+  checkCloudflare: boolean;
+  writeTest: boolean;
+  ttl: number;
+  seed: string | null;
+  includeDisabled: boolean;
+  dnsTimeoutMs: number;
+  help: boolean;
+}
+
+export function parseArgs(argv: string[]): Options {
+  const options: Options = {
+    domain: 'j4ck.xyz',
+    limit: 3,
+    all: false,
+    only: [],
+    apply: false,
+    yes: false,
+    checkCloudflare: false,
+    writeTest: true,
+    ttl: 60,
+    seed: null,
+    includeDisabled: false,
+    dnsTimeoutMs: 180_000,
+    help: false,
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = () => {
+      const value = argv[++i];
+      if (value === undefined) throw new Error(`${arg} requires a value.`);
+      return value;
+    };
+
+    switch (arg) {
+      case '--domain':
+        options.domain = next();
+        break;
+      case '--limit':
+        options.limit = Number.parseInt(next(), 10);
+        break;
+      case '--all':
+        options.all = true;
+        break;
+      case '--only':
+        options.only.push(next());
+        break;
+      case '--apply':
+        options.apply = true;
+        break;
+      case '--yes':
+      case '-y':
+        options.yes = true;
+        break;
+      case '--check-cloudflare':
+        options.checkCloudflare = true;
+        break;
+      case '--no-write-test':
+        options.writeTest = false;
+        break;
+      case '--ttl':
+        options.ttl = Number.parseInt(next(), 10);
+        break;
+      case '--seed':
+        options.seed = next();
+        break;
+      case '--include-disabled':
+        options.includeDisabled = true;
+        break;
+      case '--dns-timeout':
+        options.dnsTimeoutMs = Number.parseInt(next(), 10) * 1000;
+        break;
+      case '--help':
+      case '-h':
+        options.help = true;
+        break;
+      default:
+        throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+
+  if (!Number.isFinite(options.limit) || options.limit < 1) throw new Error('--limit must be a positive integer.');
+  if (!Number.isFinite(options.ttl) || options.ttl < 60) throw new Error('--ttl must be at least 60 seconds.');
+  return options;
+}
+
+const HELP = `
+${bold('rehandle')} - migrate tweets-2-bsky accounts to <twitter-handle>.<domain>
+
+  ${bold('Dry run is the default.')} Add --apply to make real changes.
+
+  --check-cloudflare    Verify the Cloudflare token, zone and DNS write access, then exit
+  --domain <name>       Base domain for the new handles (default: j4ck.xyz)
+  --limit <n>           How many accounts to act on (default: 3)
+  --all                 Act on every mapping instead of a random sample
+  --only <handle>       Target a specific account by Bluesky handle or Twitter username (repeatable)
+  --seed <string>       Make the random sample reproducible
+  --include-disabled    Include mappings with enabled: false
+  --apply               Actually write DNS, change handles and update config.json
+  --yes, -y             Skip the confirmation prompt when applying
+  --ttl <seconds>       TTL for the created TXT records (default: 60)
+  --dns-timeout <secs>  How long to wait for DNS propagation (default: 180)
+  --no-write-test       During --check-cloudflare, skip the temporary record write/delete
+  --help, -h            Show this message
+
+  Set CLOUDFLARE_API_TOKEN in .env or the environment (needs Zone -> DNS -> Edit).
+`;
+
+// ---------------------------------------------------------------------------
+// Environment
+// ---------------------------------------------------------------------------
+
+/** Bun auto-loads .env, but read it explicitly so tsx/node runs behave the same. */
+function loadEnvFile(): void {
+  const envPath = path.join(APP_ROOT, '.env');
+  if (!fs.existsSync(envPath)) return;
+
+  for (const rawLine of fs.readFileSync(envPath, 'utf8').split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    if (process.env[key] !== undefined) continue;
+    let value = line.slice(eq + 1).trim();
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] = value;
+  }
+}
+
+function getCloudflareToken(): string | null {
+  const token = (process.env.CLOUDFLARE_API_TOKEN || process.env.CF_API_TOKEN || '').trim();
+  return token || null;
+}
+
+// ---------------------------------------------------------------------------
+// Selection
+// ---------------------------------------------------------------------------
+
+/** Deterministic PRNG so --seed produces a repeatable sample. */
+export function seededRandom(seed: string): () => number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return () => {
+    h ^= h << 13;
+    h >>>= 0;
+    h ^= h >> 17;
+    h ^= h << 5;
+    h >>>= 0;
+    return h / 4294967296;
+  };
+}
+
+function shuffle<T>(items: T[], random: () => number): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j] as T, copy[i] as T];
+  }
+  return copy;
+}
+
+/** The Twitter username a mapping's handle should be derived from. */
+export function sourceUsernameFor(mapping: AccountMapping): string | null {
+  return mapping.profileSyncSourceUsername ?? mapping.twitterUsernames[0] ?? null;
+}
+
+export function selectMappings(mappings: AccountMapping[], options: Options): AccountMapping[] {
+  let pool = mappings;
+  if (!options.includeDisabled) pool = pool.filter((m) => m.enabled);
+
+  if (options.only.length > 0) {
+    const wanted = new Set(options.only.map((value) => value.trim().replace(/^@/, '').toLowerCase()));
+    return pool.filter(
+      (m) => wanted.has(m.bskyIdentifier.toLowerCase()) || m.twitterUsernames.some((u) => wanted.has(u.toLowerCase())),
+    );
+  }
+
+  if (options.all) return pool;
+
+  const random = options.seed ? seededRandom(options.seed) : Math.random;
+  return shuffle(pool, random).slice(0, options.limit);
+}
+
+// ---------------------------------------------------------------------------
+// Planning
+// ---------------------------------------------------------------------------
+
+type PlanStatus = 'ready' | 'already-correct' | 'blocked';
+
+interface Plan {
+  mapping: AccountMapping;
+  sourceUsername: string | null;
+  conversion: HandleConversion | null;
+  currentHandle: string;
+  newHandle: string | null;
+  txtName: string | null;
+  did: string | null;
+  didError: string | null;
+  existingRecord: DnsRecord | null;
+  status: PlanStatus;
+  blockers: string[];
+}
+
+async function resolveDid(handle: string, serviceUrl: string): Promise<string> {
+  const url = `${serviceUrl.replace(/\/+$/, '')}/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`;
+  const response = await fetch(url);
+  const body = (await response.json()) as { did?: string; message?: string };
+  if (!response.ok || !body.did) {
+    throw new Error(body.message || `resolveHandle failed with HTTP ${response.status}`);
+  }
+  return body.did;
+}
+
+async function describeRepoHandle(did: string, serviceUrl: string): Promise<string> {
+  const url = `${serviceUrl.replace(/\/+$/, '')}/xrpc/com.atproto.repo.describeRepo?repo=${encodeURIComponent(did)}`;
+  const response = await fetch(url);
+  const body = (await response.json()) as { handle?: string; message?: string };
+  if (!response.ok || !body.handle) {
+    throw new Error(body.message || `describeRepo failed with HTTP ${response.status}`);
+  }
+  return body.handle;
+}
+
+async function buildPlan(
+  mapping: AccountMapping,
+  options: Options,
+  cloudflare: { client: CloudflareClient; zoneId: string } | null,
+): Promise<Plan> {
+  const sourceUsername = sourceUsernameFor(mapping);
+  const currentHandle = mapping.bskyIdentifier;
+  const serviceUrl = mapping.bskyServiceUrl ?? 'https://bsky.social';
+  const blockers: string[] = [];
+
+  if (!sourceUsername) {
+    return {
+      mapping,
+      sourceUsername: null,
+      conversion: null,
+      currentHandle,
+      newHandle: null,
+      txtName: null,
+      did: null,
+      didError: null,
+      existingRecord: null,
+      status: 'blocked',
+      blockers: ['Mapping has no Twitter username to derive a handle from.'],
+    };
+  }
+
+  const conversion = convertHandle(sourceUsername, options.domain);
+  blockers.push(...conversion.errors);
+
+  // The DID is resolvable without credentials, so a dry run can show the exact
+  // TXT record it would write.
+  let did: string | null = null;
+  let didError: string | null = null;
+  try {
+    did = await resolveDid(currentHandle, serviceUrl);
+  } catch (error) {
+    didError = (error as Error).message;
+    blockers.push(`Could not resolve the current handle "${currentHandle}": ${didError}`);
+  }
+
+  const txtName = conversion.handle ? `_atproto.${conversion.handle}` : null;
+
+  let existingRecord: DnsRecord | null = null;
+  if (cloudflare && txtName) {
+    try {
+      existingRecord = await cloudflare.client.findTxtRecord(cloudflare.zoneId, txtName);
+    } catch (error) {
+      blockers.push(`Could not read existing DNS records: ${(error as Error).message}`);
+    }
+  }
+
+  if (!mapping.bskyPassword) {
+    blockers.push('Mapping has no Bluesky app password stored; the handle change cannot be authenticated.');
+  }
+
+  const alreadyCorrect = conversion.handle !== null && currentHandle.toLowerCase() === conversion.handle;
+  const status: PlanStatus = blockers.length > 0 ? 'blocked' : alreadyCorrect ? 'already-correct' : 'ready';
+
+  return {
+    mapping,
+    sourceUsername,
+    conversion,
+    currentHandle,
+    newHandle: conversion.handle,
+    txtName,
+    did,
+    didError,
+    existingRecord,
+    status,
+    blockers,
+  };
+}
+
+function printPlan(plan: Plan, index: number, total: number): void {
+  const label =
+    plan.status === 'ready'
+      ? green('READY')
+      : plan.status === 'already-correct'
+        ? cyan('ALREADY CORRECT')
+        : red('BLOCKED');
+
+  log(`\n${bold(`[${index + 1}/${total}]`)} ${label}`);
+  log(`  Twitter username : @${plan.sourceUsername ?? dim('(none)')}`);
+  if (plan.mapping.twitterUsernames.length > 1) {
+    const others = plan.mapping.twitterUsernames
+      .filter((u) => u !== plan.sourceUsername)
+      .map((u) => `@${u}`)
+      .join(', ');
+    log(`  ${dim(`(mapping also covers: ${others})`)}`);
+  }
+  log(`  Current handle   : ${plan.currentHandle}`);
+  log(`  New handle       : ${plan.newHandle ? bold(green(plan.newHandle)) : red('n/a')}`);
+  log(`  DID              : ${plan.did ?? red(plan.didError ?? 'unresolved')}`);
+
+  if (plan.txtName && plan.did) {
+    log(`  DNS record       : ${bold('TXT')} ${plan.txtName}`);
+    log(`                     "did=${plan.did}"`);
+    if (plan.existingRecord) {
+      const matches = unquoteTxt(plan.existingRecord.content) === `did=${plan.did}`;
+      log(
+        `  Existing record  : ${matches ? green('present and correct (will skip)') : yellow(`present but differs: "${plan.existingRecord.content}" (will update)`)}`,
+      );
+    } else {
+      log(`  Existing record  : ${dim('none (will create)')}`);
+    }
+  }
+
+  for (const note of plan.conversion?.notes ?? []) {
+    log(`  ${note.level === 'warn' ? yellow(`! ${note.message}`) : dim(`. ${note.message}`)}`);
+  }
+  for (const blocker of plan.blockers) {
+    log(`  ${red(`x ${blocker}`)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare preflight
+// ---------------------------------------------------------------------------
+
+async function checkCloudflare(options: Options, token: string): Promise<{ client: CloudflareClient; zoneId: string }> {
+  heading(`Cloudflare preflight (${options.domain})`);
+
+  const client = new CloudflareClient(token);
+
+  const status = await client.verifyToken();
+  log(`  ${green('OK')} Token is valid (id ${status.id.slice(0, 8)}..., status: ${status.status})`);
+  if (status.expires_on) log(`  ${yellow('!')}  Token expires on ${status.expires_on}`);
+
+  const zone = await client.getZone(options.domain);
+  log(`  ${green('OK')} Zone found: ${zone.name} (id ${zone.id.slice(0, 8)}..., status: ${zone.status})`);
+
+  if (!options.writeTest) {
+    log(`  ${dim('.  Write test skipped (--no-write-test). Read access confirmed only.')}`);
+    return { client, zoneId: zone.id };
+  }
+
+  // Read access does not prove Zone:DNS:Edit, so create and delete a scratch record.
+  const testName = `_rehandle-check.${options.domain}`;
+  const testValue = `rehandle-check=${Date.now()}`;
+  log(`  ${dim(`.  Write test: creating temporary TXT ${testName}`)}`);
+
+  const stale = await client.findTxtRecord(zone.id, testName);
+  if (stale) await client.deleteRecord(zone.id, stale.id);
+
+  const record = await client.createTxtRecord(
+    zone.id,
+    testName,
+    testValue,
+    60,
+    'temporary rehandle.ts permission check',
+  );
+  log(`  ${green('OK')} DNS write succeeded (record id ${record.id.slice(0, 8)}...)`);
+
+  try {
+    const values = await resolveTxt(testName, 'https://cloudflare-dns.com/dns-query');
+    log(
+      values.includes(testValue)
+        ? `  ${green('OK')} Record resolves over public DNS`
+        : `  ${yellow('!')}  Record not visible over public DNS yet (normal for a few seconds); saw: ${JSON.stringify(values)}`,
+    );
+  } catch (error) {
+    log(`  ${yellow('!')}  Public DNS check failed: ${(error as Error).message}`);
+  } finally {
+    await client.deleteRecord(zone.id, record.id);
+    log(`  ${green('OK')} Temporary record deleted`);
+  }
+
+  return { client, zoneId: zone.id };
+}
+
+// ---------------------------------------------------------------------------
+// Apply
+// ---------------------------------------------------------------------------
+
+interface JournalEntry {
+  mappingId: string;
+  twitterUsername: string;
+  did: string;
+  oldHandle: string;
+  newHandle: string;
+  dnsRecordId: string | null;
+  dnsAction: string;
+  changedAt: string;
+  configUpdated: boolean;
+}
+
+/**
+ * Re-read config immediately before writing and mutate only this one mapping,
+ * so a concurrently running tweets-2-bsky service cannot have its own writes
+ * clobbered by a stale in-memory copy.
+ */
+function persistNewHandle(mappingId: string, newHandle: string): boolean {
+  const config = getConfig();
+  const mapping = config.mappings.find((m) => m.id === mappingId);
+  if (!mapping) return false;
+  mapping.bskyIdentifier = newHandle;
+  saveConfig(config);
+  return true;
+}
+
+async function applyPlan(
+  plan: Plan,
+  options: Options,
+  cloudflare: { client: CloudflareClient; zoneId: string },
+): Promise<JournalEntry | null> {
+  const { mapping, newHandle, txtName, did } = plan;
+  if (!newHandle || !txtName || !did) return null;
+
+  const serviceUrl = mapping.bskyServiceUrl ?? 'https://bsky.social';
+  const content = `did=${did}`;
+
+  log(`\n${bold(`@${plan.sourceUsername}`)}  ${plan.currentHandle} ${dim('->')} ${bold(newHandle)}`);
+
+  // 1. DNS
+  const upsert = await upsertTxtRecord(
+    cloudflare.client,
+    cloudflare.zoneId,
+    txtName,
+    content,
+    options.ttl,
+    `atproto handle for @${plan.sourceUsername} (tweets-2-bsky)`,
+  );
+  log(`  ${green('OK')} DNS TXT ${upsert.action}: ${txtName} = "${content}"`);
+
+  // 2. Wait for the record to be publicly visible before asking the PDS to verify it.
+  process.stdout.write(`  ${dim('.  waiting for DNS propagation')}`);
+  const propagation = await waitForTxt(txtName, content, {
+    timeoutMs: options.dnsTimeoutMs,
+    onAttempt: () => process.stdout.write(dim('.')),
+  });
+  log('');
+  if (!propagation.resolved) {
+    log(
+      `  ${red('x')}  TXT record did not propagate within ${Math.round(options.dnsTimeoutMs / 1000)}s. Saw: ${JSON.stringify(propagation.seenValues)}`,
+    );
+    log(`  ${dim('   The DNS record is in place; re-run for this account once it propagates.')}`);
+    return null;
+  }
+  log(
+    `  ${green('OK')} DNS verified by ${propagation.resolversAgreeing.join(' + ')} after ${Math.round(propagation.elapsedMs / 1000)}s`,
+  );
+
+  // 3. Log in and change the handle.
+  const agent = new AtpAgent({ service: serviceUrl });
+  try {
+    await agent.login({ identifier: mapping.bskyIdentifier, password: mapping.bskyPassword });
+  } catch (error) {
+    log(`  ${red('x')}  Bluesky login failed for ${mapping.bskyIdentifier}: ${(error as Error).message}`);
+    return null;
+  }
+
+  const sessionDid = agent.session?.did;
+  if (sessionDid !== did) {
+    log(
+      `  ${red('x')}  DID mismatch: DNS record was written for ${did} but the session is ${sessionDid}. Aborting this account.`,
+    );
+    return null;
+  }
+
+  try {
+    await agent.com.atproto.identity.updateHandle({ handle: newHandle });
+  } catch (error) {
+    const message = (error as Error).message;
+    log(`  ${red('x')}  updateHandle failed: ${message}`);
+    if (/auth|scope|password|privileged/i.test(message)) {
+      log(`  ${dim("   If this is an app-password restriction, retry with the account's main password.")}`);
+    }
+    return null;
+  }
+  log(`  ${green('OK')} Handle changed on ${serviceUrl}`);
+
+  // 4. Confirm from the PDS itself (not DNS, which may still be cached).
+  try {
+    const confirmed = await describeRepoHandle(did, serviceUrl);
+    log(
+      confirmed === newHandle
+        ? `  ${green('OK')} PDS confirms handle is now ${confirmed}`
+        : `  ${yellow('!')}  PDS reports handle as "${confirmed}", expected "${newHandle}"`,
+    );
+  } catch (error) {
+    log(`  ${yellow('!')}  Could not confirm the new handle: ${(error as Error).message}`);
+  }
+
+  // 5. Point config.json at the new handle, or logins will break on the next run.
+  const configUpdated = persistNewHandle(mapping.id, newHandle);
+  log(
+    configUpdated
+      ? `  ${green('OK')} config.json updated (bskyIdentifier -> ${newHandle})`
+      : `  ${red('x')}  config.json NOT updated - mapping ${mapping.id} disappeared. Fix this by hand.`,
+  );
+
+  return {
+    mappingId: mapping.id,
+    twitterUsername: plan.sourceUsername ?? '',
+    did,
+    oldHandle: plan.currentHandle,
+    newHandle,
+    dnsRecordId: upsert.record.id ?? null,
+    dnsAction: upsert.action,
+    changedAt: new Date().toISOString(),
+    configUpdated,
+  };
+}
+
+function confirm(question: string): Promise<boolean> {
+  process.stdout.write(`${question} `);
+  return new Promise((resolve) => {
+    process.stdin.resume();
+    process.stdin.once('data', (data) => {
+      process.stdin.pause();
+      resolve(data.toString().trim().toLowerCase() === 'yes');
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+async function main(): Promise<number> {
+  let options: Options;
+  try {
+    options = parseArgs(process.argv.slice(2));
+  } catch (error) {
+    log(red((error as Error).message));
+    log(HELP);
+    return 2;
+  }
+
+  if (options.help) {
+    log(HELP);
+    return 0;
+  }
+
+  loadEnvFile();
+
+  log(bold('\ntweets-2-bsky handle migration'));
+  log(dim(options.apply ? 'MODE: APPLY - real changes will be made' : 'MODE: DRY RUN - nothing will be changed'));
+
+  const token = getCloudflareToken();
+
+  // --- Cloudflare -----------------------------------------------------------
+  let cloudflare: { client: CloudflareClient; zoneId: string } | null = null;
+  if (token) {
+    try {
+      cloudflare = await checkCloudflare(options, token);
+    } catch (error) {
+      log(`  ${red(`x  ${(error as Error).message}`)}`);
+      if (options.apply) return 1;
+      log(`  ${yellow('!')}  Continuing the dry run without Cloudflare; existing-record checks are skipped.`);
+    }
+  } else {
+    heading('Cloudflare preflight');
+    log(`  ${yellow('!')}  CLOUDFLARE_API_TOKEN is not set. Add it to .env to enable DNS checks.`);
+    if (options.apply) {
+      log(`  ${red('x')}  --apply requires a Cloudflare token.`);
+      return 1;
+    }
+  }
+
+  if (options.checkCloudflare) {
+    log(`\n${cloudflare ? green('Cloudflare check complete.') : red('Cloudflare check failed.')}`);
+    return cloudflare ? 0 : 1;
+  }
+
+  // --- Load and select ------------------------------------------------------
+  const config = getConfig();
+  if (config.mappings.length === 0) {
+    log(`\n${red('No mappings found in config.json.')} Nothing to do.`);
+    return 1;
+  }
+
+  const selected = selectMappings(config.mappings, options);
+  heading('Accounts');
+  const scope =
+    options.only.length > 0 ? '--only filter' : options.all ? 'all mappings' : `random sample of ${options.limit}`;
+  log(`  ${config.mappings.length} mapping(s) in config.json; selected ${selected.length} (${scope}).`);
+  if (options.seed) log(`  ${dim(`Sample seed: ${options.seed}`)}`);
+
+  if (selected.length === 0) {
+    log(`\n${red('Nothing selected.')} Check --only / --include-disabled.`);
+    return 1;
+  }
+
+  // --- Plan -----------------------------------------------------------------
+  heading('Planned changes');
+  const plans: Plan[] = [];
+  for (const mapping of selected) {
+    plans.push(await buildPlan(mapping, options, cloudflare));
+  }
+  plans.forEach((plan, i) => printPlan(plan, i, plans.length));
+
+  // Collisions within this batch...
+  const collisions = findCollisions(plans.map((p) => p.conversion).filter((c): c is HandleConversion => c !== null));
+  // ...and against handles already claimed by a different mapping in the config.
+  const newHandles = new Map<string, string>();
+  for (const plan of plans) {
+    if (plan.newHandle) newHandles.set(plan.newHandle, plan.mapping.id);
+  }
+  const externalClashes = config.mappings
+    .filter((m) => {
+      const claimed = newHandles.get(m.bskyIdentifier.toLowerCase());
+      return claimed !== undefined && claimed !== m.id;
+    })
+    .map((m) => m.bskyIdentifier);
+
+  if (collisions.length > 0 || externalClashes.length > 0) {
+    heading('Handle collisions');
+    for (const collision of collisions) {
+      log(
+        `  ${red('x')}  ${collision.handle} would be claimed by: ${collision.sources.map((s) => `@${s}`).join(', ')}`,
+      );
+    }
+    for (const clash of externalClashes) {
+      log(`  ${red('x')}  ${clash} is already used by a different mapping in config.json`);
+    }
+    log(
+      `\n  ${red('Refusing to continue.')} Resolve these by hand (e.g. give one account a different handle) and re-run.`,
+    );
+    return 1;
+  }
+
+  const ready = plans.filter((p) => p.status === 'ready');
+  const blocked = plans.filter((p) => p.status === 'blocked');
+  const alreadyCorrect = plans.filter((p) => p.status === 'already-correct');
+
+  heading('Summary');
+  log(
+    `  ${green(`${ready.length} ready`)}   ${cyan(`${alreadyCorrect.length} already correct`)}   ${blocked.length > 0 ? red(`${blocked.length} blocked`) : '0 blocked'}`,
+  );
+
+  if (!options.apply) {
+    log(`\n${dim('Dry run complete. No DNS records, handles or config entries were changed.')}`);
+    log(dim(`Re-run with --apply to perform ${ready.length} change(s).`));
+    return blocked.length > 0 ? 1 : 0;
+  }
+
+  if (ready.length === 0) {
+    log(`\n${yellow('Nothing to apply.')}`);
+    return blocked.length > 0 ? 1 : 0;
+  }
+
+  // --- Apply ----------------------------------------------------------------
+  if (!options.yes) {
+    log(`\n${yellow('This will change live Bluesky handles and DNS records.')}`);
+    log(
+      dim(
+        'Stop the tweets-2-bsky service first (e.g. `pm2 stop tweets-2-bsky`) so it cannot write config.json underneath this script.',
+      ),
+    );
+    if (!(await confirm(`Type ${bold('yes')} to apply ${ready.length} handle change(s):`))) {
+      log('\nAborted. Nothing was changed.');
+      return 0;
+    }
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = path.join(DATA_DIR, `config.rehandle-backup-${stamp}.json`);
+  fs.writeFileSync(backupPath, `${JSON.stringify(getConfig(), null, 2)}\n`, { mode: 0o600 });
+  heading('Applying');
+  log(`  ${green('OK')} config.json backed up to ${backupPath}`);
+
+  const journal: JournalEntry[] = [];
+  for (const plan of ready) {
+    try {
+      const entry = await applyPlan(plan, options, cloudflare as { client: CloudflareClient; zoneId: string });
+      if (entry) journal.push(entry);
+    } catch (error) {
+      log(`  ${red(`x  Unhandled error for @${plan.sourceUsername}: ${(error as Error).message}`)}`);
+    }
+    // updateHandle is rate limited to 10 per 5 minutes per account; a small
+    // pause also keeps us well clear of Cloudflare's limits.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+
+  const journalPath = path.join(DATA_DIR, `rehandle-journal-${stamp}.json`);
+  fs.writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, { mode: 0o600 });
+
+  heading('Done');
+  log(`  ${journal.length}/${ready.length} account(s) migrated.`);
+  log(`  Journal: ${journalPath}`);
+  if (journal.length > 0) {
+    log(
+      `\n  ${yellow('Note:')} the old handles (${journal.map((e) => e.oldHandle).join(', ')}) are now released and could be claimed by someone else.`,
+    );
+    log(`  ${dim('Restart the service when you are happy: `pm2 start tweets-2-bsky`')}`);
+  }
+
+  return journal.length === ready.length ? 0 : 1;
+}
+
+// Only run when invoked directly, so the test suite can import the helpers above.
+if (import.meta.main) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((error) => {
+      console.error(red(`\nFatal: ${(error as Error).stack ?? error}`));
+      process.exit(1);
+    });
+}
