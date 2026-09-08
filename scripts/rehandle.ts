@@ -40,15 +40,15 @@ const APP_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const useColor = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
 const paint = (code: string) => (text: string) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text);
-const bold = paint('1');
-const dim = paint('2');
-const red = paint('31');
-const green = paint('32');
-const yellow = paint('33');
-const cyan = paint('36');
+export const bold = paint('1');
+export const dim = paint('2');
+export const red = paint('31');
+export const green = paint('32');
+export const yellow = paint('33');
+export const cyan = paint('36');
 
-const log = (message = '') => console.log(message);
-const heading = (message: string) => log(`\n${bold(message)}\n${dim('-'.repeat(message.length))}`);
+export const log = (message = '') => console.log(message);
+export const heading = (message: string) => log(`\n${bold(message)}\n${dim('-'.repeat(message.length))}`);
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -180,7 +180,7 @@ ${bold('rehandle')} - migrate tweets-2-bsky accounts to <twitter-handle>.<domain
 // ---------------------------------------------------------------------------
 
 /** Bun auto-loads .env, but read it explicitly so tsx/node runs behave the same. */
-function loadEnvFile(): void {
+export function loadEnvFile(): void {
   const envPath = path.join(APP_ROOT, '.env');
   if (!fs.existsSync(envPath)) return;
 
@@ -202,7 +202,7 @@ function loadEnvFile(): void {
   }
 }
 
-function getCloudflareToken(): string | null {
+export function getCloudflareToken(): string | null {
   const token = (process.env.CLOUDFLARE_API_TOKEN || process.env.CF_API_TOKEN || '').trim();
   return token || null;
 }
@@ -263,9 +263,9 @@ export function selectMappings(mappings: AccountMapping[], options: Options): Ac
 // Planning
 // ---------------------------------------------------------------------------
 
-type PlanStatus = 'ready' | 'already-correct' | 'blocked';
+export type PlanStatus = 'ready' | 'already-correct' | 'blocked';
 
-interface Plan {
+export interface Plan {
   mapping: AccountMapping;
   sourceUsername: string | null;
   conversion: HandleConversion | null;
@@ -299,7 +299,7 @@ async function describeRepoHandle(did: string, serviceUrl: string): Promise<stri
   return body.handle;
 }
 
-async function buildPlan(
+export async function buildPlan(
   mapping: AccountMapping,
   options: Options,
   cloudflare: { client: CloudflareClient; zoneId: string } | null,
@@ -372,7 +372,48 @@ async function buildPlan(
   };
 }
 
-function printPlan(plan: Plan, index: number, total: number): void {
+export interface DuplicateSource {
+  twitterUsername: string;
+  bskyIdentifiers: string[];
+}
+
+/**
+ * The same Twitter account listed under two mappings means two Bluesky accounts
+ * mirror the same tweets. It does not block a handle change, but it is almost
+ * always a config mistake worth surfacing.
+ */
+export function findDuplicateTwitterSources(mappings: AccountMapping[]): DuplicateSource[] {
+  const holders = new Map<string, string[]>();
+  for (const mapping of mappings) {
+    for (const username of mapping.twitterUsernames) {
+      const list = holders.get(username) ?? [];
+      list.push(mapping.bskyIdentifier);
+      holders.set(username, list);
+    }
+  }
+  return [...holders.entries()]
+    .filter(([, identifiers]) => identifiers.length > 1)
+    .map(([twitterUsername, bskyIdentifiers]) => ({ twitterUsername, bskyIdentifiers }));
+}
+
+/**
+ * A generated handle may already be held by a *different* mapping in the config.
+ * Two accounts cannot share a handle, so this has to block the run.
+ */
+export function findExternalClashes(plans: Plan[], allMappings: AccountMapping[]): string[] {
+  const claimedBy = new Map<string, string>();
+  for (const plan of plans) {
+    if (plan.newHandle) claimedBy.set(plan.newHandle, plan.mapping.id);
+  }
+  return allMappings
+    .filter((m) => {
+      const claimant = claimedBy.get(m.bskyIdentifier.toLowerCase());
+      return claimant !== undefined && claimant !== m.id;
+    })
+    .map((m) => m.bskyIdentifier);
+}
+
+export function printPlan(plan: Plan, index: number, total: number): void {
   const label =
     plan.status === 'ready'
       ? green('READY')
@@ -418,7 +459,10 @@ function printPlan(plan: Plan, index: number, total: number): void {
 // Cloudflare preflight
 // ---------------------------------------------------------------------------
 
-async function checkCloudflare(options: Options, token: string): Promise<{ client: CloudflareClient; zoneId: string }> {
+export async function checkCloudflare(
+  options: Options,
+  token: string,
+): Promise<{ client: CloudflareClient; zoneId: string }> {
   heading(`Cloudflare preflight (${options.domain})`);
 
   const client = new CloudflareClient(token);
@@ -483,7 +527,7 @@ async function checkCloudflare(options: Options, token: string): Promise<{ clien
 // Apply
 // ---------------------------------------------------------------------------
 
-interface JournalEntry {
+export interface JournalEntry {
   mappingId: string;
   twitterUsername: string;
   did: string;
@@ -493,6 +537,22 @@ interface JournalEntry {
   dnsAction: string;
   changedAt: string;
   configUpdated: boolean;
+}
+
+const timestamp = () => new Date().toISOString().replace(/[:.]/g, '-');
+
+/** Snapshot config.json before any handle is touched. Returns the backup path. */
+export function backupConfig(): string {
+  const backupPath = path.join(DATA_DIR, `config.rehandle-backup-${timestamp()}.json`);
+  fs.writeFileSync(backupPath, `${JSON.stringify(getConfig(), null, 2)}\n`, { mode: 0o600 });
+  return backupPath;
+}
+
+/** Record what actually changed. Returns the journal path. */
+export function writeJournal(entries: JournalEntry[]): string {
+  const journalPath = path.join(DATA_DIR, `rehandle-journal-${timestamp()}.json`);
+  fs.writeFileSync(journalPath, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
+  return journalPath;
 }
 
 /**
@@ -509,7 +569,7 @@ function persistNewHandle(mappingId: string, newHandle: string): boolean {
   return true;
 }
 
-async function applyPlan(
+export async function applyPlan(
   plan: Plan,
   options: Options,
   cloudflare: { client: CloudflareClient; zoneId: string },
@@ -701,19 +761,8 @@ async function main(): Promise<number> {
   }
   plans.forEach((plan, i) => printPlan(plan, i, plans.length));
 
-  // Collisions within this batch...
   const collisions = findCollisions(plans.map((p) => p.conversion).filter((c): c is HandleConversion => c !== null));
-  // ...and against handles already claimed by a different mapping in the config.
-  const newHandles = new Map<string, string>();
-  for (const plan of plans) {
-    if (plan.newHandle) newHandles.set(plan.newHandle, plan.mapping.id);
-  }
-  const externalClashes = config.mappings
-    .filter((m) => {
-      const claimed = newHandles.get(m.bskyIdentifier.toLowerCase());
-      return claimed !== undefined && claimed !== m.id;
-    })
-    .map((m) => m.bskyIdentifier);
+  const externalClashes = findExternalClashes(plans, config.mappings);
 
   if (collisions.length > 0 || externalClashes.length > 0) {
     heading('Handle collisions');
@@ -729,6 +778,15 @@ async function main(): Promise<number> {
       `\n  ${red('Refusing to continue.')} Resolve these by hand (e.g. give one account a different handle) and re-run.`,
     );
     return 1;
+  }
+
+  const duplicates = findDuplicateTwitterSources(config.mappings);
+  if (duplicates.length > 0) {
+    heading('Duplicate Twitter sources');
+    for (const duplicate of duplicates) {
+      log(`  ${yellow('!')}  @${duplicate.twitterUsername} is mirrored by ${duplicate.bskyIdentifiers.join(' and ')}`);
+    }
+    log(`  ${dim('Not a handle problem - both accounts post the same tweets. Worth fixing in the dashboard.')}`);
   }
 
   const ready = plans.filter((p) => p.status === 'ready');
@@ -765,10 +823,8 @@ async function main(): Promise<number> {
     }
   }
 
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backupPath = path.join(DATA_DIR, `config.rehandle-backup-${stamp}.json`);
-  fs.writeFileSync(backupPath, `${JSON.stringify(getConfig(), null, 2)}\n`, { mode: 0o600 });
   heading('Applying');
+  const backupPath = backupConfig();
   log(`  ${green('OK')} config.json backed up to ${backupPath}`);
 
   const journal: JournalEntry[] = [];
@@ -784,8 +840,7 @@ async function main(): Promise<number> {
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
 
-  const journalPath = path.join(DATA_DIR, `rehandle-journal-${stamp}.json`);
-  fs.writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, { mode: 0o600 });
+  const journalPath = writeJournal(journal);
 
   heading('Done');
   log(`  ${journal.length}/${ready.length} account(s) migrated.`);

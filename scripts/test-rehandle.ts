@@ -17,7 +17,23 @@ import {
   normalizeTwitterUsername,
   validateHandle,
 } from './lib/handle-map.js';
-import { parseArgs, seededRandom, selectMappings, sourceUsernameFor } from './rehandle.js';
+import {
+  describeChoice,
+  maskToken,
+  parseIdentifierList,
+  sampleRandom,
+  upsertEnvVar,
+  validateDomainInput,
+} from './rehandle-wizard.js';
+import type { Plan } from './rehandle.js';
+import {
+  findDuplicateTwitterSources,
+  findExternalClashes,
+  parseArgs,
+  seededRandom,
+  selectMappings,
+  sourceUsernameFor,
+} from './rehandle.js';
 
 let passed = 0;
 let failed = 0;
@@ -342,5 +358,105 @@ section('8. Bulk dry-run simulation over all 60 dummy accounts', () => {
 });
 
 // ---------------------------------------------------------------------------
+section('9. Wizard input helpers', () => {
+  equal(validateDomainInput('j4ck.xyz'), true, 'accepts a normal domain');
+  equal(validateDomainInput('xmirror.bot'), true, 'accepts the .bot TLD');
+  equal(validateDomainInput('  J4CK.XYZ  '), true, 'tolerates whitespace and caps');
+  assert(validateDomainInput('') !== true, 'rejects an empty domain');
+  assert(validateDomainInput('localhost') !== true, 'rejects a single-segment domain');
+  assert(validateDomainInput('j4ck.local') !== true, 'rejects a disallowed TLD');
+  assert(validateDomainInput('j4ck.123') !== true, 'rejects a numeric TLD');
+  assert(validateDomainInput('-bad.xyz') !== true, 'rejects a segment starting with a hyphen');
+
+  equal(maskToken('abcdefghijklmnop'), '************mnop', 'masks all but the last four characters');
+  equal(maskToken('short'), '*****', 'masks a short token entirely');
+  assert(!maskToken('abcdefghijklmnop').includes('abcdefg'), 'never leaks the start of the token');
+
+  equal(parseIdentifierList('a, b c'), ['a', 'b', 'c'], 'splits on commas and spaces');
+  equal(parseIdentifierList('@Alice, @alice'), ['alice'], 'strips @, lowercases and de-duplicates');
+  equal(parseIdentifierList('   '), [], 'returns nothing for blank input');
+
+  equal(sampleRandom([1, 2, 3, 4, 5], 3).length, 3, 'samples the requested count');
+  equal(new Set(sampleRandom([1, 2, 3, 4, 5], 5)).size, 5, 'samples without replacement');
+  equal(sampleRandom([1, 2], 10).length, 2, 'never returns more than it was given');
+});
+
+section('10. .env editing', () => {
+  equal(upsertEnvVar('', 'CLOUDFLARE_API_TOKEN', 'abc'), 'CLOUDFLARE_API_TOKEN=abc\n', 'writes into an empty file');
+  equal(
+    upsertEnvVar('FOO=1\n', 'CLOUDFLARE_API_TOKEN', 'abc'),
+    'FOO=1\nCLOUDFLARE_API_TOKEN=abc\n',
+    'appends when the key is absent',
+  );
+  equal(
+    upsertEnvVar('FOO=1', 'CLOUDFLARE_API_TOKEN', 'abc'),
+    'FOO=1\nCLOUDFLARE_API_TOKEN=abc\n',
+    'adds the missing trailing newline before appending',
+  );
+  equal(
+    upsertEnvVar('CLOUDFLARE_API_TOKEN=\nFOO=1\n', 'CLOUDFLARE_API_TOKEN', 'abc'),
+    'CLOUDFLARE_API_TOKEN=abc\nFOO=1\n',
+    'replaces an existing empty value in place rather than duplicating',
+  );
+  equal(
+    upsertEnvVar('CLOUDFLARE_API_TOKEN=old\n', 'CLOUDFLARE_API_TOKEN', 'new'),
+    'CLOUDFLARE_API_TOKEN=new\n',
+    'overwrites an existing value',
+  );
+  equal(
+    upsertEnvVar('# CLOUDFLARE_API_TOKEN=old\n', 'CLOUDFLARE_API_TOKEN', 'new'),
+    'CLOUDFLARE_API_TOKEN=new\n',
+    'uncomments and sets a commented-out key',
+  );
+  const twice = upsertEnvVar(upsertEnvVar('', 'CLOUDFLARE_API_TOKEN', 'a'), 'CLOUDFLARE_API_TOKEN', 'b');
+  equal(twice.split('CLOUDFLARE_API_TOKEN').length - 1, 1, 'running twice leaves exactly one entry');
+});
+
+section('11. Duplicate Twitter sources and handle clashes', () => {
+  const make = (id: string, usernames: string[], bsky: string): AccountMapping =>
+    ({
+      id,
+      twitterUsernames: usernames,
+      bskyIdentifier: bsky,
+      bskyPassword: 'x',
+      bskyServiceUrl: 'https://bsky.social',
+      enabled: true,
+      profileSyncSourceUsername: usernames[0],
+    }) as AccountMapping;
+
+  // The real shape of the nintendovs case: a secondary on one mapping, primary on another.
+  const mappings = [
+    make('a', ['nintendoamerica', 'nintendovs'], 'nintendobotx.bsky.social'),
+    make('b', ['nintendovs'], 'nintendovs.bsky.social'),
+    make('c', ['solo'], 'solo.bsky.social'),
+  ];
+  const duplicates = findDuplicateTwitterSources(mappings);
+  equal(duplicates.length, 1, 'finds exactly one duplicated Twitter source');
+  equal(duplicates[0]?.twitterUsername, 'nintendovs', 'names the duplicated account');
+  equal(duplicates[0]?.bskyIdentifiers.length, 2, 'lists both Bluesky accounts mirroring it');
+  equal(findDuplicateTwitterSources([make('a', ['x'], 'x.bsky.social')]), [], 'no false positives');
+
+  // A generated handle already held by a different mapping must block.
+  const plans = [{ mapping: mappings[0], newHandle: 'solo.bsky.social' } as unknown as Plan];
+  equal(findExternalClashes(plans, mappings), ['solo.bsky.social'], 'detects a handle held by another mapping');
+  equal(
+    findExternalClashes([{ mapping: mappings[0], newHandle: 'brand-new.j4ck.xyz' } as unknown as Plan], mappings),
+    [],
+    'an unused handle does not clash',
+  );
+  const first = mappings[0] as AccountMapping;
+  equal(
+    findExternalClashes([{ mapping: first, newHandle: first.bskyIdentifier } as unknown as Plan], mappings),
+    [],
+    'a mapping keeping its own handle is not a clash',
+  );
+
+  equal(
+    describeChoice(mappings[0] as AccountMapping, 'j4ck.xyz'),
+    '@nintendoamerica  nintendobotx.bsky.social -> nintendoamerica.j4ck.xyz',
+    'the picker line shows the username, current handle and target',
+  );
+});
+
 console.log(`\n${failed === 0 ? 'PASS' : 'FAIL'}  ${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

@@ -6,6 +6,20 @@ and then calling `com.atproto.identity.updateHandle` on each account.
 
 **Dry run is the default.** Nothing changes unless you pass `--apply`.
 
+## The easy way: the wizard
+
+```
+bun run wizard
+```
+
+Walks through everything with prompts - domain, Cloudflare token, which accounts,
+a full preview - and changes nothing until you confirm at the very end. It also
+offers to stop and restart the pm2 service around the migration, so it cannot
+write `config.json` underneath you.
+
+Everything below is the same job driven by flags instead. Use it when you want
+to script the run or repeat an exact command.
+
 ## Setup on the Pi
 
 1. Create a Cloudflare API token at
@@ -125,9 +139,14 @@ hand and re-run.
 bun run test:rehandle
 ```
 
-86 offline assertions covering the conversion rules, spec validation, collision
-detection, argument parsing, and account selection over a dummy 60-account
-config. No network, no credentials, no writes.
+Two offline suites, 146 assertions, no network or credentials:
+
+- `test-rehandle.ts` - conversion rules, spec validation, collision and
+  duplicate-source detection, argument parsing, `.env` editing, and selection
+  over a dummy 60-account config.
+- `test-wizard-prompts.ts` - drives the wizard's real prompts through injected
+  streams, so the questions, validators and filters a user actually sees are
+  exercised rather than a reimplementation of them.
 
 ## Notes and caveats
 
@@ -138,6 +157,10 @@ config. No network, no credentials, no writes.
   *per account*, so 60 accounts in one pass is fine. The script pauses 2s
   between accounts anyway.
 - **The old handle is released** once changed, and someone else could claim it.
+- **Prompt types:** the wizard uses `select`, not the legacy `list`. Under the
+  pinned inquirer 13, a `list` prompt silently resolves to an empty string
+  instead of the chosen value. (`src/cli.ts` still uses `list` in six places -
+  worth checking separately.)
 - **DNS propagation** normally takes seconds with TTL 60, but a previously
   queried name can be negative-cached. If an account times out, its DNS record
   is already in place — just re-run it with `--only`.
