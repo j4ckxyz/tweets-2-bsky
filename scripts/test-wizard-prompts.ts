@@ -129,7 +129,7 @@ console.log('\ntweets-2-bsky wizard - scripted prompt tests\n');
 // ---------------------------------------------------------------------------
 console.log('1. Domain prompt');
 {
-  equal((await scenario([ENTER], askDomain)).value, 'j4ck.xyz', 'Enter accepts the default');
+  equal((await scenario([ENTER], askDomain)).value, 'xmirror.bot', 'Enter accepts the default');
   equal((await scenario(['xmirror.bot', ENTER], askDomain)).value, 'xmirror.bot', 'a typed domain is accepted');
   equal(
     (await scenario(['  XMIRROR.BOT  ', ENTER], askDomain)).value,

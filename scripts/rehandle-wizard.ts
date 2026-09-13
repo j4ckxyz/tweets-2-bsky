@@ -22,6 +22,7 @@ import { type AccountMapping, getConfig } from '../src/config-manager.js';
 import type { CloudflareClient } from './lib/cloudflare.js';
 import { type HandleConversion, convertHandle, findCollisions, validateHandle } from './lib/handle-map.js';
 import {
+  DEFAULT_DOMAIN,
   type JournalEntry,
   type Options,
   type Plan,
@@ -36,6 +37,7 @@ import {
   findExternalClashes,
   green,
   heading,
+  isActionable,
   loadEnvFile,
   log,
   parseArgs,
@@ -64,8 +66,8 @@ const ENV_PATH = path.join(APP_ROOT, '.env');
 /** Validate a base domain the way the handle spec will. Returns true or a message. */
 export function validateDomainInput(value: string): true | string {
   const domain = value.trim().toLowerCase();
-  if (!domain) return 'Enter a domain, e.g. j4ck.xyz';
-  if (domain.split('.').length < 2) return 'A domain needs at least two parts, e.g. j4ck.xyz';
+  if (!domain) return `Enter a domain, e.g. ${DEFAULT_DOMAIN}`;
+  if (domain.split('.').length < 2) return `A domain needs at least two parts, e.g. ${DEFAULT_DOMAIN}`;
   // Probe it the same way a real handle would be built, so the rules match exactly.
   const errors = validateHandle(`probe.${domain}`);
   return errors.length === 0 ? true : (errors[0] ?? 'That is not a usable handle domain.');
@@ -97,6 +99,7 @@ export function upsertEnvVar(contents: string, key: string, value: string): stri
 
 export interface PlanSummary {
   ready: number;
+  configCatchUp: number;
   alreadyCorrect: number;
   blocked: number;
 }
@@ -104,6 +107,7 @@ export interface PlanSummary {
 export function summarize(plans: Plan[]): PlanSummary {
   return {
     ready: plans.filter((p) => p.status === 'ready').length,
+    configCatchUp: plans.filter((p) => p.status === 'config-catch-up').length,
     alreadyCorrect: plans.filter((p) => p.status === 'already-correct').length,
     blocked: plans.filter((p) => p.status === 'blocked').length,
   };
@@ -183,7 +187,7 @@ export async function askDomain(ask: PromptFn = defaultPrompt): Promise<string> 
       type: 'input',
       name: 'domain',
       message: 'Which domain should the new handles sit under?',
-      default: stored || 'j4ck.xyz',
+      default: stored || DEFAULT_DOMAIN,
       validate: validateDomainInput,
       filter: (value: string) => value.trim().toLowerCase(),
     },
@@ -413,14 +417,21 @@ async function main(): Promise<number> {
   }
 
   const summary = summarize(plans);
+  const toApply = summary.ready + summary.configCatchUp;
   heading('Summary');
   log(
-    `  ${green(`${summary.ready} ready`)}   ${cyan(`${summary.alreadyCorrect} already correct`)}   ${
-      summary.blocked > 0 ? red(`${summary.blocked} blocked`) : '0 blocked'
-    }`,
+    [
+      green(`${summary.ready} ready`),
+      summary.configCatchUp > 0 ? yellow(`${summary.configCatchUp} config catch-up`) : null,
+      cyan(`${summary.alreadyCorrect} already correct`),
+      summary.blocked > 0 ? red(`${summary.blocked} blocked`) : '0 blocked',
+    ]
+      .filter(Boolean)
+      .map((part) => `  ${part}`)
+      .join(' '),
   );
 
-  if (summary.ready === 0) {
+  if (toApply === 0) {
     log(`\n${yellow('Nothing to do.')}`);
     return 0;
   }
@@ -440,7 +451,11 @@ async function main(): Promise<number> {
 
   // --- Confirm ------------------------------------------------------------
   log();
-  log(yellow(`  About to change ${summary.ready} live Bluesky handle(s) and write ${summary.ready} DNS record(s).`));
+  log(
+    yellow(
+      `  About to change ${summary.ready} live Bluesky handle(s)${summary.configCatchUp > 0 ? ` and catch config.json up for ${summary.configCatchUp}` : ''}.`,
+    ),
+  );
   const go = await askConfirmApply();
 
   if (!go) {
@@ -454,7 +469,7 @@ async function main(): Promise<number> {
   log(`  ${green('OK')} config.json backed up to ${backupConfig()}`);
 
   const journal: JournalEntry[] = [];
-  const ready = plans.filter((p) => p.status === 'ready');
+  const ready = plans.filter(isActionable);
   for (const plan of ready) {
     try {
       const entry = await applyPlan(plan, options, cloudflare);

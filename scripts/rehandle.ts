@@ -25,7 +25,8 @@ import { DATA_DIR } from '../src/storage-paths.js';
 import {
   CloudflareClient,
   type DnsRecord,
-  resolveTxt,
+  isCloudflareDelegation,
+  resolveNs,
   unquoteTxt,
   upsertTxtRecord,
   waitForTxt,
@@ -33,6 +34,8 @@ import {
 import { type HandleConversion, convertHandle, findCollisions } from './lib/handle-map.js';
 
 const APP_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+export const DEFAULT_DOMAIN = 'xmirror.bot';
 
 // ---------------------------------------------------------------------------
 // Output helpers
@@ -73,7 +76,7 @@ export interface Options {
 
 export function parseArgs(argv: string[]): Options {
   const options: Options = {
-    domain: 'j4ck.xyz',
+    domain: DEFAULT_DOMAIN,
     zoneId: null,
     limit: 3,
     all: false,
@@ -155,7 +158,7 @@ ${bold('rehandle')} - migrate tweets-2-bsky accounts to <twitter-handle>.<domain
   ${bold('Dry run is the default.')} Add --apply to make real changes.
 
   --check-cloudflare    Verify the Cloudflare token, zone and DNS write access, then exit
-  --domain <name>       Base domain for the new handles (default: j4ck.xyz)
+  --domain <name>       Base domain for the new handles (default: xmirror.bot)
   --zone-id <id>        Cloudflare zone id, to skip the zone lookup (or set CLOUDFLARE_ZONE_ID).
                         Lets the token get by with only Zone -> DNS -> Edit.
   --limit <n>           How many accounts to act on (default: 3)
@@ -263,7 +266,17 @@ export function selectMappings(mappings: AccountMapping[], options: Options): Ac
 // Planning
 // ---------------------------------------------------------------------------
 
-export type PlanStatus = 'ready' | 'already-correct' | 'blocked';
+/**
+ * - ready:           needs DNS + a handle change
+ * - config-catch-up: Bluesky already has the new handle but config.json does not
+ *                    (a previous run was interrupted after the change landed)
+ * - already-correct: nothing to do
+ * - blocked:         cannot proceed; see blockers
+ */
+export type PlanStatus = 'ready' | 'config-catch-up' | 'already-correct' | 'blocked';
+
+/** Plans the apply step should act on. */
+export const isActionable = (plan: Plan): boolean => plan.status === 'ready' || plan.status === 'config-catch-up';
 
 export interface Plan {
   mapping: AccountMapping;
@@ -274,6 +287,8 @@ export interface Plan {
   txtName: string | null;
   did: string | null;
   didError: string | null;
+  /** The handle Bluesky itself reports for the DID, or null if it could not be read. */
+  blueskyHandle: string | null;
   existingRecord: DnsRecord | null;
   status: PlanStatus;
   blockers: string[];
@@ -319,6 +334,7 @@ export async function buildPlan(
       txtName: null,
       did: null,
       didError: null,
+      blueskyHandle: null,
       existingRecord: null,
       status: 'blocked',
       blockers: ['Mapping has no Twitter username to derive a handle from.'],
@@ -336,7 +352,35 @@ export async function buildPlan(
     did = await resolveDid(currentHandle, serviceUrl);
   } catch (error) {
     didError = (error as Error).message;
+  }
+
+  // If the handle in config.json no longer resolves, a previous run may have
+  // changed the handle on Bluesky and been interrupted before saving config.
+  // Check whether the target handle already points at an account that claims it.
+  // Ownership is proven later, at apply time, by logging in with the stored password.
+  if (!did && conversion.handle) {
+    try {
+      const candidate = await resolveDid(conversion.handle, serviceUrl);
+      if ((await describeRepoHandle(candidate, serviceUrl)) === conversion.handle) {
+        did = candidate;
+        didError = null;
+      }
+    } catch {
+      // Not migrated either; report the original resolution error below.
+    }
+  }
+
+  if (!did) {
     blockers.push(`Could not resolve the current handle "${currentHandle}": ${didError}`);
+  }
+
+  let blueskyHandle: string | null = null;
+  if (did) {
+    try {
+      blueskyHandle = await describeRepoHandle(did, serviceUrl);
+    } catch {
+      // Fall back to trusting config.json below.
+    }
   }
 
   const txtName = conversion.handle ? `_atproto.${conversion.handle}` : null;
@@ -354,8 +398,18 @@ export async function buildPlan(
     blockers.push('Mapping has no Bluesky app password stored; the handle change cannot be authenticated.');
   }
 
-  const alreadyCorrect = conversion.handle !== null && currentHandle.toLowerCase() === conversion.handle;
-  const status: PlanStatus = blockers.length > 0 ? 'blocked' : alreadyCorrect ? 'already-correct' : 'ready';
+  const configMatches = conversion.handle !== null && currentHandle.toLowerCase() === conversion.handle;
+  // Prefer what Bluesky reports; only trust config.json when Bluesky could not be read.
+  const blueskyMatches = blueskyHandle === null ? configMatches : blueskyHandle === conversion.handle;
+
+  const status: PlanStatus =
+    blockers.length > 0
+      ? 'blocked'
+      : blueskyMatches && configMatches
+        ? 'already-correct'
+        : blueskyMatches
+          ? 'config-catch-up'
+          : 'ready';
 
   return {
     mapping,
@@ -366,6 +420,7 @@ export async function buildPlan(
     txtName,
     did,
     didError,
+    blueskyHandle,
     existingRecord,
     status,
     blockers,
@@ -417,9 +472,11 @@ export function printPlan(plan: Plan, index: number, total: number): void {
   const label =
     plan.status === 'ready'
       ? green('READY')
-      : plan.status === 'already-correct'
-        ? cyan('ALREADY CORRECT')
-        : red('BLOCKED');
+      : plan.status === 'config-catch-up'
+        ? yellow('CONFIG CATCH-UP')
+        : plan.status === 'already-correct'
+          ? cyan('ALREADY CORRECT')
+          : red('BLOCKED');
 
   log(`\n${bold(`[${index + 1}/${total}]`)} ${label}`);
   log(`  Twitter username : @${plan.sourceUsername ?? dim('(none)')}`);
@@ -431,6 +488,9 @@ export function printPlan(plan: Plan, index: number, total: number): void {
     log(`  ${dim(`(mapping also covers: ${others})`)}`);
   }
   log(`  Current handle   : ${plan.currentHandle}`);
+  if (plan.blueskyHandle && plan.blueskyHandle !== plan.currentHandle.toLowerCase()) {
+    log(`  On Bluesky       : ${yellow(plan.blueskyHandle)} ${dim('(config.json is behind)')}`);
+  }
   log(`  New handle       : ${plan.newHandle ? bold(green(plan.newHandle)) : red('n/a')}`);
   log(`  DID              : ${plan.did ?? red(plan.didError ?? 'unresolved')}`);
 
@@ -459,6 +519,8 @@ export function printPlan(plan: Plan, index: number, total: number): void {
 // Cloudflare preflight
 // ---------------------------------------------------------------------------
 
+const WRITE_TEST_TIMEOUT_MS = 90_000;
+
 export async function checkCloudflare(
   options: Options,
   token: string,
@@ -481,43 +543,64 @@ export async function checkCloudflare(
   } else {
     const zone = await client.getZone(options.domain);
     log(`  ${green('OK')} Zone found: ${zone.name} (id ${zone.id.slice(0, 8)}..., status: ${zone.status})`);
+    if (zone.status !== 'active') {
+      throw new Error(
+        `The ${zone.name} zone is "${zone.status}", not "active": Cloudflare has not seen the nameserver change yet. Records written now would be invisible to Bluesky. Wait for the zone to turn active, then run this again.`,
+      );
+    }
     zoneId = zone.id;
   }
+
+  // What actually decides whether Bluesky can see our records is the public
+  // delegation, not the Cloudflare API. This also covers the --zone-id path,
+  // which skips the zone lookup and so never sees its status.
+  const nameservers = await resolveNs(options.domain);
+  if (!isCloudflareDelegation(nameservers)) {
+    throw new Error(
+      `Public DNS delegates ${options.domain} to ${nameservers.join(', ') || 'nothing'}, not Cloudflare. Set the nameservers at your registrar to the two Cloudflare gives you, then run this again.`,
+    );
+  }
+  log(`  ${green('OK')} Public DNS delegates ${options.domain} to Cloudflare (${nameservers.join(', ')})`);
 
   if (!options.writeTest) {
     log(`  ${dim('.  Write test skipped (--no-write-test). Read access confirmed only.')}`);
     return { client, zoneId };
   }
 
-  // Read access does not prove Zone:DNS:Edit, so create and delete a scratch record.
-  const testName = `_rehandle-check.${options.domain}`;
+  // Read access does not prove Zone:DNS:Edit, and a successful API write does not
+  // prove the record is publicly visible. Write a scratch record and wait for it
+  // to resolve. The name is unique per run so a negative answer cached from an
+  // earlier check cannot make this one fail.
+  const testName = `_rehandle-check-${Date.now().toString(36)}.${options.domain}`;
   const testValue = `rehandle-check=${Date.now()}`;
   log(`  ${dim(`.  Write test: creating temporary TXT ${testName}`)}`);
 
-  const stale = await client.findTxtRecord(zoneId, testName);
-  if (stale) await client.deleteRecord(zoneId, stale.id);
-
-  const record = await client.createTxtRecord(
-    zoneId,
-    testName,
-    testValue,
-    60,
-    'temporary rehandle.ts permission check',
-  );
+  const record = await client.createTxtRecord(zoneId, testName, testValue, 60, 'temporary rehandle.ts check');
   log(`  ${green('OK')} DNS write succeeded (record id ${record.id.slice(0, 8)}...)`);
 
+  let visible: Awaited<ReturnType<typeof waitForTxt>>;
   try {
-    const values = await resolveTxt(testName, 'https://cloudflare-dns.com/dns-query');
-    log(
-      values.includes(testValue)
-        ? `  ${green('OK')} Record resolves over public DNS`
-        : `  ${yellow('!')}  Record not visible over public DNS yet (normal for a few seconds); saw: ${JSON.stringify(values)}`,
-    );
-  } catch (error) {
-    log(`  ${yellow('!')}  Public DNS check failed: ${(error as Error).message}`);
+    process.stdout.write(`  ${dim('.  waiting for it to appear in public DNS')}`);
+    visible = await waitForTxt(testName, testValue, {
+      timeoutMs: WRITE_TEST_TIMEOUT_MS,
+      intervalMs: 3_000,
+      onAttempt: () => process.stdout.write(dim('.')),
+    });
+    log('');
+    if (visible.resolved) {
+      log(
+        `  ${green('OK')} Visible to ${visible.resolversAgreeing.join(' + ')} after ${Math.round(visible.elapsedMs / 1000)}s`,
+      );
+    }
   } finally {
     await client.deleteRecord(zoneId, record.id);
     log(`  ${green('OK')} Temporary record deleted`);
+  }
+
+  if (!visible.resolved) {
+    throw new Error(
+      `The test record was written but was not publicly visible within ${WRITE_TEST_TIMEOUT_MS / 1000}s. Bluesky would not see handle records either. Check the zone is active and the nameservers have propagated.`,
+    );
   }
 
   return { client, zoneId };
@@ -528,6 +611,7 @@ export async function checkCloudflare(
 // ---------------------------------------------------------------------------
 
 export interface JournalEntry {
+  kind: 'handle-change' | 'config-catch-up';
   mappingId: string;
   twitterUsername: string;
   did: string;
@@ -556,35 +640,36 @@ export function writeJournal(entries: JournalEntry[]): string {
 }
 
 /**
- * Point the mapping — and everything keyed by its handle — at the new handle.
- *
- * History, the post queue and account health are all keyed by the identifier.
- * Changing only config.json left the account's history under the old handle,
- * so the next sweep saw an empty history for the new one and re-posted the
- * account's latest tweets as duplicates. The rows move in the same step; the
- * old handle is also kept as an alias so anything still holding it resolves
- * to the new rows.
- *
- * Config is re-read immediately before writing and only this one mapping is
- * touched, so a concurrently running service cannot have its own writes
+ * Re-read config immediately before writing and mutate only this one mapping,
+ * so a concurrently running tweets-2-bsky service cannot have its own writes
  * clobbered by a stale in-memory copy.
  */
-export async function persistNewHandle(
-  mappingId: string,
-  newHandle: string,
-  did?: string,
-): Promise<{ updated: boolean; history: number; queue: number }> {
-  // Imported here rather than at the top so the dry-run paths (and the offline
-  // tests that import this file) never open the database.
-  const { dbService } = await import('../src/db.js');
+function persistNewHandle(mappingId: string, newHandle: string): boolean {
   const config = getConfig();
   const mapping = config.mappings.find((m) => m.id === mappingId);
-  if (!mapping) return { updated: false, history: 0, queue: 0 };
-  const moved = dbService.migrateBskyIdentifier(mapping.bskyIdentifier, newHandle);
+  if (!mapping) return false;
   mapping.bskyIdentifier = newHandle;
-  if (did?.startsWith('did:')) mapping.bskyDid = did;
   saveConfig(config);
-  return { updated: true, ...moved };
+  return true;
+}
+
+/**
+ * Log in with the identifier from config.json, falling back to the DID. The
+ * PDS accepts a DID as a login identifier, so this still works when config.json
+ * holds a handle Bluesky no longer recognises.
+ */
+async function login(serviceUrl: string, identifiers: string[], password: string): Promise<AtpAgent> {
+  let lastError: unknown;
+  for (const identifier of [...new Set(identifiers)]) {
+    const agent = new AtpAgent({ service: serviceUrl });
+    try {
+      await agent.login({ identifier, password });
+      return agent;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 export async function applyPlan(
@@ -599,6 +684,40 @@ export async function applyPlan(
   const content = `did=${did}`;
 
   log(`\n${bold(`@${plan.sourceUsername}`)}  ${plan.currentHandle} ${dim('->')} ${bold(newHandle)}`);
+
+  const entry = (kind: JournalEntry['kind'], dnsAction: string, dnsRecordId: string | null): JournalEntry => ({
+    kind,
+    mappingId: mapping.id,
+    twitterUsername: plan.sourceUsername ?? '',
+    did,
+    oldHandle: plan.currentHandle,
+    newHandle,
+    dnsRecordId,
+    dnsAction,
+    changedAt: new Date().toISOString(),
+    configUpdated: true,
+  });
+
+  // Bluesky already has the new handle; only config.json is behind.
+  if (plan.status === 'config-catch-up') {
+    let agent: AtpAgent;
+    try {
+      agent = await login(serviceUrl, [mapping.bskyIdentifier, newHandle, did], mapping.bskyPassword);
+    } catch (error) {
+      log(`  ${red('x')}  Could not log in to confirm ownership: ${(error as Error).message}`);
+      return null;
+    }
+    if (agent.session?.did !== did) {
+      log(`  ${red('x')}  Logged in as ${agent.session?.did}, expected ${did}. Leaving config.json alone.`);
+      return null;
+    }
+    if (!persistNewHandle(mapping.id, newHandle)) {
+      log(`  ${red('x')}  config.json NOT updated - mapping ${mapping.id} disappeared. Fix this by hand.`);
+      return null;
+    }
+    log(`  ${green('OK')} Bluesky already had ${newHandle}; config.json caught up`);
+    return entry('config-catch-up', 'not-needed', null);
+  }
 
   // 1. DNS
   const upsert = await upsertTxtRecord(
@@ -630,9 +749,9 @@ export async function applyPlan(
   );
 
   // 3. Log in and change the handle.
-  const agent = new AtpAgent({ service: serviceUrl });
+  let agent: AtpAgent;
   try {
-    await agent.login({ identifier: mapping.bskyIdentifier, password: mapping.bskyPassword });
+    agent = await login(serviceUrl, [mapping.bskyIdentifier, did], mapping.bskyPassword);
   } catch (error) {
     log(`  ${red('x')}  Bluesky login failed for ${mapping.bskyIdentifier}: ${(error as Error).message}`);
     return null;
@@ -658,7 +777,17 @@ export async function applyPlan(
   }
   log(`  ${green('OK')} Handle changed on ${serviceUrl}`);
 
-  // 4. Confirm from the PDS itself (not DNS, which may still be cached).
+  // 4. Save config.json straight away. The longer this waits after the handle
+  //    change, the wider the window in which an interruption leaves the service
+  //    logging in with a handle Bluesky no longer knows.
+  const configUpdated = persistNewHandle(mapping.id, newHandle);
+  log(
+    configUpdated
+      ? `  ${green('OK')} config.json updated (bskyIdentifier -> ${newHandle})`
+      : `  ${red('x')}  config.json NOT updated - mapping ${mapping.id} disappeared. Fix this by hand.`,
+  );
+
+  // 5. Confirm from the PDS itself (not DNS, which may still be cached).
   try {
     const confirmed = await describeRepoHandle(did, serviceUrl);
     log(
@@ -670,27 +799,7 @@ export async function applyPlan(
     log(`  ${yellow('!')}  Could not confirm the new handle: ${(error as Error).message}`);
   }
 
-  // 5. Point config.json and the post history at the new handle, or logins
-  //    break and the next sweep re-posts the account's recent tweets.
-  const persisted = await persistNewHandle(mapping.id, newHandle, did);
-  const configUpdated = persisted.updated;
-  log(
-    configUpdated
-      ? `  ${green('OK')} config.json updated (bskyIdentifier -> ${newHandle}); moved ${persisted.history} history record(s) and ${persisted.queue} queued tweet(s)`
-      : `  ${red('x')}  config.json NOT updated - mapping ${mapping.id} disappeared. Fix this by hand.`,
-  );
-
-  return {
-    mappingId: mapping.id,
-    twitterUsername: plan.sourceUsername ?? '',
-    did,
-    oldHandle: plan.currentHandle,
-    newHandle,
-    dnsRecordId: upsert.record.id ?? null,
-    dnsAction: upsert.action,
-    changedAt: new Date().toISOString(),
-    configUpdated,
-  };
+  return { ...entry('handle-change', upsert.action, upsert.record.id ?? null), configUpdated };
 }
 
 function confirm(question: string): Promise<boolean> {
@@ -809,13 +918,14 @@ async function main(): Promise<number> {
     log(`  ${dim('Not a handle problem - both accounts post the same tweets. Worth fixing in the dashboard.')}`);
   }
 
-  const ready = plans.filter((p) => p.status === 'ready');
+  const ready = plans.filter(isActionable);
+  const catchUp = plans.filter((p) => p.status === 'config-catch-up');
   const blocked = plans.filter((p) => p.status === 'blocked');
   const alreadyCorrect = plans.filter((p) => p.status === 'already-correct');
 
   heading('Summary');
   log(
-    `  ${green(`${ready.length} ready`)}   ${cyan(`${alreadyCorrect.length} already correct`)}   ${blocked.length > 0 ? red(`${blocked.length} blocked`) : '0 blocked'}`,
+    `  ${green(`${ready.length - catchUp.length} ready`)}   ${catchUp.length > 0 ? `${yellow(`${catchUp.length} config catch-up`)}   ` : ''}${cyan(`${alreadyCorrect.length} already correct`)}   ${blocked.length > 0 ? red(`${blocked.length} blocked`) : '0 blocked'}`,
   );
 
   if (!options.apply) {
