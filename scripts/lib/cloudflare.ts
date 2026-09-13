@@ -185,6 +185,30 @@ export async function resolveTxt(fqdn: string, resolverUrl: string): Promise<str
   return (body.Answer ?? []).filter((a) => a.type === 16).map((a) => unquoteTxt(a.data));
 }
 
+/** Nameservers the public DNS currently delegates a domain to (lowercase, no trailing dot). */
+export async function resolveNs(domain: string, resolverUrl: string = DOH_RESOLVERS[0].url): Promise<string[]> {
+  const response = await fetch(`${resolverUrl}?name=${encodeURIComponent(domain)}&type=NS`, {
+    headers: { Accept: 'application/dns-json' },
+  });
+  if (!response.ok) {
+    throw new Error(`DoH NS query failed (HTTP ${response.status}) for ${domain}`);
+  }
+  const body = (await response.json()) as { Answer?: { type: number; data: string }[] };
+  return (body.Answer ?? [])
+    .filter((a) => a.type === 2)
+    .map((a) => a.data.trim().toLowerCase().replace(/\.$/, ''))
+    .sort();
+}
+
+/**
+ * True only when every delegated nameserver is Cloudflare's. A half-finished
+ * change (some registrar nameservers still listed) means some resolvers will
+ * not see records written through the Cloudflare API.
+ */
+export function isCloudflareDelegation(nameservers: string[]): boolean {
+  return nameservers.length > 0 && nameservers.every((ns) => /\.ns\.cloudflare\.com$/.test(ns));
+}
+
 export interface PropagationResult {
   resolved: boolean;
   elapsedMs: number;

@@ -182,7 +182,7 @@ section('6. Argument parsing', () => {
   const defaults = parseArgs([]);
   equal(defaults.apply, false, 'dry run is the default (--apply is opt-in)');
   equal(defaults.limit, 3, 'the default sample size is 3');
-  equal(defaults.domain, 'j4ck.xyz', 'the default domain is j4ck.xyz');
+  equal(defaults.domain, 'xmirror.bot', 'the default domain is xmirror.bot');
 
   equal(parseArgs(['--apply']).apply, true, '--apply is recognised');
   equal(parseArgs(['--limit', '10']).limit, 10, '--limit takes a value');
