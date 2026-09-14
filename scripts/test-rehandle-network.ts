@@ -17,7 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type AccountMapping, getConfig } from '../src/config-manager.js';
 import { DATA_DIR } from '../src/storage-paths.js';
-import { isCloudflareDelegation, waitForTxt } from './lib/cloudflare.js';
+import { CloudflareClient, isCloudflareDelegation, waitForTxt } from './lib/cloudflare.js';
 import { type Options, applyPlan, buildPlan, checkCloudflare, isActionable, parseArgs } from './rehandle.js';
 
 let passed = 0;
@@ -54,6 +54,8 @@ interface World {
   nameservers?: string[];
   /** Which identifiers createSession accepts, and optionally a different DID to hand back. */
   logins?: { identifiers: string[]; password: string; sessionDid?: string };
+  /** Script updateHandle: fail with each message in turn, then succeed. Records every call. */
+  updateHandle?: { failures: string[]; calls: number };
 }
 
 const json = (body: unknown, status = 200) =>
@@ -68,16 +70,21 @@ function install(world: World): void {
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
     const method = (init?.method ?? 'GET').toUpperCase();
-    // AtpAgent sends bodies as bytes, the Cloudflare client as strings.
-    const bodyText = () =>
-      typeof init?.body === 'string' ? init.body : new TextDecoder().decode(init?.body as Uint8Array);
+    // Clients send bodies as strings, bytes, or a Request object; read them all.
+    const bodyText = async (): Promise<string> => {
+      if (input instanceof Request) return input.clone().text();
+      const body = init?.body;
+      if (body === undefined || body === null) return '';
+      if (typeof body === 'string') return body;
+      return new Response(body as ConstructorParameters<typeof Response>[0]).text();
+    };
 
     if (url.pathname.endsWith('/com.atproto.identity.resolveHandle')) {
       const did = world.handles[url.searchParams.get('handle') ?? ''];
       return did ? json({ did }) : json({ error: 'InvalidRequest', message: 'Unable to resolve handle' }, 400);
     }
     if (url.pathname.endsWith('/com.atproto.server.createSession')) {
-      const { identifier, password } = JSON.parse(bodyText());
+      const { identifier, password } = JSON.parse(await bodyText());
       const did = identifier.startsWith('did:') ? identifier : world.handles[identifier];
       if (!world.logins || password !== world.logins.password || !world.logins.identifiers.includes(identifier)) {
         return json({ error: 'AuthenticationRequired', message: 'Invalid identifier or password' }, 401);
@@ -90,6 +97,16 @@ function install(world: World): void {
         refreshJwt: 'header.e30.sig',
         active: true,
       });
+    }
+    if (url.pathname.endsWith('/com.atproto.identity.updateHandle')) {
+      const script = world.updateHandle ?? { failures: [], calls: 0 };
+      script.calls++;
+      const failure = script.failures.shift();
+      if (failure) return json({ error: 'InvalidRequest', message: failure }, 400);
+      const { handle } = JSON.parse(await bodyText());
+      for (const did of Object.keys(world.repos)) world.repos[did] = handle;
+      world.handles[handle] = DID;
+      return json({});
     }
     if (url.pathname.endsWith('/com.atproto.repo.describeRepo')) {
       const handle = world.repos[url.searchParams.get('repo') ?? ''];
@@ -109,7 +126,7 @@ function install(world: World): void {
       }
       if (path.endsWith('/dns_records') && method === 'GET') return json({ success: true, result: [] });
       if (path.endsWith('/dns_records') && method === 'POST') {
-        const body = JSON.parse(bodyText());
+        const body = JSON.parse(await bodyText());
         txt.set(body.name, body.content);
         return json({ success: true, result: { id: `rec${nextId++}0000000`, ...body } });
       }
@@ -220,6 +237,40 @@ if (process.env.REHANDLE_TEST_CHILD === 'apply') {
     },
     'jersey-met.bsky.social',
   );
+
+  // Full handle-change path, with the PDS resolver lagging behind public DNS.
+  const fastOptions: Options = { ...options, dnsSettleMs: 0, handleRetryDelaysMs: [5, 5] };
+  const realCloudflare = { client: new CloudflareClient('fake-token'), zoneId: 'zone12345678' };
+  const change = async (label: string, failures: string[]) => {
+    seed('pubity-x-bot.bsky.social');
+    const script = { failures: [...failures], calls: 0 };
+    const world: World = {
+      handles: { 'pubity-x-bot.bsky.social': DID },
+      repos: { [DID]: 'pubity-x-bot.bsky.social' },
+      logins: { identifiers: ['pubity-x-bot.bsky.social', DID], password: 'app-pass' },
+      updateHandle: script,
+    };
+    install(world);
+    try {
+      const m = mapping('pubity-x-bot.bsky.social', {
+        twitterUsernames: ['pubity'],
+        profileSyncSourceUsername: 'pubity',
+      });
+      const p = await buildPlan(m, fastOptions, null);
+      const entry = await quietly(() => applyPlan(p, fastOptions, realCloudflare));
+      results[label] = {
+        entry: entry?.kind ?? null,
+        calls: script.calls,
+        identifier: getConfig().mappings[0]?.bskyIdentifier,
+      };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  };
+  const lag = 'External handle did not resolve to DID';
+  await change('retryThenSucceed', [lag, lag]);
+  await change('retriesExhausted', [lag, lag, lag]);
+  await change('notRetryable', ['Handle is reserved']);
 
   console.log(`CHILD_RESULT=${JSON.stringify(results)}`);
   process.exit(0);
@@ -390,6 +441,21 @@ console.log('6. Config catch-up at apply time (isolated child process)');
       r.badPassword,
       { status: 'config-catch-up', entry: null, identifier: 'jersey-met.bsky.social' },
       'a password that no longer works leaves config.json untouched',
+    );
+    equal(
+      r.retryThenSucceed,
+      { entry: 'handle-change', calls: 3, identifier: 'pubity.xmirror.bot' },
+      'the pubity failure: PDS resolver lagging twice, then the change lands and config.json is saved',
+    );
+    equal(
+      r.retriesExhausted,
+      { entry: null, calls: 3, identifier: 'pubity-x-bot.bsky.social' },
+      'if the PDS never catches up, it gives up after the retry budget and leaves config.json alone',
+    );
+    equal(
+      r.notRetryable,
+      { entry: null, calls: 1, identifier: 'pubity-x-bot.bsky.social' },
+      'any other updateHandle error fails straight away without retrying',
     );
     equal(
       r.wrongAccount,

@@ -71,6 +71,13 @@ export interface Options {
   seed: string | null;
   includeDisabled: boolean;
   dnsTimeoutMs: number;
+  /** Pause after writing a record before any resolver is asked. */
+  dnsSettleMs: number;
+  /**
+   * Waits between updateHandle retries when the PDS cannot yet resolve the
+   * record. The PDS uses its own resolver, which can lag the public ones.
+   */
+  handleRetryDelaysMs: number[];
   help: boolean;
 }
 
@@ -89,6 +96,8 @@ export function parseArgs(argv: string[]): Options {
     seed: null,
     includeDisabled: false,
     dnsTimeoutMs: 180_000,
+    dnsSettleMs: 8_000,
+    handleRetryDelaysMs: [15_000, 30_000, 45_000, 60_000],
     help: false,
   };
 
@@ -520,8 +529,9 @@ export function printPlan(plan: Plan, index: number, total: number): void {
 // ---------------------------------------------------------------------------
 
 const WRITE_TEST_TIMEOUT_MS = 90_000;
-/** Time for a new record to reach Cloudflare's edge before any resolver is asked. */
-export const RECORD_SETTLE_MS = 8_000;
+/** updateHandle rejected the handle because the PDS's own DNS lookup has not caught up yet. */
+export const isHandleNotYetResolvable = (message: string): boolean =>
+  /did not resolve|unable to resolve|could not resolve/i.test(message);
 
 export async function checkCloudflare(
   options: Options,
@@ -586,7 +596,7 @@ export async function checkCloudflare(
     visible = await waitForTxt(testName, testValue, {
       timeoutMs: WRITE_TEST_TIMEOUT_MS,
       intervalMs: 3_000,
-      initialDelayMs: RECORD_SETTLE_MS,
+      initialDelayMs: options.dnsSettleMs,
       onAttempt: () => process.stdout.write(dim('.')),
     });
     log('');
@@ -737,7 +747,7 @@ export async function applyPlan(
   process.stdout.write(`  ${dim('.  waiting for DNS propagation')}`);
   const propagation = await waitForTxt(txtName, content, {
     timeoutMs: options.dnsTimeoutMs,
-    initialDelayMs: RECORD_SETTLE_MS,
+    initialDelayMs: options.dnsSettleMs,
     confirm: {
       name: 'bluesky',
       check: async () => (await resolveDid(newHandle, serviceUrl)) === did,
@@ -773,15 +783,30 @@ export async function applyPlan(
     return null;
   }
 
-  try {
-    await agent.com.atproto.identity.updateHandle({ handle: newHandle });
-  } catch (error) {
-    const message = (error as Error).message;
-    log(`  ${red('x')}  updateHandle failed: ${message}`);
-    if (/auth|scope|password|privileged/i.test(message)) {
-      log(`  ${dim("   If this is an app-password restriction, retry with the account's main password.")}`);
+  // The PDS verifies the record with its own resolver, which can lag behind the
+  // public ones checked above. A rejection for that reason changes nothing, so
+  // wait and retry; any other error fails the account straight away.
+  const retryDelays = [...options.handleRetryDelaysMs];
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await agent.com.atproto.identity.updateHandle({ handle: newHandle });
+      break;
+    } catch (error) {
+      const message = (error as Error).message;
+      const delay = retryDelays.shift();
+      if (isHandleNotYetResolvable(message) && delay !== undefined) {
+        log(
+          `  ${yellow('!')}  Bluesky cannot see the record yet (${message}); retrying in ${Math.round(delay / 1000)}s`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      log(`  ${red('x')}  updateHandle failed after ${attempt} attempt(s): ${message}`);
+      if (/auth|scope|password|privileged/i.test(message)) {
+        log(`  ${dim("   If this is an app-password restriction, retry with the account's main password.")}`);
+      }
+      return null;
     }
-    return null;
   }
   log(`  ${green('OK')} Handle changed on ${serviceUrl}`);
 
