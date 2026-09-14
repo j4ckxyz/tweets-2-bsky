@@ -520,6 +520,8 @@ export function printPlan(plan: Plan, index: number, total: number): void {
 // ---------------------------------------------------------------------------
 
 const WRITE_TEST_TIMEOUT_MS = 90_000;
+/** Time for a new record to reach Cloudflare's edge before any resolver is asked. */
+export const RECORD_SETTLE_MS = 8_000;
 
 export async function checkCloudflare(
   options: Options,
@@ -584,6 +586,7 @@ export async function checkCloudflare(
     visible = await waitForTxt(testName, testValue, {
       timeoutMs: WRITE_TEST_TIMEOUT_MS,
       intervalMs: 3_000,
+      initialDelayMs: RECORD_SETTLE_MS,
       onAttempt: () => process.stdout.write(dim('.')),
     });
     log('');
@@ -734,6 +737,11 @@ export async function applyPlan(
   process.stdout.write(`  ${dim('.  waiting for DNS propagation')}`);
   const propagation = await waitForTxt(txtName, content, {
     timeoutMs: options.dnsTimeoutMs,
+    initialDelayMs: RECORD_SETTLE_MS,
+    confirm: {
+      name: 'bluesky',
+      check: async () => (await resolveDid(newHandle, serviceUrl)) === did,
+    },
     onAttempt: () => process.stdout.write(dim('.')),
   });
   log('');
