@@ -17,7 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type AccountMapping, getConfig } from '../src/config-manager.js';
 import { DATA_DIR } from '../src/storage-paths.js';
-import { isCloudflareDelegation } from './lib/cloudflare.js';
+import { isCloudflareDelegation, waitForTxt } from './lib/cloudflare.js';
 import { type Options, applyPlan, buildPlan, checkCloudflare, isActionable, parseArgs } from './rehandle.js';
 
 let passed = 0;
@@ -396,6 +396,92 @@ console.log('6. Config catch-up at apply time (isolated child process)');
       { status: 'config-catch-up', entry: null, identifier: 'jersey-met.bsky.social' },
       'logging in as a different account leaves config.json untouched',
     );
+  }
+  console.log();
+}
+
+// ---------------------------------------------------------------------------
+console.log('7. Waiting for a new record (the jersey_metci failure)');
+{
+  const NAME = '_atproto.jersey-metci.xmirror.bot';
+  const VALUE = 'did=did:plc:pqruslbj2g557pydocutd4xs';
+
+  /** DoH fake: each resolver either has the record or answers empty. Logs query times. */
+  const doh = (sees: { cloudflare: boolean; google: boolean }) => {
+    const queries: number[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+      queries.push(Date.now());
+      const has = url.hostname === 'cloudflare-dns.com' ? sees.cloudflare : sees.google;
+      return json({ Answer: has ? [{ type: 16, data: `"${VALUE}"` }] : [] });
+    }) as typeof fetch;
+    return queries;
+  };
+  const fast = { intervalMs: 40, timeoutMs: 500 };
+
+  try {
+    // Google stuck on a cached "does not exist", Cloudflare and Bluesky already see it.
+    doh({ cloudflare: true, google: false });
+    let confirmCalls = 0;
+    const rescued = await waitForTxt(NAME, VALUE, {
+      ...fast,
+      confirm: { name: 'bluesky', check: async () => ++confirmCalls > 0 },
+    });
+    assert(rescued.resolved, 'a lagging Google no longer fails the account when Bluesky confirms');
+    equal(rescued.resolversAgreeing, ['cloudflare', 'bluesky'], 'and reports who actually verified it');
+
+    doh({ cloudflare: true, google: false });
+    const unconfirmed = await waitForTxt(NAME, VALUE, {
+      ...fast,
+      confirm: { name: 'bluesky', check: async () => false },
+    });
+    assert(!unconfirmed.resolved, 'if Bluesky does not see it either, it still waits and times out');
+
+    doh({ cloudflare: true, google: false });
+    assert(
+      !(await waitForTxt(NAME, VALUE, fast)).resolved,
+      'without a confirm check, both resolvers are still required',
+    );
+
+    // Nothing sees the record yet: Bluesky must not be asked, or it could cache the miss.
+    doh({ cloudflare: false, google: false });
+    let askedEarly = false;
+    await waitForTxt(NAME, VALUE, {
+      ...fast,
+      confirm: {
+        name: 'bluesky',
+        check: async () => {
+          askedEarly = true;
+          return true;
+        },
+      },
+    });
+    assert(!askedEarly, 'Bluesky is never asked before a public resolver sees the record');
+
+    doh({ cloudflare: true, google: true });
+    let confirmUsed = false;
+    const both = await waitForTxt(NAME, VALUE, {
+      ...fast,
+      confirm: {
+        name: 'bluesky',
+        check: async () => {
+          confirmUsed = true;
+          return true;
+        },
+      },
+    });
+    assert(both.resolved && !confirmUsed, 'when both resolvers agree, no extra Bluesky lookup is made');
+
+    // The settle delay: no query at all before it elapses.
+    const queries = doh({ cloudflare: true, google: true });
+    const startedAt = Date.now();
+    await waitForTxt(NAME, VALUE, { ...fast, initialDelayMs: 250 });
+    assert(
+      queries.length > 0 && (queries[0] ?? 0) - startedAt >= 240,
+      'nothing is queried until the settle delay has passed',
+    );
+  } finally {
+    globalThis.fetch = realFetch;
   }
   console.log();
 }

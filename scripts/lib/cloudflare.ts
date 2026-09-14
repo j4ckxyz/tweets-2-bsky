@@ -217,17 +217,50 @@ export interface PropagationResult {
   resolversAgreeing: string[];
 }
 
-/** Poll public DNS until every resolver returns the expected TXT value. */
+export interface WaitForTxtOptions {
+  timeoutMs?: number;
+  intervalMs?: number;
+  /**
+   * Pause before the first query. Asking a resolver before the record reaches
+   * Cloudflare's edge makes it cache "does not exist" for the zone's negative
+   * TTL (1800s on Cloudflare), which then outlasts the whole timeout.
+   */
+  initialDelayMs?: number;
+  /**
+   * The check that actually matters, e.g. asking Bluesky to resolve the handle.
+   * Only consulted once a public resolver already sees the record, so it cannot
+   * be the first to ask and cache a negative answer itself.
+   */
+  confirm?: { name: string; check: () => Promise<boolean> };
+  onAttempt?: (attempt: number, seen: string[]) => void;
+}
+
+/**
+ * Poll until the record is verifiably live: either every public resolver
+ * returns the expected value, or at least one does and `confirm` passes.
+ */
 export async function waitForTxt(
   fqdn: string,
   expected: string,
-  options: { timeoutMs?: number; intervalMs?: number; onAttempt?: (attempt: number, seen: string[]) => void } = {},
+  options: WaitForTxtOptions = {},
 ): Promise<PropagationResult> {
   const timeoutMs = options.timeoutMs ?? 180_000;
   const intervalMs = options.intervalMs ?? 5_000;
   const startedAt = Date.now();
   const seenValues = new Set<string>();
   let attempts = 0;
+
+  const result = (resolved: boolean, agreeing: string[]): PropagationResult => ({
+    resolved,
+    elapsedMs: Date.now() - startedAt,
+    attempts,
+    seenValues: [...seenValues],
+    resolversAgreeing: agreeing,
+  });
+
+  if (options.initialDelayMs) {
+    await new Promise((resolve) => setTimeout(resolve, options.initialDelayMs));
+  }
 
   while (Date.now() - startedAt < timeoutMs) {
     attempts += 1;
@@ -246,23 +279,21 @@ export async function waitForTxt(
     options.onAttempt?.(attempts, [...seenValues]);
 
     if (agreeing.length === DOH_RESOLVERS.length) {
-      return {
-        resolved: true,
-        elapsedMs: Date.now() - startedAt,
-        attempts,
-        seenValues: [...seenValues],
-        resolversAgreeing: agreeing,
-      };
+      return result(true, agreeing);
+    }
+
+    // One public resolver lagging (usually a stale negative cache) does not
+    // matter if the party that has to verify the record already sees it.
+    if (agreeing.length > 0 && options.confirm) {
+      try {
+        if (await options.confirm.check()) return result(true, [...agreeing, options.confirm.name]);
+      } catch {
+        // Treat as not yet confirmed; the loop retries.
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 
-  return {
-    resolved: false,
-    elapsedMs: Date.now() - startedAt,
-    attempts,
-    seenValues: [...seenValues],
-    resolversAgreeing: [],
-  };
+  return result(false, []);
 }
