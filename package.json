@@ -23,7 +23,7 @@
     "test:mirror-lag": "bun scripts/test-mirror-lag.ts",
     "test:polling": "bun scripts/test-polling.ts",
     "test:account-health": "bun scripts/test-account-health.ts",
-    "test:rehandle": "bun scripts/test-rehandle.ts && bun scripts/test-rehandle-network.ts && bun scripts/test-wizard-prompts.ts",
+    "test:rehandle": "bun scripts/test-rehandle.ts && bun scripts/test-rehandle-network.ts && bun scripts/test-rekey-history.ts && bun scripts/test-wizard-prompts.ts",
     "wizard": "bun scripts/rehandle-wizard.ts",
     "rehandle:check": "bun scripts/rehandle.ts --check-cloudflare",
     "rehandle:dry": "bun scripts/rehandle.ts",
