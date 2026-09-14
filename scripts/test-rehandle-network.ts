@@ -10,6 +10,7 @@
  * nothing is written to config.json.
  */
 
+import { Database } from 'bun:sqlite';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -243,6 +244,16 @@ if (process.env.REHANDLE_TEST_CHILD === 'apply') {
   const realCloudflare = { client: new CloudflareClient('fake-token'), zoneId: 'zone12345678' };
   const change = async (label: string, failures: string[]) => {
     seed('pubity-x-bot.bsky.social');
+    // A tweet already mirrored under the old handle, which must follow the account.
+    const historyDb = new Database(path.join(DATA_DIR, 'database.sqlite'));
+    historyDb.query('DROP TABLE IF EXISTS processed_tweets').run();
+    historyDb
+      .query(
+        'CREATE TABLE processed_tweets (twitter_id TEXT, bsky_identifier TEXT, bsky_uri TEXT, PRIMARY KEY (twitter_id, bsky_identifier))',
+      )
+      .run();
+    historyDb.query("INSERT INTO processed_tweets VALUES ('555', 'pubity-x-bot.bsky.social', 'at://old')").run();
+    historyDb.close();
     const script = { failures: [...failures], calls: 0 };
     const world: World = {
       handles: { 'pubity-x-bot.bsky.social': DID },
@@ -258,10 +269,19 @@ if (process.env.REHANDLE_TEST_CHILD === 'apply') {
       });
       const p = await buildPlan(m, fastOptions, null);
       const entry = await quietly(() => applyPlan(p, fastOptions, realCloudflare));
+      const after = new Database(path.join(DATA_DIR, 'database.sqlite'));
+      const historyMoved = Boolean(
+        after
+          .query("SELECT 1 FROM processed_tweets WHERE twitter_id = '555' AND bsky_identifier = 'pubity.xmirror.bot'")
+          .get(),
+      );
+      after.close();
       results[label] = {
         entry: entry?.kind ?? null,
         calls: script.calls,
         identifier: getConfig().mappings[0]?.bskyIdentifier,
+        historyMoved,
+        historyRecordsCopied: entry?.historyRecordsCopied ?? null,
       };
     } finally {
       globalThis.fetch = realFetch;
@@ -444,17 +464,35 @@ console.log('6. Config catch-up at apply time (isolated child process)');
     );
     equal(
       r.retryThenSucceed,
-      { entry: 'handle-change', calls: 3, identifier: 'pubity.xmirror.bot' },
+      {
+        entry: 'handle-change',
+        calls: 3,
+        identifier: 'pubity.xmirror.bot',
+        historyMoved: true,
+        historyRecordsCopied: 1,
+      },
       'the pubity failure: PDS resolver lagging twice, then the change lands and config.json is saved',
     );
     equal(
       r.retriesExhausted,
-      { entry: null, calls: 3, identifier: 'pubity-x-bot.bsky.social' },
+      {
+        entry: null,
+        calls: 3,
+        identifier: 'pubity-x-bot.bsky.social',
+        historyMoved: false,
+        historyRecordsCopied: null,
+      },
       'if the PDS never catches up, it gives up after the retry budget and leaves config.json alone',
     );
     equal(
       r.notRetryable,
-      { entry: null, calls: 1, identifier: 'pubity-x-bot.bsky.social' },
+      {
+        entry: null,
+        calls: 1,
+        identifier: 'pubity-x-bot.bsky.social',
+        historyMoved: false,
+        historyRecordsCopied: null,
+      },
       'any other updateHandle error fails straight away without retrying',
     );
     equal(

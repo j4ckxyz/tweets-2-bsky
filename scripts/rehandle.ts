@@ -16,12 +16,13 @@
  * Zone -> DNS -> Edit on the target zone.
  */
 
+import { Database } from 'bun:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AtpAgent } from '@atproto/api';
 import { type AccountMapping, getConfig, saveConfig } from '../src/config-manager.js';
-import { DATA_DIR } from '../src/storage-paths.js';
+import { DATA_DIR, DB_PATH } from '../src/storage-paths.js';
 import {
   CloudflareClient,
   type DnsRecord,
@@ -32,6 +33,7 @@ import {
   waitForTxt,
 } from './lib/cloudflare.js';
 import { type HandleConversion, convertHandle, findCollisions } from './lib/handle-map.js';
+import { finalHandles, rekeyHistory, unmovedRecords } from './lib/rekey-history.js';
 
 const APP_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -78,6 +80,7 @@ export interface Options {
    * record. The PDS uses its own resolver, which can lag the public ones.
    */
   handleRetryDelaysMs: number[];
+  repairHistory: boolean;
   help: boolean;
 }
 
@@ -98,6 +101,7 @@ export function parseArgs(argv: string[]): Options {
     dnsTimeoutMs: 180_000,
     dnsSettleMs: 8_000,
     handleRetryDelaysMs: [15_000, 30_000, 45_000, 60_000],
+    repairHistory: false,
     help: false,
   };
 
@@ -147,6 +151,9 @@ export function parseArgs(argv: string[]): Options {
       case '--dns-timeout':
         options.dnsTimeoutMs = Number.parseInt(next(), 10) * 1000;
         break;
+      case '--repair-history':
+        options.repairHistory = true;
+        break;
       case '--help':
       case '-h':
         options.help = true;
@@ -180,6 +187,7 @@ ${bold('rehandle')} - migrate tweets-2-bsky accounts to <twitter-handle>.<domain
   --ttl <seconds>       TTL for the created TXT records (default: 60)
   --dns-timeout <secs>  How long to wait for DNS propagation (default: 180)
   --no-write-test       During --check-cloudflare, skip the temporary record write/delete
+  --repair-history      Re-file mirrored-tweet history under current handles, from the migration journals
   --help, -h            Show this message
 
   Set CLOUDFLARE_API_TOKEN in .env or the environment.
@@ -634,6 +642,8 @@ export interface JournalEntry {
   dnsAction: string;
   changedAt: string;
   configUpdated: boolean;
+  /** Mirrored-tweet records copied to the new handle, or null if the database could not be updated. */
+  historyRecordsCopied: number | null;
 }
 
 const timestamp = () => new Date().toISOString().replace(/[:.]/g, '-');
@@ -650,6 +660,35 @@ export function writeJournal(entries: JournalEntry[]): string {
   const journalPath = path.join(DATA_DIR, `rehandle-journal-${timestamp()}.json`);
   fs.writeFileSync(journalPath, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
   return journalPath;
+}
+
+/**
+ * Copy the account's mirrored-tweet history to its new handle. Without this the
+ * service re-posts everything it has already mirrored (see rekey-history.ts).
+ */
+function moveHistory(oldHandle: string, newHandle: string): number | null {
+  if (!fs.existsSync(DB_PATH)) {
+    log(`  ${yellow('!')}  No database at ${DB_PATH}; nothing to re-key.`);
+    return 0;
+  }
+  try {
+    const db = new Database(DB_PATH);
+    try {
+      const moved = rekeyHistory(db, oldHandle, newHandle);
+      const left = unmovedRecords(db, oldHandle, newHandle);
+      if (left > 0) throw new Error(`${left} record(s) still only under ${oldHandle}`);
+      log(`  ${green('OK')} Mirrored-tweet history moved to ${newHandle} (${moved.processedCopied} record(s))`);
+      return moved.processedCopied;
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    log(`  ${red('x')}  Could not move history to ${newHandle}: ${(error as Error).message}`);
+    log(
+      `  ${red('   Do NOT start the service until `bun scripts/rehandle.ts --repair-history` succeeds, or it will re-post old tweets.')}`,
+    );
+    return null;
+  }
 }
 
 /**
@@ -709,6 +748,7 @@ export async function applyPlan(
     dnsAction,
     changedAt: new Date().toISOString(),
     configUpdated: true,
+    historyRecordsCopied: null,
   });
 
   // Bluesky already has the new handle; only config.json is behind.
@@ -724,12 +764,13 @@ export async function applyPlan(
       log(`  ${red('x')}  Logged in as ${agent.session?.did}, expected ${did}. Leaving config.json alone.`);
       return null;
     }
+    const historyRecordsCopied = moveHistory(plan.currentHandle, newHandle);
     if (!persistNewHandle(mapping.id, newHandle)) {
       log(`  ${red('x')}  config.json NOT updated - mapping ${mapping.id} disappeared. Fix this by hand.`);
       return null;
     }
     log(`  ${green('OK')} Bluesky already had ${newHandle}; config.json caught up`);
-    return entry('config-catch-up', 'not-needed', null);
+    return { ...entry('config-catch-up', 'not-needed', null), historyRecordsCopied };
   }
 
   // 1. DNS
@@ -813,6 +854,7 @@ export async function applyPlan(
   // 4. Save config.json straight away. The longer this waits after the handle
   //    change, the wider the window in which an interruption leaves the service
   //    logging in with a handle Bluesky no longer knows.
+  const historyRecordsCopied = moveHistory(plan.currentHandle, newHandle);
   const configUpdated = persistNewHandle(mapping.id, newHandle);
   log(
     configUpdated
@@ -832,7 +874,7 @@ export async function applyPlan(
     log(`  ${yellow('!')}  Could not confirm the new handle: ${(error as Error).message}`);
   }
 
-  return { ...entry('handle-change', upsert.action, upsert.record.id ?? null), configUpdated };
+  return { ...entry('handle-change', upsert.action, upsert.record.id ?? null), configUpdated, historyRecordsCopied };
 }
 
 function confirm(question: string): Promise<boolean> {
@@ -850,6 +892,46 @@ function confirm(question: string): Promise<boolean> {
 // Main
 // ---------------------------------------------------------------------------
 
+/** Rebuild history keys for every handle move recorded in the migration journals. */
+export function repairHistory(dataDir: string = DATA_DIR, dbPath: string = DB_PATH): number {
+  heading('Repairing mirrored-tweet history');
+  const journals = fs.existsSync(dataDir)
+    ? fs
+        .readdirSync(dataDir)
+        .filter((f) => /^rehandle-journal-.*\.json$/.test(f))
+        .sort()
+    : [];
+  const moves = journals.flatMap((file) =>
+    (JSON.parse(fs.readFileSync(path.join(dataDir, file), 'utf8')) as Partial<JournalEntry>[])
+      .filter((e) => (e.kind ?? 'handle-change') === 'handle-change' && e.oldHandle && e.newHandle)
+      .map((e) => ({ oldHandle: e.oldHandle as string, newHandle: e.newHandle as string })),
+  );
+  const final = finalHandles(moves);
+  log(`  ${journals.length} journal(s), ${moves.length} move(s), ${final.size} old handle(s) to re-key`);
+  if (final.size === 0) return 0;
+  if (!fs.existsSync(dbPath)) {
+    log(`  ${red('x')}  No database at ${dbPath}`);
+    return 1;
+  }
+  log(dim('  Stop the service first (pm2 stop tweets-2-bsky) so it cannot post while this runs.'));
+
+  const db = new Database(dbPath);
+  let copied = 0;
+  let unmoved = 0;
+  try {
+    for (const [oldHandle, newHandle] of final) {
+      copied += rekeyHistory(db, oldHandle, newHandle).processedCopied;
+      unmoved += unmovedRecords(db, oldHandle, newHandle);
+    }
+  } finally {
+    db.close();
+  }
+  log(
+    `  ${green('OK')} Copied ${copied} record(s); ${unmoved === 0 ? green('0 left under old handles') : red(`${unmoved} still under old handles`)}`,
+  );
+  return unmoved === 0 ? 0 : 1;
+}
+
 async function main(): Promise<number> {
   let options: Options;
   try {
@@ -866,6 +948,8 @@ async function main(): Promise<number> {
   }
 
   loadEnvFile();
+
+  if (options.repairHistory) return repairHistory();
 
   log(bold('\ntweets-2-bsky handle migration'));
   log(dim(options.apply ? 'MODE: APPLY - real changes will be made' : 'MODE: DRY RUN - nothing will be changed'));
