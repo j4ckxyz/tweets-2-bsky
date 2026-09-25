@@ -77,6 +77,10 @@ interface AccountDetailResponse {
     lastCheckedAt: number | null;
     lastFoundAt: number | null;
     emptyStreak: number;
+    lastError: string | null;
+    lastErrorAt: number | null;
+    errorStreak: number;
+    protectedSince: number | null;
   }[];
   recentPosts: {
     twitter_id: string;
@@ -87,7 +91,8 @@ interface AccountDetailResponse {
     posted_at?: number;
     tweet_created_at?: number;
   }[];
-  recentLogs: { id: number; level: string; stage: string; event: string; message: string; timestamp: number }[];
+  // Log rows carry `ts` (epoch ms); reading `timestamp` showed every entry as "never".
+  recentLogs: { id: number; level: string; stage: string; event: string; message: string; ts: number }[];
 }
 
 function formatDuration(ms: number): string {
@@ -323,23 +328,28 @@ export function AccountDetail({
             Checking for tweets does not repost anything: tweets already mirrored are skipped by id.
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
+            {permissions.canRunNow ? (
+              <Button
+                variant="default"
+                size="sm"
+                disabled={busy !== null}
+                onClick={() =>
+                  act(
+                    'check',
+                    // A forced check of just this account's sources: it skips
+                    // adaptive-polling intervals and posts new tweets as live
+                    // mirrors, where a backfill would re-date them as history.
+                    () => axios.post('/api/run-now', { mappingId: mapping.id }, { headers: authHeaders }),
+                    'Checking this account for new tweets.',
+                  )
+                }
+              >
+                <RefreshCw className={cn('mr-2 h-4 w-4', busy === 'check' && 'animate-spin')} />
+                Check for new tweets now
+              </Button>
+            ) : null}
             {permissions.canQueueBackfills ? (
               <>
-                <Button
-                  variant="default"
-                  size="sm"
-                  disabled={busy !== null}
-                  onClick={() =>
-                    act(
-                      'check',
-                      () => axios.post(`/api/backfill/${mapping.id}`, { limit: 15 }, { headers: authHeaders }),
-                      'Checking this account for new tweets.',
-                    )
-                  }
-                >
-                  <RefreshCw className={cn('mr-2 h-4 w-4', busy === 'check' && 'animate-spin')} />
-                  Check for new tweets now
-                </Button>
                 <div className="flex items-center gap-1">
                   <Input
                     className="h-9 w-20"
@@ -399,7 +409,11 @@ export function AccountDetail({
                   act(
                     'retry',
                     () =>
-                      axios.post(`/api/accounts/${mapping.id}/unjam`, { includeFailed: true }, { headers: authHeaders }),
+                      axios.post(
+                        `/api/accounts/${mapping.id}/unjam`,
+                        { includeFailed: true },
+                        { headers: authHeaders },
+                      ),
                     'Parked failures re-armed.',
                   )
                 }
@@ -416,7 +430,8 @@ export function AccountDetail({
               onClick={() =>
                 act(
                   'toggle',
-                  () => axios.put(`/api/mappings/${mapping.id}`, { enabled: !mapping.enabled }, { headers: authHeaders }),
+                  () =>
+                    axios.put(`/api/mappings/${mapping.id}`, { enabled: !mapping.enabled }, { headers: authHeaders }),
                   mapping.enabled ? 'Account paused.' : 'Account resumed.',
                 )
               }
@@ -433,11 +448,7 @@ export function AccountDetail({
                 act(
                   'profile',
                   () =>
-                    axios.post(
-                      `/api/mappings/${mapping.id}/sync-profile-from-twitter`,
-                      {},
-                      { headers: authHeaders },
-                    ),
+                    axios.post(`/api/mappings/${mapping.id}/sync-profile-from-twitter`, {}, { headers: authHeaders }),
                   'Profile synced from Twitter.',
                 )
               }
@@ -492,6 +503,22 @@ export function AccountDetail({
                   Checked {formatAgo(source.lastCheckedAt)} · last new tweet {formatAgo(source.lastFoundAt)}
                   {source.dueInMs > 0 ? ` · due in ${formatDuration(source.dueInMs)}` : ' · due now'}
                 </p>
+                {source.protectedSince ? (
+                  <p className="mt-1 flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400">
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                    Protected on X since {formatAgo(source.protectedSince)}: its tweets cannot be read, so nothing
+                    mirrors.
+                  </p>
+                ) : null}
+                {source.lastError ? (
+                  <p className="mt-1 flex items-start gap-1 text-xs text-red-600 dark:text-red-400">
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                    <span>
+                      Last {source.errorStreak > 1 ? `${source.errorStreak} checks` : 'check'} failed (
+                      {formatAgo(source.lastErrorAt)}): {source.lastError}
+                    </span>
+                  </p>
+                ) : null}
               </div>
             ))}
           </div>
@@ -520,7 +547,9 @@ export function AccountDetail({
             </div>
             <div>
               <p className="text-muted-foreground text-xs">Parked</p>
-              <p className={cn('font-semibold', queue.failed > 0 && 'text-red-600 dark:text-red-400')}>{queue.failed}</p>
+              <p className={cn('font-semibold', queue.failed > 0 && 'text-red-600 dark:text-red-400')}>
+                {queue.failed}
+              </p>
             </div>
           </div>
           {queue.items.length === 0 ? (
@@ -570,8 +599,7 @@ export function AccountDetail({
           ) : (
             <div className="mt-3 max-h-72 space-y-2 overflow-y-auto">
               {recentPosts.map((post) => {
-                const lagMs =
-                  post.posted_at && post.tweet_created_at ? post.posted_at - post.tweet_created_at : null;
+                const lagMs = post.posted_at && post.tweet_created_at ? post.posted_at - post.tweet_created_at : null;
                 return (
                   <div key={post.twitter_id} className="rounded-md border border-border/70 p-2 text-xs">
                     <div className="flex items-center justify-between gap-2">
@@ -598,7 +626,7 @@ export function AccountDetail({
               {recentLogs.map((entry) => (
                 <div key={entry.id} className="text-xs">
                   <span className={cn('font-mono', LEVEL_TONE[entry.level] ?? '')}>{entry.level}</span>{' '}
-                  <span className="text-muted-foreground">{formatAgo(entry.timestamp)}</span>
+                  <span className="text-muted-foreground">{formatAgo(entry.ts)}</span>
                   <p className={cn(LEVEL_TONE[entry.level] ?? 'text-foreground/90')}>{entry.message}</p>
                 </div>
               ))}

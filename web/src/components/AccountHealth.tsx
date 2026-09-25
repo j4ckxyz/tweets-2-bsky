@@ -1,13 +1,13 @@
+import axios from 'axios';
 // Per-account health: how fast each mirror is keeping up, when it last posted,
 // what is queued behind it, and whether its Bluesky account is down. The
 // numbers all existed in the log and the queue already — this is the screen
 // that answers "is this mirror healthy?" without reading either.
 import { AlertTriangle, Clock, Gauge, RefreshCw } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import axios from 'axios';
+import { cn } from '../lib/utils';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
-import { cn } from '../lib/utils';
 
 export interface AccountHealthSource {
   twitterUsername: string;
@@ -15,6 +15,8 @@ export interface AccountHealthSource {
   lastCheckedAt: number | null;
   lastFoundAt: number | null;
   dueInMs: number;
+  lastError?: string | null;
+  protectedSince?: number | null;
 }
 
 export interface AccountHealthRow {
@@ -220,7 +222,20 @@ export function AccountHealth({
                 )}
               </div>
 
-              {account.down ? <p className="mt-2 text-xs text-red-600 dark:text-red-400">{account.down.reason}</p> : null}
+              {account.down ? (
+                <p className="mt-2 text-xs text-red-600 dark:text-red-400">{account.down.reason}</p>
+              ) : null}
+              {account.sources
+                .filter((source) => source.lastError || source.protectedSince)
+                .map((source) => (
+                  <p
+                    key={`source-problem-${source.twitterUsername}`}
+                    className="mt-2 text-xs text-amber-700 dark:text-amber-400"
+                  >
+                    @{source.twitterUsername}:{' '}
+                    {source.protectedSince ? 'protected on X, tweets cannot be read' : source.lastError}
+                  </p>
+                ))}
 
               <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
                 <div>

@@ -50,18 +50,67 @@ import { Label } from './components/ui/label';
 import { NavList } from './components/ui/nav-list';
 import { cn } from './lib/utils';
 
+import { AccountDetail } from './components/AccountDetail';
+import { AccountHealth } from './components/AccountHealth';
+import { DiscoveryPanel } from './components/DiscoveryPanel';
+import { MirrorPreview } from './components/MirrorPreview';
+import { MirrorSettingsFields, pickMirrorSettings } from './components/MirrorSettingsFields';
+import {
+  ACCOUNT_PAGE_SIZE_DEFAULT,
+  ACCOUNT_SEARCH_MIN_SCORE,
+  ADD_ACCOUNT_STEPS,
+  ADD_ACCOUNT_STEP_COUNT,
+  DEFAULT_BACKFILL_LIMIT,
+  DEFAULT_GROUP_EMOJI,
+  DEFAULT_GROUP_KEY,
+  DEFAULT_GROUP_NAME,
+  LOG_LEVEL_BADGE,
+  LOG_LEVEL_ROW,
+  LOG_STAGES,
+  PERMISSION_OPTIONS,
+  TAB_PATHS,
+  defaultMappingForm,
+  defaultUserForm,
+  mirrorSettingsFromMapping,
+  selectClassName,
+} from './lib/constants';
+import { buildFacetSegments, formatCompactNumber } from './lib/facets';
+import {
+  addTwitterUsernames,
+  canBridgeToFediverse,
+  filenameFromResponse,
+  formatLogEntryForExport,
+  formatRelativeTime,
+  formatState,
+  getAccountIdFromPath,
+  getApiErrorMessage,
+  getBskyPostUrl,
+  getGroupKey,
+  getGroupMeta,
+  getMappingGroupMeta,
+  getTabFromPath,
+  getTwitterPostUrl,
+  getUserLabel,
+  normalizeEmail,
+  normalizePath,
+  normalizePermissions,
+  normalizeTwitterUsername,
+  normalizeUsername,
+  triggerBlobDownload,
+} from './lib/format';
+import { normalizeSearchValue, scoreAccountMapping, tokenizeSearchValue } from './lib/search';
 import type {
+  AIConfig,
   AccountGroup,
   AccountMapping,
   AccountSecurityEmailState,
   AccountSecurityPasswordState,
   ActivityLog,
-  AIConfig,
   AuthUser,
   AuthView,
+  BlueskyCredentialValidation,
   BootstrapStatus,
   BskyProfileView,
-  BlueskyCredentialValidation,
   BulkAccountsAction,
   BulkAppendBotNameAllResult,
   BulkBotLabelAllResult,
@@ -88,52 +137,6 @@ import type {
   UserPermissions,
 } from './types';
 import { JOB_KIND_DOT, JOB_KIND_LABEL } from './types';
-import {
-  ACCOUNT_PAGE_SIZE_DEFAULT,
-  ACCOUNT_SEARCH_MIN_SCORE,
-  ADD_ACCOUNT_STEP_COUNT,
-  ADD_ACCOUNT_STEPS,
-  DEFAULT_BACKFILL_LIMIT,
-  DEFAULT_GROUP_EMOJI,
-  DEFAULT_GROUP_KEY,
-  DEFAULT_GROUP_NAME,
-  defaultMappingForm,
-  defaultUserForm,
-  LOG_LEVEL_BADGE,
-  LOG_LEVEL_ROW,
-  LOG_STAGES,
-  PERMISSION_OPTIONS,
-  selectClassName,
-  TAB_PATHS,
-} from './lib/constants';
-import {
-  addTwitterUsernames,
-  canBridgeToFediverse,
-  filenameFromResponse,
-  formatLogEntryForExport,
-  formatRelativeTime,
-  formatState,
-  getApiErrorMessage,
-  getBskyPostUrl,
-  getGroupKey,
-  getGroupMeta,
-  getMappingGroupMeta,
-  getAccountIdFromPath,
-  getTabFromPath,
-  getTwitterPostUrl,
-  getUserLabel,
-  normalizeEmail,
-  normalizePath,
-  normalizePermissions,
-  normalizeTwitterUsername,
-  normalizeUsername,
-  triggerBlobDownload,
-} from './lib/format';
-import { normalizeSearchValue, scoreAccountMapping, tokenizeSearchValue } from './lib/search';
-import { buildFacetSegments, formatCompactNumber } from './lib/facets';
-import { AccountDetail } from './components/AccountDetail';
-import { AccountHealth } from './components/AccountHealth';
-import { MirrorPreview } from './components/MirrorPreview';
 
 function App() {
   useEffect(() => {
@@ -1944,22 +1947,24 @@ function App() {
     }
 
     const firstConfirm = window.confirm(
-      'Danger: this deletes all posts on the mapped Bluesky account and clears local cache. Continue?',
+      'Danger: this deletes the posts this mirror created on the Bluesky account. Posts written directly on Bluesky are kept, and afterwards only new tweets are mirrored. Continue?',
     );
 
     if (!firstConfirm) {
       return;
     }
 
-    const finalConfirm = window.prompt('Type DELETE to confirm:');
-    if (finalConfirm !== 'DELETE') {
+    const finalConfirm = window.prompt(
+      'Type DELETE to remove the mirrored posts, or DELETE ALL to remove every post on the account (including ones written by hand):',
+    );
+    if (finalConfirm !== 'DELETE' && finalConfirm !== 'DELETE ALL') {
       return;
     }
 
     try {
       const response = await axios.post<{ message: string }>(
         `/api/mappings/${mappingId}/delete-all-posts`,
-        {},
+        { scope: finalConfirm === 'DELETE ALL' ? 'all' : 'mirrored' },
         { headers: authHeaders },
       );
       showNotice('success', response.data.message);
@@ -3474,6 +3479,8 @@ function App() {
           groupName: newMapping.groupName.trim(),
           groupEmoji: newMapping.groupEmoji.trim(),
           profileSyncSourceUsername: sourceTwitterUsername,
+          startFrom: newMapping.startFrom,
+          ...pickMirrorSettings(newMapping),
         },
         { headers: authHeaders },
       );
@@ -3594,6 +3601,8 @@ function App() {
       groupName: mapping.groupName || '',
       groupEmoji: mapping.groupEmoji || '📁',
       profileSyncSourceUsername: mapping.profileSyncSourceUsername || mapping.twitterUsernames[0] || '',
+      startFrom: 'recent',
+      ...mirrorSettingsFromMapping(mapping),
     });
     setEditTwitterUsers(mapping.twitterUsernames);
     setEditTwitterInput('');
@@ -3636,6 +3645,7 @@ function App() {
           groupName: editForm.groupName.trim(),
           groupEmoji: editForm.groupEmoji.trim(),
           profileSyncSourceUsername,
+          ...pickMirrorSettings(editForm),
         },
         { headers: authHeaders },
       );
@@ -4615,6 +4625,23 @@ function App() {
                                 Deleting a folder moves its mappings to {DEFAULT_GROUP_NAME}.
                               </p>
                             </div>
+                          ) : null}
+                          {authHeaders ? (
+                            <DiscoveryPanel
+                              authHeaders={authHeaders}
+                              isAdmin={isAdmin}
+                              folders={reusableGroupOptions.map((group) => ({
+                                ...group,
+                                members: mappings.filter(
+                                  (mapping) => mapping.enabled && getMappingGroupMeta(mapping).key === group.key,
+                                ).length,
+                              }))}
+                              accounts={mappings.map((mapping) => ({
+                                id: mapping.id,
+                                bskyIdentifier: mapping.bskyIdentifier,
+                              }))}
+                              notify={showNotice}
+                            />
                           ) : null}
                         </div>
                       </details>
@@ -7051,10 +7078,7 @@ function App() {
                         </div>
                         {selectedMirrorSourceUsername ? (
                           <div className="rounded-lg border border-border/70 bg-muted/30 p-3">
-                            <MirrorPreview
-                              twitterUsername={selectedMirrorSourceUsername}
-                              authHeaders={authHeaders}
-                            />
+                            <MirrorPreview twitterUsername={selectedMirrorSourceUsername} authHeaders={authHeaders} />
                           </div>
                         ) : null}
                       </div>
@@ -7248,6 +7272,53 @@ function App() {
                             />
                           </div>
                         </div>
+                        <fieldset className="space-y-2">
+                          <legend className="text-sm font-medium">Where to start</legend>
+                          {(
+                            [
+                              {
+                                value: 'now',
+                                title: 'Only new tweets',
+                                hint: 'What is already on the X timeline is recorded as history, not posted. Use Backfill later to copy older tweets.',
+                              },
+                              {
+                                value: 'recent',
+                                title: 'Also copy the latest tweets now',
+                                hint: 'The first check posts up to 50 recent tweets, dated as they were on X.',
+                              },
+                            ] as const
+                          ).map((option) => (
+                            <label
+                              key={option.value}
+                              className={cn(
+                                'flex cursor-pointer items-start gap-3 rounded-md border px-3 py-2.5',
+                                newMapping.startFrom === option.value ? 'border-foreground' : 'border-border/70',
+                              )}
+                            >
+                              <input
+                                type="radio"
+                                name="add-account-start-from"
+                                className="mt-0.5 h-4 w-4 shrink-0"
+                                checked={newMapping.startFrom === option.value}
+                                onChange={() => setNewMapping((previous) => ({ ...previous, startFrom: option.value }))}
+                              />
+                              <span className="space-y-0.5">
+                                <span className="block text-sm font-medium">{option.title}</span>
+                                <span className="block text-xs text-muted-foreground">{option.hint}</span>
+                              </span>
+                            </label>
+                          ))}
+                        </fieldset>
+                        <details className="rounded-lg border border-border/70 px-3 py-2">
+                          <summary className="cursor-pointer text-sm font-medium">Mirroring options</summary>
+                          <div className="pt-3">
+                            <MirrorSettingsFields
+                              idPrefix="add-account"
+                              value={newMapping}
+                              onChange={(next) => setNewMapping((previous) => ({ ...previous, ...next }))}
+                            />
+                          </div>
+                        </details>
                         <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
                           <p>
                             <span className="font-medium">Owner:</span> {newMapping.owner || '--'}
@@ -7439,6 +7510,16 @@ function App() {
                           placeholder="Leave blank to keep existing"
                         />
                       </div>
+                      <details className="rounded-lg border border-border/70 px-3 py-2">
+                        <summary className="cursor-pointer text-sm font-medium">Mirroring options</summary>
+                        <div className="pt-3">
+                          <MirrorSettingsFields
+                            idPrefix="edit-account"
+                            value={editForm}
+                            onChange={(next) => setEditForm((previous) => ({ ...previous, ...next }))}
+                          />
+                        </div>
+                      </details>
                       <div className="space-y-2">
                         <Label htmlFor="edit-bskyServiceUrl">Service URL</Label>
                         <Input
