@@ -46,13 +46,7 @@ jobs:
         run: bun run build
 
       - name: Run offline tests
-        run: |
-          bun run test:scraper-fetch
-          bun run test:text-split
-          bun run test:mirror-lag
-          bun run test:polling
-          bun run test:video-limits
-          bun run test:account-health
+        run: bun run test:offline
 
       - name: Check the tag matches package.json
         run: |

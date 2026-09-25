@@ -2,7 +2,7 @@
 // Offline checks for adaptive polling: which source accounts a sweep should
 // check, and which are still serving their tier's interval. Pure functions, no
 // database and no network.
-import { DEFAULT_POLLING_TIERS, decideCheck, planSweep, tierForActivity } from '../src/polling.js';
+import { DEFAULT_POLLING_TIERS, activityFromRow, decideCheck, planSweep, tierForActivity } from '../src/polling.js';
 
 let passed = 0;
 let failed = 0;
@@ -90,6 +90,32 @@ console.log('\nNothing is starved\n');
   assert(decideCheck(overdue, now).check, 'An account past its interval is checked no matter how dormant');
 }
 
+console.log('\nManual runs\n');
+{
+  const accounts = [
+    { name: 'dormant', activity: { lastFoundAt: now - 30 * DAY, lastCheckedAt: now - MINUTE } },
+    { name: 'quiet', activity: { lastFoundAt: now - 3 * DAY, lastCheckedAt: now - MINUTE } },
+  ];
+  const normal = planSweep(accounts, (account) => account.activity, now);
+  assert(normal.due.length === 0, 'Recently checked cold accounts are not due on a normal sweep');
+  const forced = planSweep(
+    accounts,
+    (account) => account.activity,
+    now,
+    undefined,
+    () => true,
+  );
+  assert(forced.due.length === 2, '"Run now" checks every account regardless of tier');
+  const one = planSweep(
+    accounts,
+    (account) => account.activity,
+    now,
+    undefined,
+    (account) => account.name === 'quiet',
+  );
+  assert(one.due.length === 1 && one.due[0]?.name === 'quiet', 'A per-account "Run now" forces only that account');
+}
+
 console.log('\nActivity bookkeeping\n');
 {
   // The activity table drives tiering, so stale rows for removed mappings would
@@ -114,6 +140,40 @@ console.log('\nActivity bookkeeping\n');
   const afterPrune = sourceActivityService.getAll();
   assert(afterPrune.has('keeper'), 'Pruning keeps accounts that are still mirrored');
   assert(!afterPrune.has('removed'), 'Pruning drops accounts that are no longer mirrored');
+
+  // The sweep reads these rows back to plan the next sweep. They are
+  // snake_case; handing them to the planner unmapped made every account look
+  // never-checked, so adaptive polling silently checked everything, always.
+  {
+    const row = sourceActivityService.getAll().get('keeper');
+    const activity = activityFromRow(row);
+    assert(activity.lastCheckedAt === row?.last_checked_at, 'activityFromRow carries last_checked_at over');
+    assert(
+      !decideCheck(activity, Date.now()).check || activity.lastFoundAt !== undefined,
+      'A just-checked account read back from the database is not treated as never checked',
+    );
+    const quietRow = { last_found_at: now - 3 * DAY, last_checked_at: now - MINUTE };
+    const plan = planSweep([quietRow], (account) => activityFromRow(account), now);
+    assert(plan.skipped.length === 1, 'A quiet account checked a minute ago is skipped when read from a DB row');
+    const raw = planSweep([quietRow], (account) => account as never, now);
+    assert(raw.due.length === 1, '(The old unmapped row made that same account look due — the regression)');
+  }
+
+  // Errors surface on the row and clear on the next good check.
+  sourceActivityService.recordError('keeper', 'User not found.');
+  assert(sourceActivityService.get('keeper')?.last_error === 'User not found.', 'A failed check records its error');
+  assert((sourceActivityService.get('keeper')?.error_streak ?? 0) === 1, 'Failures count up');
+  const streakBefore = sourceActivityService.get('keeper')?.empty_streak;
+  sourceActivityService.recordError('keeper', 'User not found.');
+  assert(
+    sourceActivityService.get('keeper')?.empty_streak === streakBefore,
+    'A failure does not cool the account down like an empty check would',
+  );
+  sourceActivityService.recordCheck('keeper', false);
+  assert(sourceActivityService.get('keeper')?.last_error == null, 'A successful check clears the error');
+
+  sourceActivityService.setUserId('keeper', '12345');
+  assert(sourceActivityService.get('keeper')?.twitter_user_id === '12345', 'The numeric user id is remembered');
 
   // The case that regressed: with nothing mirrored, every row should go rather
   // than the table being left untouched.
