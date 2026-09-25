@@ -1,10 +1,10 @@
+import axios from 'axios';
 // Dry-run preview: what an account's recent tweets would look like once
 // mirrored, composed by the real posting path with nothing uploaded and
 // nothing recorded. Lets an account be inspected before it is added, instead
 // of enabling it and watching what comes out.
-import { Eye, Image as ImageIcon, Link2, MessageSquare, Quote, Video } from 'lucide-react';
+import { Eye, Image as ImageIcon, Languages, Link2, MessageSquare, Quote, Repeat2, Video } from 'lucide-react';
 import { useCallback, useState } from 'react';
-import axios from 'axios';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 
@@ -23,6 +23,9 @@ interface PreviewTweet {
   quote: boolean;
   linkCard: boolean;
   isReply: boolean;
+  repostOf?: string;
+  langs?: string[];
+  extraMediaPosts?: number;
   skipped?: { stage: string; reason: string };
 }
 
@@ -98,7 +101,18 @@ export function MirrorPreview({
 
       {result?.tweets.map((tweet) => (
         <div key={tweet.twitterId} className="cv-auto rounded-lg border border-border bg-background p-3">
-          {tweet.skipped ? (
+          {tweet.repostOf ? (
+            <div className="text-sm">
+              <Badge variant="secondary">
+                <Repeat2 className="mr-1 h-3 w-3" />
+                repost
+              </Badge>
+              <p className="mt-2 text-muted-foreground">
+                Retweet of a tweet this instance mirrors: reposted natively on Bluesky.
+              </p>
+              <p className="mt-2 truncate text-xs text-muted-foreground">{tweet.originalText}</p>
+            </div>
+          ) : tweet.skipped ? (
             <div className="text-sm">
               <Badge variant="secondary">skipped at {tweet.skipped.stage}</Badge>
               <p className="mt-2 text-muted-foreground">{tweet.skipped.reason}</p>
@@ -138,6 +152,11 @@ export function MirrorPreview({
                   </span>
                 ) : null}
                 {tweet.isReply ? <span>reply</span> : null}
+                {tweet.extraMediaPosts ? <span>+{tweet.extraMediaPosts} media reply</span> : null}
+                <span className="flex items-center gap-1" title="Language tags the post will carry">
+                  <Languages className="h-3 w-3" />
+                  {tweet.langs && tweet.langs.length > 0 ? tweet.langs.join(', ') : 'no language tag'}
+                </span>
               </div>
               <div className="space-y-2">
                 {tweet.chunks.map((chunk, index) => (

@@ -57,6 +57,13 @@ to script the run or repeat an exact command.
    bun run rehandle:check
    ```
 
+## Post history follows the handle
+
+The mirror's post history, queue and account health are keyed by the Bluesky
+handle. Each migrated account's rows move to the new handle in the same step
+as the config change (and the old handle is kept as an alias), so the next
+sweep still knows which tweets are already mirrored and re-posts nothing.
+
 ## Dry run
 
 ```

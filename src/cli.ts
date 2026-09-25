@@ -12,6 +12,8 @@ import {
   getConfig,
   removeMapping,
   saveConfig,
+  updateConfig,
+  updateMappingById,
   updateTwitterConfig,
 } from './config-manager.js';
 import { dbService, postQueueService } from './db.js';
@@ -204,15 +206,17 @@ program
       },
     ]);
 
-    config.ai = {
-      provider: answers.provider,
-      apiKey: answers.apiKey,
-      model: answers.model || undefined,
-      baseUrl: answers.baseUrl || undefined,
-    };
-
-    config.geminiApiKey = undefined; // legacy field; dropped from config.json on save
-    saveConfig(config);
+    // Re-read before writing: the prompts above can sit open for minutes while
+    // the daemon keeps saving its own state to the same file.
+    updateConfig((fresh) => {
+      fresh.ai = {
+        provider: answers.provider,
+        apiKey: answers.apiKey,
+        model: answers.model || undefined,
+        baseUrl: answers.baseUrl || undefined,
+      };
+      fresh.geminiApiKey = undefined; // legacy field; dropped from config.json on save
+    });
     console.log('AI configuration updated.');
   });
 
@@ -576,7 +580,6 @@ program
     const mapping = await ensureMapping(mappingRef);
     if (!mapping) return;
 
-    const config = getConfig();
     const answers = await inquirer.prompt([
       {
         type: 'input',
@@ -654,30 +657,43 @@ program
       profileSyncSourceUsername = normalizeHandle(String(sourceAnswer.profileSyncSourceUsername || ''));
     }
 
-    const index = config.mappings.findIndex((entry) => entry.id === mapping.id);
-    if (index === -1) return;
-
-    const existingMapping = config.mappings[index];
-    if (!existingMapping) return;
-
-    const updatedMapping = {
-      ...existingMapping,
-      owner: answers.owner,
-      twitterUsernames: usernames,
-      bskyIdentifier: answers.bskyIdentifier,
-      bskyServiceUrl: answers.bskyServiceUrl,
-      groupName: answers.groupName?.trim() || undefined,
-      groupEmoji: answers.groupEmoji?.trim() || undefined,
-      profileSyncSourceUsername: profileSyncSourceUsername || undefined,
-    };
-
-    if (answers.bskyPassword && answers.bskyPassword.trim().length > 0) {
-      updatedMapping.bskyPassword = answers.bskyPassword;
+    const nextIdentifier = String(answers.bskyIdentifier || '')
+      .trim()
+      .toLowerCase();
+    if (nextIdentifier && nextIdentifier !== mapping.bskyIdentifier.toLowerCase()) {
+      // Same account under a new handle: history must follow, or the next
+      // sweep re-posts the latest tweets. Say so, since a different account
+      // should start fresh instead.
+      const { sameAccount } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'sameAccount',
+          message: `Is ${nextIdentifier} the same Bluesky account as ${mapping.bskyIdentifier} (just a new handle)?`,
+          default: true,
+        },
+      ]);
+      if (sameAccount) {
+        const moved = dbService.migrateBskyIdentifier(mapping.bskyIdentifier, nextIdentifier);
+        console.log(
+          `Moved ${moved.history} history record(s) and ${moved.queue} queued tweet(s) to ${nextIdentifier}.`,
+        );
+      }
     }
 
-    config.mappings[index] = updatedMapping;
-    saveConfig(config);
-    console.log('Mapping updated successfully.');
+    // Patch a fresh read: the prompts above can take minutes.
+    const updated = updateMappingById(mapping.id, (entry) => {
+      entry.owner = answers.owner;
+      entry.twitterUsernames = usernames;
+      entry.bskyIdentifier = nextIdentifier || entry.bskyIdentifier;
+      entry.bskyServiceUrl = answers.bskyServiceUrl;
+      entry.groupName = answers.groupName?.trim() || undefined;
+      entry.groupEmoji = answers.groupEmoji?.trim() || undefined;
+      entry.profileSyncSourceUsername = profileSyncSourceUsername || undefined;
+      if (answers.bskyPassword && answers.bskyPassword.trim().length > 0) {
+        entry.bskyPassword = answers.bskyPassword;
+      }
+    });
+    console.log(updated ? 'Mapping updated successfully.' : 'Mapping no longer exists; nothing was saved.');
   });
 
 program
@@ -864,9 +880,12 @@ program
       return;
     }
 
-    const deleted = await deleteAllPosts(mapping.id);
-    dbService.deleteTweetsByBskyIdentifier(mapping.bskyIdentifier);
-    console.log(`Deleted ${deleted} posts for ${mapping.bskyIdentifier} and cleared local cache.`);
+    // History is kept (marked deleted) and checks restart from now, so the
+    // next sweep does not re-post the latest tweets.
+    const deleted = await deleteAllPosts(mapping.id, 'all');
+    console.log(
+      `Deleted ${deleted} posts for ${mapping.bskyIdentifier}. Only tweets posted from now on will be mirrored.`,
+    );
   });
 
 program

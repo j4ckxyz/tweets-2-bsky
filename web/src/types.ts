@@ -35,6 +35,14 @@ export interface AccountMapping {
   lastMirroredAvatarUrl?: string;
   lastMirroredBannerUrl?: string;
   hasBotLabel?: boolean;
+  bskyDid?: string;
+  mirrorFromMs?: number;
+  sensitiveFallbackLabel?: SensitiveFallbackLabel;
+  editMode?: EditMode;
+  mirrorRetweets?: boolean;
+  mirrorRepliesToMirrors?: boolean;
+  botDisplayNameSuffix?: boolean;
+  syncDeletes?: boolean;
   createdByUser?: {
     id: string;
     username?: string;
@@ -43,9 +51,25 @@ export interface AccountMapping {
   };
 }
 
+export type SensitiveFallbackLabel = 'sexual' | 'nudity' | 'graphic-media' | 'none';
+export type EditMode = 'skip' | 'replace';
+
+/** Per-mapping mirroring behaviour, as edited in the account forms. */
+export interface MirrorSettings {
+  sensitiveFallbackLabel: SensitiveFallbackLabel;
+  editMode: EditMode;
+  mirrorRetweets: boolean;
+  mirrorRepliesToMirrors: boolean;
+  botDisplayNameSuffix: boolean;
+  syncDeletes: boolean;
+}
+
 export interface AccountGroup {
   name: string;
   emoji?: string;
+  listUri?: string;
+  starterPackUri?: string;
+  lastDiscoverySyncAt?: string;
 }
 
 export interface TwitterConfig {
@@ -459,7 +483,7 @@ export interface Notice {
   message: string;
 }
 
-export interface MappingFormState {
+export interface MappingFormState extends MirrorSettings {
   owner: string;
   bskyIdentifier: string;
   bskyPassword: string;
@@ -467,6 +491,8 @@ export interface MappingFormState {
   groupName: string;
   groupEmoji: string;
   profileSyncSourceUsername: string;
+  /** New mappings only: mirror just new tweets, or the latest ones straight away. */
+  startFrom: 'now' | 'recent';
 }
 
 export interface UserFormState {

@@ -3,7 +3,13 @@
 // The pairing is the point: a timeout that the retry classifier does not
 // recognise makes a hung account fail fast and report "no new tweets" instead
 // of an error, which is worse than the hang it replaced.
-import { ScraperTimeoutError, createTimedFetch, isRetryableScraperError } from '../src/scraper-fetch.js';
+import {
+  ScraperTimeoutError,
+  createGatedFetch,
+  createRateLimiter,
+  createTimedFetch,
+  isRetryableScraperError,
+} from '../src/scraper-fetch.js';
 
 let passed = 0;
 let failed = 0;
@@ -99,6 +105,63 @@ console.log('\nSuccessful requests\n');
   assert(response.status === 200, 'A normal response passes through untouched');
   // If the deadline timer were left pending, the process would not exit here.
   assert(true, 'The deadline timer is cleared once the request settles');
+}
+
+console.log('\nGlobal rate limiter\n');
+{
+  // A fake clock: sleeping advances time instead of waiting, and every request
+  // records the moment it was let through.
+  let clock = 1_000_000;
+  const acquire = createRateLimiter({
+    minGapMs: 800,
+    jitterMs: 0,
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms;
+    },
+  });
+  const sentAt: number[] = [];
+  const recordingFetch = (async () => {
+    sentAt.push(clock);
+    return new Response('ok');
+  }) as unknown as typeof fetch;
+  const gated = createGatedFetch(acquire, recordingFetch);
+  // One logical timeline fetch is several requests (user-id lookup + pages);
+  // every one of them must wait for its own slot.
+  for (let i = 0; i < 4; i++) await gated('https://x.com/i/api/graphql/UserTweets');
+  const gaps = sentAt.slice(1).map((at, index) => at - (sentAt[index] ?? 0));
+  assert(sentAt.length === 4, 'Every request reaches the network');
+  assert(
+    gaps.every((gap) => gap >= 800),
+    `Consecutive requests are at least the minimum gap apart (${gaps.join(', ')}ms)`,
+  );
+}
+{
+  let clock = 0;
+  const acquire = createRateLimiter({
+    minGapMs: 500,
+    jitterMs: 0,
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms;
+    },
+  });
+  let calls = 0;
+  const gated = createGatedFetch(acquire, (async () => {
+    calls++;
+    return new Response('ok');
+  }) as unknown as typeof fetch);
+  // Concurrent callers: the reservation happens synchronously, so four parallel
+  // fetches still land 0, 500, 1000, 1500ms apart instead of all at once.
+  const slots: number[] = [];
+  await Promise.all(
+    [0, 1, 2, 3].map(async () => {
+      await gated('https://x.com/i/api/graphql/UserByScreenName');
+      slots.push(clock);
+    }),
+  );
+  assert(calls === 4, 'Concurrent callers all get through');
+  assert(clock >= 1500, `Concurrent callers are serialised through the gap (last slot at ${clock}ms)`);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

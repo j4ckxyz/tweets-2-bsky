@@ -1,6 +1,32 @@
 // Fixed values the dashboard renders from: tab routes, default form state,
 // permission options and the log level/stage vocabularies.
-import type { DashboardTab, LogLevel, MappingFormState, UserFormState, UserPermissions } from '../types';
+import type {
+  DashboardTab,
+  LogLevel,
+  MappingFormState,
+  MirrorSettings,
+  UserFormState,
+  UserPermissions,
+} from '../types';
+
+export const defaultMirrorSettings = (): MirrorSettings => ({
+  sensitiveFallbackLabel: 'sexual',
+  editMode: 'skip',
+  mirrorRetweets: true,
+  mirrorRepliesToMirrors: true,
+  botDisplayNameSuffix: true,
+  syncDeletes: false,
+});
+
+/** A mapping's settings with the server's defaults filled in. */
+export const mirrorSettingsFromMapping = (mapping: Partial<MirrorSettings>): MirrorSettings => ({
+  sensitiveFallbackLabel: mapping.sensitiveFallbackLabel ?? 'sexual',
+  editMode: mapping.editMode ?? 'skip',
+  mirrorRetweets: mapping.mirrorRetweets !== false,
+  mirrorRepliesToMirrors: mapping.mirrorRepliesToMirrors !== false,
+  botDisplayNameSuffix: mapping.botDisplayNameSuffix !== false,
+  syncDeletes: mapping.syncDeletes === true,
+});
 
 export const defaultMappingForm = (): MappingFormState => ({
   owner: '',
@@ -10,6 +36,8 @@ export const defaultMappingForm = (): MappingFormState => ({
   groupName: '',
   groupEmoji: '📁',
   profileSyncSourceUsername: '',
+  startFrom: 'now',
+  ...defaultMirrorSettings(),
 });
 
 export const defaultUserForm = (): UserFormState => ({

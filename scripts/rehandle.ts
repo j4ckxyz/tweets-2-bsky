@@ -556,17 +556,35 @@ export function writeJournal(entries: JournalEntry[]): string {
 }
 
 /**
- * Re-read config immediately before writing and mutate only this one mapping,
- * so a concurrently running tweets-2-bsky service cannot have its own writes
+ * Point the mapping — and everything keyed by its handle — at the new handle.
+ *
+ * History, the post queue and account health are all keyed by the identifier.
+ * Changing only config.json left the account's history under the old handle,
+ * so the next sweep saw an empty history for the new one and re-posted the
+ * account's latest tweets as duplicates. The rows move in the same step; the
+ * old handle is also kept as an alias so anything still holding it resolves
+ * to the new rows.
+ *
+ * Config is re-read immediately before writing and only this one mapping is
+ * touched, so a concurrently running service cannot have its own writes
  * clobbered by a stale in-memory copy.
  */
-function persistNewHandle(mappingId: string, newHandle: string): boolean {
+export async function persistNewHandle(
+  mappingId: string,
+  newHandle: string,
+  did?: string,
+): Promise<{ updated: boolean; history: number; queue: number }> {
+  // Imported here rather than at the top so the dry-run paths (and the offline
+  // tests that import this file) never open the database.
+  const { dbService } = await import('../src/db.js');
   const config = getConfig();
   const mapping = config.mappings.find((m) => m.id === mappingId);
-  if (!mapping) return false;
+  if (!mapping) return { updated: false, history: 0, queue: 0 };
+  const moved = dbService.migrateBskyIdentifier(mapping.bskyIdentifier, newHandle);
   mapping.bskyIdentifier = newHandle;
+  if (did?.startsWith('did:')) mapping.bskyDid = did;
   saveConfig(config);
-  return true;
+  return { updated: true, ...moved };
 }
 
 export async function applyPlan(
@@ -652,11 +670,13 @@ export async function applyPlan(
     log(`  ${yellow('!')}  Could not confirm the new handle: ${(error as Error).message}`);
   }
 
-  // 5. Point config.json at the new handle, or logins will break on the next run.
-  const configUpdated = persistNewHandle(mapping.id, newHandle);
+  // 5. Point config.json and the post history at the new handle, or logins
+  //    break and the next sweep re-posts the account's recent tweets.
+  const persisted = await persistNewHandle(mapping.id, newHandle, did);
+  const configUpdated = persisted.updated;
   log(
     configUpdated
-      ? `  ${green('OK')} config.json updated (bskyIdentifier -> ${newHandle})`
+      ? `  ${green('OK')} config.json updated (bskyIdentifier -> ${newHandle}); moved ${persisted.history} history record(s) and ${persisted.queue} queued tweet(s)`
       : `  ${red('x')}  config.json NOT updated - mapping ${mapping.id} disappeared. Fix this by hand.`,
   );
 

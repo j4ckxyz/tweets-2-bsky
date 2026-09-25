@@ -8,7 +8,8 @@ import bcrypt from 'bcryptjs';
 import cors from 'cors';
 import express from 'express';
 import jwt, { type SignOptions } from 'jsonwebtoken';
-import { deleteAllPosts } from './bsky.js';
+import { type DeletePostsScope, deletePosts } from './bsky.js';
+import { normalizeSensitiveFallbackLabel } from './compose.js';
 import {
   ADMIN_USER_PERMISSIONS,
   type AccountMapping,
@@ -19,13 +20,16 @@ import {
   getConfig,
   getDefaultUserPermissions,
   saveConfig,
+  updateConfig,
+  updateMappingById,
 } from './config-manager.js';
 import { accountHealthService, dbService, postQueueService, sourceActivityService } from './db.js';
 import type { ProcessedTweet } from './db.js';
-import { decideCheck } from './polling.js';
-import { isPreviewAvailable, runPreview } from './preview.js';
+import { syncDiscoveryForGroup } from './discovery-runner.js';
 import type { LogExportFormat, LogLevel, LogQueryFilters, LogStage } from './event-log.js';
 import { eventLogService, exportLogs, logEvent } from './event-log.js';
+import { activityFromRow, decideCheck } from './polling.js';
+import { isPreviewAvailable, runPreview } from './preview.js';
 import {
   applyProfileMirrorSyncState,
   bridgeBlueskyAccountToFediverse,
@@ -941,10 +945,35 @@ function signalSchedulerWake(): void {
   schedulerWakeSignal += 1;
 }
 
-function requestImmediateSchedulerPass(): void {
+// "Run now" forces a check that adaptive polling would otherwise skip. A
+// whole-instance force is one timeline request per source account, so it is
+// throttled: repeated clicks inside the cooldown run a normal sweep instead.
+// Forcing a single account is cheap and is never throttled.
+const FORCE_ALL_COOLDOWN_MS = 5 * 60 * 1000;
+let lastForcedAllAt = 0;
+let pendingForce: { all: boolean; mappingIds: Set<string> } = { all: false, mappingIds: new Set() };
+
+function requestImmediateSchedulerPass(options: { mappingId?: string } = {}): { forced: 'all' | 'mapping' | 'none' } {
   lastCheckTime = 0;
   nextCheckTime = Date.now() + 250;
+  let forced: 'all' | 'mapping' | 'none' = 'none';
+  if (options.mappingId) {
+    pendingForce.mappingIds.add(options.mappingId);
+    forced = 'mapping';
+  } else if (Date.now() - lastForcedAllAt >= FORCE_ALL_COOLDOWN_MS) {
+    pendingForce.all = true;
+    lastForcedAllAt = Date.now();
+    forced = 'all';
+  }
   signalSchedulerWake();
+  return { forced };
+}
+
+/** Consumed by the scheduler: which accounts the next sweep must check regardless of tier. */
+export function takeForcedSweep(): { all: boolean; mappingIds: Set<string> } {
+  const taken = pendingForce;
+  pendingForce = { all: false, mappingIds: new Set() };
+  return taken;
 }
 
 if (allowedOrigins.size === 0) {
@@ -1239,6 +1268,51 @@ const sanitizeMapping = (
 
   return response;
 };
+
+type MappingSettings = Pick<
+  AccountMapping,
+  | 'sensitiveFallbackLabel'
+  | 'editMode'
+  | 'mirrorRetweets'
+  | 'mirrorRepliesToMirrors'
+  | 'botDisplayNameSuffix'
+  | 'syncDeletes'
+>;
+
+/** The per-mapping mirroring settings present in a request body, validated. */
+const parseMappingSettings = (body: Record<string, unknown> | undefined): Partial<MappingSettings> => {
+  const settings: Partial<MappingSettings> = {};
+  if (!body) return settings;
+  if (body.sensitiveFallbackLabel !== undefined) {
+    settings.sensitiveFallbackLabel = normalizeSensitiveFallbackLabel(body.sensitiveFallbackLabel);
+  }
+  if (body.editMode === 'skip' || body.editMode === 'replace') settings.editMode = body.editMode;
+  for (const key of ['mirrorRetweets', 'mirrorRepliesToMirrors', 'botDisplayNameSuffix', 'syncDeletes'] as const) {
+    if (typeof body[key] === 'boolean') settings[key] = body[key] as boolean;
+  }
+  return settings;
+};
+
+/**
+ * DID behind a handle, via the public API, or null when it cannot be told.
+ * Used to decide whether an edited identifier is the same account under a new
+ * handle (history must follow it) or a different account (it must not).
+ */
+async function resolvePublicDid(identifier: string): Promise<string | null> {
+  const value = identifier.trim().toLowerCase();
+  if (value.startsWith('did:')) return value;
+  if (!value.includes('.') || value.includes('@')) return null;
+  try {
+    const response = await axios.get(`${BSKY_APPVIEW_URL}/xrpc/com.atproto.identity.resolveHandle`, {
+      params: { handle: value },
+      timeout: 8_000,
+    });
+    const did = response.data?.did;
+    return typeof did === 'string' && did.startsWith('did:') ? did : null;
+  } catch {
+    return null;
+  }
+}
 
 const parseTwitterUsernames = (value: unknown): string[] => {
   const seen = new Set<string>();
@@ -2033,13 +2107,20 @@ app.put('/api/groups/:groupKey', authenticateToken, (req: any, res) => {
     finalName = normalizeGroupName(config.groups[mergeIndex]?.name) || requestedName;
     finalEmoji = requestedEmoji || normalizeGroupEmoji(config.groups[mergeIndex]?.emoji) || finalEmoji;
 
+    // Keep the surviving group's Bluesky list and starter pack: rebuilding the
+    // object from name and emoji alone orphaned them, and the next sync then
+    // created duplicates.
+    const { emoji: _mergeEmoji, ...mergeRest } = config.groups[mergeIndex] ?? { name: finalName };
     config.groups[mergeIndex] = {
+      ...mergeRest,
       name: finalName,
       ...(finalEmoji ? { emoji: finalEmoji } : {}),
     };
     config.groups.splice(groupIndex, 1);
   } else {
+    const { emoji: _previousEmoji, ...rest } = config.groups[groupIndex] ?? { name: finalName };
     config.groups[groupIndex] = {
+      ...rest,
       name: finalName,
       ...(finalEmoji ? { emoji: finalEmoji } : {}),
     };
@@ -2212,6 +2293,11 @@ app.post('/api/mappings', authenticateToken, async (req: any, res) => {
     createdByUserId,
     profileSyncSourceUsername,
     hasBotLabel: false,
+    ...parseMappingSettings(req.body),
+    // "Only new tweets" (the dashboard default) records what is already on the
+    // timeline as history instead of posting it. `recent` keeps the old
+    // behaviour of mirroring the latest tweets straight away.
+    ...(req.body?.startFrom === 'now' ? { mirrorFromMs: Date.now() } : {}),
   };
 
   ensureGroupExists(config, normalizedGroupName, normalizedGroupEmoji);
@@ -2227,7 +2313,13 @@ app.post('/api/mappings', authenticateToken, async (req: any, res) => {
 
     if (labelResult.hasBotLabel && !newMapping.hasBotLabel) {
       newMapping.hasBotLabel = true;
-      saveConfig(config);
+      // Fresh read: the login above took time, and saving the snapshot from
+      // before it would revert anything written meanwhile.
+      updateMappingById(newMapping.id, (entry) => {
+        entry.hasBotLabel = true;
+        if (labelResult.bsky.did?.startsWith('did:')) entry.bskyDid = labelResult.bsky.did;
+        return true;
+      });
     }
 
     for (const key of [
@@ -2245,10 +2337,10 @@ app.post('/api/mappings', authenticateToken, async (req: any, res) => {
     );
   }
 
-  res.json(sanitizeMapping(newMapping, createUserLookupById(config), req.user));
+  res.json(sanitizeMapping(newMapping, createUserLookupById(getConfig()), req.user));
 });
 
-app.put('/api/mappings/:id', authenticateToken, (req: any, res) => {
+app.put('/api/mappings/:id', authenticateToken, async (req: any, res) => {
   const { id } = req.params;
   const config = getConfig();
   const usersById = createUserLookupById(config);
@@ -2323,8 +2415,7 @@ app.put('/api/mappings/:id', authenticateToken, (req: any, res) => {
     fallbackSource: existingMapping.profileSyncSourceUsername,
   });
 
-  const updatedMapping: AccountMapping = {
-    ...existingMapping,
+  const patch: Partial<AccountMapping> = {
     twitterUsernames,
     bskyIdentifier,
     bskyPassword: normalizeOptionalString(req.body?.bskyPassword) || existingMapping.bskyPassword,
@@ -2335,12 +2426,52 @@ app.put('/api/mappings/:id', authenticateToken, (req: any, res) => {
     groupEmoji: nextGroupEmoji,
     createdByUserId,
     profileSyncSourceUsername,
+    ...parseMappingSettings(req.body),
   };
 
-  ensureGroupExists(config, nextGroupName, nextGroupEmoji);
-  config.mappings[index] = updatedMapping;
-  saveConfig(config);
-  res.json(sanitizeMapping(updatedMapping, createUserLookupById(config), req.user));
+  // History, the queue and account health are keyed by the identifier. A new
+  // handle for the same account must take them along — otherwise the next
+  // sweep sees no history and re-posts the latest tweets. A different account
+  // must not inherit them. The DID tells the two apart.
+  const identifierChanged = bskyIdentifier.toLowerCase() !== existingMapping.bskyIdentifier.toLowerCase();
+  let moveHistory = false;
+  if (identifierChanged) {
+    const newDid = await resolvePublicDid(bskyIdentifier);
+    const oldDid = existingMapping.bskyDid ?? (await resolvePublicDid(existingMapping.bskyIdentifier));
+    // Unknown on either side: assume the same account. Wrongly moving history
+    // skips a few tweets on a new account; wrongly not moving it duplicates
+    // the latest 50 posts on the existing one.
+    moveHistory = !newDid || !oldDid || newDid === oldDid;
+    patch.bskyDid = moveHistory ? (existingMapping.bskyDid ?? newDid ?? undefined) : (newDid ?? undefined);
+  }
+
+  if (moveHistory) {
+    const moved = dbService.migrateBskyIdentifier(existingMapping.bskyIdentifier, bskyIdentifier);
+    logEvent({
+      level: 'info',
+      stage: 'system',
+      event: 'account.identifier-moved',
+      message: `${existingMapping.bskyIdentifier} was renamed to ${bskyIdentifier}; moved ${moved.history} history record(s) and ${moved.queue} queued tweet(s).`,
+      mappingId: id,
+      bskyIdentifier,
+      detail: moved,
+    });
+  }
+
+  let updatedMapping: AccountMapping | undefined;
+  updateConfig((fresh) => {
+    const target = fresh.mappings.find((mapping) => mapping.id === id);
+    if (!target) return false;
+    Object.assign(target, patch);
+    ensureGroupExists(fresh, nextGroupName, nextGroupEmoji);
+    updatedMapping = target;
+    return true;
+  });
+  if (!updatedMapping) {
+    res.status(404).json({ error: 'Mapping not found' });
+    return;
+  }
+  res.json(sanitizeMapping(updatedMapping, createUserLookupById(getConfig()), req.user));
 });
 
 // Forces the next login attempt for a down account to happen immediately,
@@ -2418,11 +2549,15 @@ app.post('/api/mappings/:id/sync-profile-from-twitter', authenticateToken, async
       bskyPassword: mapping.bskyPassword,
       bskyServiceUrl: mapping.bskyServiceUrl,
       previousSync: getMappingMirrorSyncState(mapping),
+      botDisplayNameSuffix: mapping.botDisplayNameSuffix !== false,
     });
 
-    const updatedMapping = applyProfileMirrorSyncState(mapping, sourceTwitterUsername, result);
-    config.mappings[mappingIndex] = updatedMapping;
-    saveConfig(config);
+    // Patch a fresh read: the sync above takes seconds, and saving the config
+    // loaded before it would revert everything written meanwhile.
+    const updatedMapping =
+      updateMappingById(mapping.id, (entry) => {
+        Object.assign(entry, applyProfileMirrorSyncState(entry, sourceTwitterUsername, result));
+      }) ?? applyProfileMirrorSyncState(mapping, sourceTwitterUsername, result);
 
     for (const key of [
       normalizeActor(updatedMapping.bskyIdentifier),
@@ -2437,7 +2572,7 @@ app.post('/api/mappings/:id/sync-profile-from-twitter', authenticateToken, async
     res.json({
       success: true,
       sourceTwitterUsername,
-      mapping: sanitizeMapping(updatedMapping, createUserLookupById(config), req.user),
+      mapping: sanitizeMapping(updatedMapping, createUserLookupById(getConfig()), req.user),
       ...result,
     });
   } catch (error) {
@@ -2483,11 +2618,15 @@ app.post('/api/mappings/:id/pull-twitter-bio', authenticateToken, async (req: an
       syncDescription: true,
       syncAvatar: false,
       syncBanner: false,
+      syncWebsite: false,
+      // An explicit "pull bio" replaces the Bluesky bio even if edited by hand.
+      forceDescription: true,
     });
 
-    const updatedMapping = applyProfileMirrorSyncState(mapping, sourceTwitterUsername, result);
-    config.mappings[mappingIndex] = updatedMapping;
-    saveConfig(config);
+    const updatedMapping =
+      updateMappingById(mapping.id, (entry) => {
+        Object.assign(entry, applyProfileMirrorSyncState(entry, sourceTwitterUsername, result));
+      }) ?? applyProfileMirrorSyncState(mapping, sourceTwitterUsername, result);
 
     for (const key of [
       normalizeActor(updatedMapping.bskyIdentifier),
@@ -2502,7 +2641,7 @@ app.post('/api/mappings/:id/pull-twitter-bio', authenticateToken, async (req: an
     res.json({
       success: true,
       sourceTwitterUsername,
-      mapping: sanitizeMapping(updatedMapping, createUserLookupById(config), req.user),
+      mapping: sanitizeMapping(updatedMapping, createUserLookupById(getConfig()), req.user),
       ...result,
     });
   } catch (error) {
@@ -2536,6 +2675,7 @@ app.post('/api/mappings/bot-label-all', authenticateToken, async (req: any, res)
   let alreadyLabeled = 0;
   let failed = 0;
   let changed = false;
+  const changedIds = new Set<string>();
   const failedMappings: Array<{ id: string; bskyIdentifier: string; error: string }> = [];
 
   for (const mapping of targets) {
@@ -2554,6 +2694,7 @@ app.post('/api/mappings/bot-label-all', authenticateToken, async (req: any, res)
 
       if (!mapping.hasBotLabel) {
         mapping.hasBotLabel = true;
+        changedIds.add(mapping.id);
         changed = true;
       }
 
@@ -2577,7 +2718,15 @@ app.post('/api/mappings/bot-label-all', authenticateToken, async (req: any, res)
   }
 
   if (changed) {
-    saveConfig(config);
+    // This loop logs in to every account in turn and can run for minutes.
+    // Patch only the flag on a fresh read; saving the snapshot taken before
+    // the loop would revert every other change made while it ran.
+    updateConfig((fresh) => {
+      for (const entry of fresh.mappings) {
+        if (changedIds.has(entry.id)) entry.hasBotLabel = true;
+      }
+      return true;
+    });
   }
 
   res.json({
@@ -2617,6 +2766,7 @@ app.post('/api/mappings/append-bot-name-all', authenticateToken, async (req: any
   let alreadyAppended = 0;
   let failed = 0;
   let changed = false;
+  const namePatches = new Map<string, Partial<AccountMapping>>();
   const failedMappings: Array<{ id: string; bskyIdentifier: string; error: string }> = [];
 
   for (const mapping of targets) {
@@ -2640,6 +2790,7 @@ app.post('/api/mappings/append-bot-name-all', authenticateToken, async (req: any
         bskyPassword: mapping.bskyPassword,
         bskyServiceUrl: mapping.bskyServiceUrl,
         twitterUsername: sourceTwitterUsername,
+        botDisplayNameSuffix: true,
       });
 
       if (result.updated) {
@@ -2657,6 +2808,16 @@ app.post('/api/mappings/append-bot-name-all', authenticateToken, async (req: any
         mapping.lastMirroredDisplayName = result.displayName;
         changed = true;
       }
+      // Asking for the suffix turns the setting back on for this mapping.
+      if (mapping.botDisplayNameSuffix === false) {
+        mapping.botDisplayNameSuffix = true;
+        changed = true;
+      }
+      namePatches.set(mapping.id, {
+        profileSyncSourceUsername: mapping.profileSyncSourceUsername,
+        lastMirroredDisplayName: mapping.lastMirroredDisplayName,
+        botDisplayNameSuffix: mapping.botDisplayNameSuffix,
+      });
 
       for (const key of [
         normalizeActor(mapping.bskyIdentifier),
@@ -2678,7 +2839,14 @@ app.post('/api/mappings/append-bot-name-all', authenticateToken, async (req: any
   }
 
   if (changed) {
-    saveConfig(config);
+    // Same as bot-label-all: patch a fresh read, never the pre-loop snapshot.
+    updateConfig((fresh) => {
+      for (const entry of fresh.mappings) {
+        const patch = namePatches.get(entry.id);
+        if (patch) Object.assign(entry, patch);
+      }
+      return true;
+    });
   }
 
   res.json({
@@ -2822,11 +2990,11 @@ app.delete('/api/mappings/:id/cache', authenticateToken, requireAdmin, (req, res
     return;
   }
 
-  for (const username of mapping.twitterUsernames) {
-    dbService.deleteTweetsByUsername(username);
-  }
+  // Only this mirror's history. Deleting by username used to wipe the same
+  // source's history for every other mapping that mirrors it too.
+  const cleared = dbService.deleteTweetsForMapping(mapping.bskyIdentifier, mapping.twitterUsernames);
 
-  res.json({ success: true, message: 'Cache cleared for all associated accounts' });
+  res.json({ success: true, cleared, message: `Cache cleared for ${mapping.bskyIdentifier} (${cleared} record(s)).` });
 });
 
 app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, async (req, res) => {
@@ -2838,14 +3006,19 @@ app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, 
     return;
   }
 
+  // Default: only what the mirror posted. `all` also removes posts written by
+  // hand on the account, and has to be asked for explicitly.
+  const scope: DeletePostsScope = req.body?.scope === 'all' ? 'all' : 'mirrored';
   try {
-    const deletedCount = await deleteAllPosts(id);
-
-    dbService.deleteTweetsByBskyIdentifier(mapping.bskyIdentifier);
-
+    const { deleted } = await deletePosts(id, scope);
     res.json({
       success: true,
-      message: `Deleted ${deletedCount} posts from ${mapping.bskyIdentifier} and cleared local cache.`,
+      deleted,
+      scope,
+      message:
+        scope === 'all'
+          ? `Deleted all ${deleted} posts from ${mapping.bskyIdentifier}. Only tweets posted from now on will be mirrored.`
+          : `Deleted ${deleted} mirrored posts from ${mapping.bskyIdentifier}. Posts written directly on Bluesky were kept, and only tweets posted from now on will be mirrored.`,
     });
   } catch (err) {
     console.error('Failed to delete all posts:', err);
@@ -3064,6 +3237,14 @@ app.get('/api/accounts/:id', authenticateToken, (req: any, res) => {
       lastProfileSyncAt: mapping.lastProfileSyncAt,
       lastPinnedTweetId: mapping.lastPinnedTweetId,
       lastPinSyncAt: mapping.lastPinSyncAt,
+      bskyDid: mapping.bskyDid,
+      mirrorFromMs: mapping.mirrorFromMs,
+      sensitiveFallbackLabel: mapping.sensitiveFallbackLabel ?? 'sexual',
+      editMode: mapping.editMode ?? 'skip',
+      mirrorRetweets: mapping.mirrorRetweets !== false,
+      mirrorRepliesToMirrors: mapping.mirrorRepliesToMirrors !== false,
+      botDisplayNameSuffix: mapping.botDisplayNameSuffix !== false,
+      syncDeletes: mapping.syncDeletes === true,
       // Deliberately absent: bskyPassword.
     },
     permissions: {
@@ -3110,10 +3291,7 @@ app.get('/api/accounts/:id', authenticateToken, (req: any, res) => {
     },
     sources: mapping.twitterUsernames.map((username) => {
       const row = activity.get(username.toLowerCase());
-      const decision = decideCheck(
-        { lastFoundAt: row?.last_found_at ?? undefined, lastCheckedAt: row?.last_checked_at ?? undefined },
-        now,
-      );
+      const decision = decideCheck(activityFromRow(row), now);
       return {
         twitterUsername: username,
         tier: decision.tier,
@@ -3121,6 +3299,13 @@ app.get('/api/accounts/:id', authenticateToken, (req: any, res) => {
         lastCheckedAt: row?.last_checked_at ?? null,
         lastFoundAt: row?.last_found_at ?? null,
         emptyStreak: row?.empty_streak ?? 0,
+        // A renamed, suspended or protected source used to look exactly like
+        // one that had simply gone quiet.
+        lastError: row?.last_error ?? null,
+        lastErrorAt: row?.last_error_at ?? null,
+        errorStreak: row?.error_streak ?? 0,
+        protectedSince: row?.protected_since ?? null,
+        twitterUserId: row?.twitter_user_id ?? null,
       };
     }),
     recentPosts: dbService.getRecentTweetsForIdentifier(mapping.bskyIdentifier, 25),
@@ -3266,6 +3451,8 @@ app.get('/api/account-health', authenticateToken, (req: any, res) => {
           lastCheckedAt: row?.last_checked_at ?? null,
           lastFoundAt: row?.last_found_at ?? null,
           dueInMs: decision.dueInMs,
+          lastError: row?.last_error ?? null,
+          protectedSince: row?.protected_since ?? null,
         };
       });
 
@@ -3642,8 +3829,25 @@ app.post('/api/run-now', authenticateToken, (req: any, res) => {
     return;
   }
 
-  requestImmediateSchedulerPass();
-  res.json({ success: true, message: 'Check triggered' });
+  // Optional: force just one account's sources (the account page's button).
+  const mappingId = typeof req.body?.mappingId === 'string' ? req.body.mappingId : undefined;
+  if (mappingId) {
+    const config = getConfig();
+    if (!getVisibleMappingIdSet(config, req.user).has(mappingId)) {
+      res.status(404).json({ error: 'Account not found.' });
+      return;
+    }
+  }
+
+  const { forced } = requestImmediateSchedulerPass({ mappingId });
+  res.json({
+    success: true,
+    forced,
+    message:
+      forced === 'none'
+        ? 'Check triggered. Every account was force-checked in the last few minutes, so this runs a normal sweep.'
+        : 'Check triggered',
+  });
 });
 
 app.post('/api/backfill/clear-all', authenticateToken, requireAdmin, (_req, res) => {
@@ -3762,6 +3966,61 @@ app.delete('/api/backfill/:id', authenticateToken, (req: any, res) => {
   postQueueService.cancelPendingBackfills(id);
   signalSchedulerWake();
   res.json({ success: true });
+});
+
+// --- Discovery: per-group lists and starter packs ---
+
+app.get('/api/discovery', authenticateToken, (_req: any, res) => {
+  const config = getConfig();
+  res.json({
+    curatorMappingId: config.discovery?.curatorMappingId ?? null,
+    groups: config.groups.map((group) => ({
+      name: group.name,
+      listUri: group.listUri ?? null,
+      starterPackUri: group.starterPackUri ?? null,
+      lastDiscoverySyncAt: group.lastDiscoverySyncAt ?? null,
+    })),
+  });
+});
+
+app.put('/api/discovery', authenticateToken, requireAdmin, (req: any, res) => {
+  const curatorMappingId = normalizeOptionalString(req.body?.curatorMappingId);
+  const config = getConfig();
+  if (curatorMappingId && !config.mappings.some((mapping) => mapping.id === curatorMappingId)) {
+    res.status(400).json({ error: 'That curator account does not exist.' });
+    return;
+  }
+  updateConfig((fresh) => {
+    fresh.discovery = curatorMappingId ? { curatorMappingId } : undefined;
+    return true;
+  });
+  res.json({ success: true, curatorMappingId: curatorMappingId ?? null });
+});
+
+app.post('/api/groups/:groupKey/discovery-sync', authenticateToken, async (req: any, res) => {
+  if (!req.user?.isAdmin && !canManageGroups(req.user)) {
+    res.status(403).json({ error: 'You do not have permission to manage groups.' });
+    return;
+  }
+  const groupKey = decodeURIComponent(String(req.params.groupKey || ''));
+  try {
+    const outcome = await syncDiscoveryForGroup(groupKey);
+    res.json({
+      success: true,
+      ...outcome,
+      message: [
+        `Starter pack for "${outcome.group}" is up to date with ${outcome.members} account(s).`,
+        outcome.belowRecommendedSize ? 'Bluesky recommends at least 7 accounts in a starter pack.' : '',
+        outcome.unresolved.length > 0
+          ? `${outcome.unresolved.length} account(s) could not be resolved yet and were left out.`
+          : '',
+      ]
+        .filter(Boolean)
+        .join(' '),
+    });
+  } catch (error) {
+    res.status(400).json({ error: getErrorMessage(error, 'Could not sync the starter pack.') });
+  }
 });
 
 // --- Config Management Routes ---
@@ -3912,6 +4171,11 @@ export function updateLastCheckTime() {
   const config = getConfig();
   lastCheckTime = Date.now();
   nextCheckTime = lastCheckTime + (config.checkIntervalMinutes || 5) * 60 * 1000;
+}
+
+/** Snapshot of the dashboard's global status (tests use it to prove the preview leaves it alone). */
+export function getAppStatus(): AppStatus {
+  return { ...currentAppStatus };
 }
 
 export function updateAppStatus(status: Partial<AppStatus>) {

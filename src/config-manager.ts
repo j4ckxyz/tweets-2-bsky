@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import { type SensitiveFallbackLabel, normalizeSensitiveFallbackLabel } from './compose.js';
 import { ACTIVE_CONFIG_FILE, LEGACY_CONFIG_FILE, USING_EXTERNAL_DATA_DIR } from './storage-paths.js';
 
 const CONFIG_FILE = ACTIVE_CONFIG_FILE;
@@ -87,11 +88,47 @@ export interface AccountMapping {
   lastPinnedTweetId?: string;
   lastPinSyncAt?: string;
   hasBotLabel?: boolean;
+  /**
+   * The account's DID, captured at login. Handles change (rehandle, or the
+   * owner renaming on Bluesky); the DID does not, so it is what lets the app
+   * find the account again and carry its history over to the new handle.
+   */
+  bskyDid?: string;
+  lastMirroredWebsite?: string;
+  /** Label for tweets flagged sensitive without a category. Default 'sexual'. */
+  sensitiveFallbackLabel?: SensitiveFallbackLabel;
+  /** What to do when a mirrored tweet is edited on X. Default 'skip'. */
+  editMode?: 'skip' | 'replace';
+  /** Retweets of tweets mirrored on this instance become Bluesky reposts. Default on. */
+  mirrorRetweets?: boolean;
+  /** Replies to tweets mirrored on this instance become Bluesky replies. Default on. */
+  mirrorRepliesToMirrors?: boolean;
+  /** Append " {bot}" to the mirrored display name. Default on. */
+  botDisplayNameSuffix?: boolean;
+  /** Delete the Bluesky post when its tweet is deleted on X. Default off. */
+  syncDeletes?: boolean;
+  /**
+   * Scheduled checks treat tweets older than this (epoch ms) as history and
+   * record them as skipped instead of posting them. Set when a mapping is
+   * created with "only new tweets", and after "delete all posts". Explicit
+   * backfills ignore it.
+   */
+  mirrorFromMs?: number;
 }
 
 export interface AccountGroup {
   name: string;
   emoji?: string;
+  /** Bluesky list (curatelist) the group's accounts are kept in. */
+  listUri?: string;
+  /** Bluesky starter pack pointing at `listUri`. */
+  starterPackUri?: string;
+  lastDiscoverySyncAt?: string;
+}
+
+export interface DiscoveryConfig {
+  /** Mapping whose Bluesky account owns the per-group lists and starter packs. */
+  curatorMappingId?: string;
 }
 
 export interface AppConfig {
@@ -102,6 +139,7 @@ export interface AppConfig {
   checkIntervalMinutes: number;
   geminiApiKey?: string;
   ai?: AIConfig;
+  discovery?: DiscoveryConfig;
 }
 
 const DEFAULT_TWITTER_CONFIG: TwitterConfig = {
@@ -276,10 +314,24 @@ const normalizeGroup = (group: unknown): AccountGroup | null => {
     return null;
   }
   const emoji = normalizeString(record.emoji);
+  const listUri = normalizeString(record.listUri);
+  const starterPackUri = normalizeString(record.starterPackUri);
+  const lastDiscoverySyncAt = normalizeIsoDateString(record.lastDiscoverySyncAt);
   return {
     name,
     ...(emoji ? { emoji } : {}),
+    ...(listUri ? { listUri } : {}),
+    ...(starterPackUri ? { starterPackUri } : {}),
+    ...(lastDiscoverySyncAt ? { lastDiscoverySyncAt } : {}),
   };
+};
+
+const normalizeOptionalBoolean = (value: unknown): boolean | undefined =>
+  typeof value === 'boolean' ? value : undefined;
+
+const normalizeEpochMs = (value: unknown): number | undefined => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : undefined;
 };
 
 const findAdminUserId = (users: WebUser[]): string | undefined => users.find((user) => user.role === 'admin')?.id;
@@ -342,6 +394,15 @@ const normalizeMapping = (rawMapping: unknown, users: WebUser[], adminUserId?: s
     lastPinnedTweetId: normalizeString(record.lastPinnedTweetId),
     lastPinSyncAt: normalizeIsoDateString(record.lastPinSyncAt),
     hasBotLabel: normalizeBoolean(record.hasBotLabel, false),
+    bskyDid: normalizeString(record.bskyDid)?.startsWith('did:') ? normalizeString(record.bskyDid) : undefined,
+    lastMirroredWebsite: normalizeString(record.lastMirroredWebsite),
+    sensitiveFallbackLabel: normalizeSensitiveFallbackLabel(record.sensitiveFallbackLabel),
+    editMode: record.editMode === 'replace' || record.editMode === 'skip' ? record.editMode : undefined,
+    mirrorRetweets: normalizeOptionalBoolean(record.mirrorRetweets),
+    mirrorRepliesToMirrors: normalizeOptionalBoolean(record.mirrorRepliesToMirrors),
+    botDisplayNameSuffix: normalizeOptionalBoolean(record.botDisplayNameSuffix),
+    syncDeletes: normalizeOptionalBoolean(record.syncDeletes),
+    mirrorFromMs: normalizeEpochMs(record.mirrorFromMs),
     createdByUserId:
       (explicitCreatorExists ? explicitCreator : undefined) ?? matchOwnerToUserId(owner, users) ?? adminUserId,
   };
@@ -439,6 +500,9 @@ const normalizeConfigShape = (rawConfig: unknown): AppConfig => {
 
   const geminiApiKey = normalizeString(record.geminiApiKey);
   const ai = normalizeAiConfig(record.ai);
+  const rawDiscovery =
+    record.discovery && typeof record.discovery === 'object' ? (record.discovery as Record<string, unknown>) : {};
+  const curatorMappingId = normalizeString(rawDiscovery.curatorMappingId);
 
   return {
     twitter: {
@@ -453,6 +517,7 @@ const normalizeConfigShape = (rawConfig: unknown): AppConfig => {
     checkIntervalMinutes,
     ...(geminiApiKey ? { geminiApiKey } : {}),
     ...(ai ? { ai } : {}),
+    ...(curatorMappingId ? { discovery: { curatorMappingId } } : {}),
   };
 };
 
@@ -530,6 +595,38 @@ export function saveConfig(config: AppConfig): void {
   const normalizedConfig = normalizeConfigShape(config);
   writeConfigFile(normalizedConfig);
   configUnreadable = false;
+}
+
+/**
+ * Read the config fresh, apply `mutate`, and save — all synchronously, so no
+ * other write can land in between. Anything that awaits (a Bluesky login, a
+ * Twitter fetch) must NOT hold a config object across the await and save it
+ * afterwards: every change made meanwhile — a mapping another user added, the
+ * scheduler's pin-sync timestamps — would be silently reverted. Do the slow
+ * work first, then patch through here. Returning `false` skips the save.
+ */
+export function updateConfig(mutate: (config: AppConfig) => unknown): AppConfig {
+  const config = getConfig();
+  if (mutate(config) !== false) {
+    saveConfig(config);
+  }
+  return config;
+}
+
+/** Patch one mapping against a fresh read. Returns the updated mapping, or undefined if it is gone. */
+export function updateMappingById(
+  id: string,
+  mutate: (mapping: AccountMapping) => unknown,
+): AccountMapping | undefined {
+  let updated: AccountMapping | undefined;
+  updateConfig((config) => {
+    const mapping = config.mappings.find((entry) => entry.id === id);
+    if (!mapping) return false;
+    const result = mutate(mapping);
+    updated = mapping;
+    return result;
+  });
+  return updated;
 }
 
 export function addMapping(mapping: Omit<AccountMapping, 'id' | 'enabled'>): void {

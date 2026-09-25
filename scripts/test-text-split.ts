@@ -1,4 +1,4 @@
-import { BSKY_POST_LIMIT, splitText } from '../src/text-split.js';
+import { BSKY_POST_BYTE_LIMIT, BSKY_POST_LIMIT, graphemeLength, splitText } from '../src/text-split.js';
 
 let failures = 0;
 
@@ -67,10 +67,38 @@ console.log('\nContent preservation');
     chunks.every((chunk) => chunk.length > 0),
     'No empty chunks are produced',
   );
+  assert(chunks.join(' ').replace(/\s+/g, ' ') === text.replace(/\s+/g, ' '), 'All words survive the split');
+}
+
+console.log('\nGraphemes and bytes');
+{
+  const hasLoneSurrogate = (value: string) =>
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value);
+
+  // 200 emoji are 400 UTF-16 code units but only 200 characters to Bluesky.
+  const emoji = '😀'.repeat(200);
+  assert(splitText(emoji).length === 1, '200 emoji fit in one post (Bluesky counts graphemes, not code units)');
+  assert(graphemeLength(emoji) === 200, 'graphemeLength counts an emoji once');
+
+  const manyEmoji = '😀'.repeat(500);
+  const emojiChunks = splitText(manyEmoji);
+  assert(emojiChunks.length === 2, 'A 500-emoji run splits into two posts');
+  assert(!emojiChunks.some(hasLoneSurrogate), 'A forced split never cuts an emoji in half');
+  assert(emojiChunks.join('') === manyEmoji, 'Emoji chunks reassemble into the original');
   assert(
-    chunks.join(' ').replace(/\s+/g, ' ') === text.replace(/\s+/g, ' '),
-    'All words survive the split',
+    emojiChunks.every((chunk) => graphemeLength(chunk) <= BSKY_POST_LIMIT),
+    'Every emoji chunk is within 300 graphemes',
   );
+
+  // A family emoji is one grapheme but 25 UTF-8 bytes; Bluesky also caps a
+  // post at 3000 bytes, which 200 of them would blow through.
+  const family = '👨‍👩‍👧‍👦'.repeat(200);
+  const familyChunks = splitText(family);
+  assert(
+    familyChunks.every((chunk) => Buffer.byteLength(chunk, 'utf8') <= BSKY_POST_BYTE_LIMIT),
+    `Chunks respect the 3000-byte cap (${familyChunks.map((c) => Buffer.byteLength(c, 'utf8')).join(', ')} bytes)`,
+  );
+  assert(familyChunks.join('') === family, 'ZWJ sequences are never split apart');
 }
 
 const total = failures === 0;

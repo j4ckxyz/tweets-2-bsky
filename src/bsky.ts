@@ -1,7 +1,7 @@
 import { BskyAgent } from '@atproto/api';
-import { getConfig } from './config-manager.js';
+import { getConfig, updateConfig, updateMappingById } from './config-manager.js';
 import type { AccountHealthState } from './db.js';
-import { accountHealthService } from './db.js';
+import { accountHealthService, dbService, postQueueService } from './db.js';
 import { logEvent } from './event-log.js';
 
 interface CachedAgent {
@@ -86,11 +86,55 @@ function recordAccountDown(
   });
 }
 
-export async function getAgent(mapping: {
+interface AgentMapping {
+  id?: string;
   bskyIdentifier: string;
   bskyPassword: string;
   bskyServiceUrl?: string;
-}): Promise<BskyAgent | null> {
+  bskyDid?: string;
+}
+
+/**
+ * Point a mapping (and everything keyed by its identifier) at a new handle.
+ * Used when the account's handle changed underneath the mirror — renamed on
+ * Bluesky, or moved by the rehandle script. Without the history move, the next
+ * sweep would find no history under the new handle and re-post the account's
+ * recent tweets.
+ */
+export function moveMappingToIdentifier(mappingId: string | undefined, fromIdentifier: string, toIdentifier: string) {
+  const from = fromIdentifier.toLowerCase();
+  const to = toIdentifier.toLowerCase();
+  if (from === to) return;
+  const moved = dbService.migrateBskyIdentifier(from, to);
+  updateConfig((config) => {
+    let changed = false;
+    for (const mapping of config.mappings) {
+      if (mapping.bskyIdentifier.toLowerCase() === from && (!mappingId || mapping.id === mappingId)) {
+        mapping.bskyIdentifier = to;
+        changed = true;
+      }
+    }
+    return changed;
+  });
+  invalidateAgent(from);
+  logEvent({
+    level: 'warn',
+    stage: 'bluesky',
+    event: 'account.identifier-moved',
+    message: `${from} is now ${to}. Moved ${moved.history} history record(s) and ${moved.queue} queued tweet(s) to the new handle.`,
+    bskyIdentifier: to,
+    mappingId,
+    detail: { from, to, ...moved },
+  });
+}
+
+async function loginAgent(serviceUrl: string, identifier: string, password: string): Promise<BskyAgent> {
+  const agent = new BskyAgent({ service: serviceUrl });
+  await agent.login({ identifier, password });
+  return agent;
+}
+
+export async function getAgent(mapping: AgentMapping): Promise<BskyAgent | null> {
   const serviceUrl = mapping.bskyServiceUrl || 'https://bsky.social';
   const cacheKey = cacheKeyFor(mapping.bskyIdentifier, serviceUrl);
   const existing = activeAgents.get(cacheKey);
@@ -116,9 +160,24 @@ export async function getAgent(mapping: {
   }
 
   const startedAt = Date.now();
-  const agent = new BskyAgent({ service: serviceUrl });
+  let agent: BskyAgent;
   try {
-    await agent.login({ identifier: mapping.bskyIdentifier, password: mapping.bskyPassword });
+    try {
+      agent = await loginAgent(serviceUrl, mapping.bskyIdentifier, mapping.bskyPassword);
+    } catch (loginErr) {
+      // A handle that no longer resolves fails exactly like a wrong password.
+      // If the account's DID is known, try that: it never changes, and a
+      // success means the handle moved — follow it rather than stop posting.
+      const status = (loginErr as { status?: number })?.status;
+      const canTryDid = status === 401 && mapping.bskyDid && mapping.bskyDid !== mapping.bskyIdentifier.toLowerCase();
+      if (!canTryDid) throw loginErr;
+      agent = await loginAgent(serviceUrl, mapping.bskyDid as string, mapping.bskyPassword);
+      const newHandle = agent.session?.handle?.toLowerCase();
+      if (newHandle && newHandle !== 'handle.invalid' && newHandle !== mapping.bskyIdentifier.toLowerCase()) {
+        moveMappingToIdentifier(mapping.id, mapping.bskyIdentifier, newHandle);
+        mapping.bskyIdentifier = newHandle;
+      }
+    }
 
     // A deactivated (and sometimes a suspended) account still hands out a
     // session — it just refuses every write. `active: false` is the only signal
@@ -130,7 +189,19 @@ export async function getAgent(mapping: {
       return null;
     }
 
-    activeAgents.set(cacheKey, { agent, loggedInAt: Date.now() });
+    activeAgents.set(cacheKeyFor(mapping.bskyIdentifier, serviceUrl), { agent, loggedInAt: Date.now() });
+
+    // Remember the DID: it is how a later handle change is recognised, and
+    // how other mirrors mention this one.
+    const did = agent.session?.did;
+    if (mapping.id && did && did !== mapping.bskyDid) {
+      updateMappingById(mapping.id, (entry) => {
+        if (entry.bskyDid === did) return false;
+        entry.bskyDid = did;
+        return true;
+      });
+      mapping.bskyDid = did;
+    }
     if (health) {
       accountHealthService.markHealthy(mapping.bskyIdentifier);
       logEvent({
@@ -207,61 +278,120 @@ export async function getAgent(mapping: {
   }
 }
 
-export async function deleteAllPosts(mappingId: string): Promise<number> {
+export type DeletePostsScope = 'mirrored' | 'all';
+
+export interface DeletePostsResult {
+  deleted: number;
+  scope: DeletePostsScope;
+}
+
+/**
+ * Delete an account's posts and leave the mirror in a sane state afterwards.
+ *
+ * `mirrored` (the default) removes only what the mirror posted: every recorded
+ * post, each chunk of a split tweet, follow-up media posts and reposts.
+ * Anything written on the account by hand stays. `all` empties the repo.
+ *
+ * Either way the history is kept — rows are marked deleted rather than wiped —
+ * and scheduled checks restart from now. Wiping the history used to make the
+ * very next sweep re-post the account's latest 50 tweets.
+ */
+export async function deleteAllPosts(mappingId: string, scope: DeletePostsScope = 'mirrored'): Promise<number> {
+  return (await deletePosts(mappingId, scope)).deleted;
+}
+
+export async function deletePosts(
+  mappingId: string,
+  scope: DeletePostsScope = 'mirrored',
+  // Tests pass a mock agent; everything else signs in normally.
+  agentOverride?: Pick<BskyAgent, 'session' | 'com'>,
+): Promise<DeletePostsResult> {
   const config = getConfig();
   const mapping = config.mappings.find((m) => m.id === mappingId);
   if (!mapping) throw new Error('Mapping not found');
 
-  const agent = await getAgent(mapping);
+  const agent = agentOverride ?? (await getAgent(mapping));
   if (!agent) throw new Error('Failed to authenticate with Bluesky');
+  const repo = agent.session?.did as string;
 
-  let cursor: string | undefined;
-  let deletedCount = 0;
+  console.log(`[${mapping.bskyIdentifier}] 🗑️ Deleting ${scope === 'all' ? 'ALL posts' : 'mirrored posts'}...`);
 
-  console.log(`[${mapping.bskyIdentifier}] 🗑️ Starting deletion of all posts...`);
-
-  // Safety loop limit to prevent infinite loops
-  let loops = 0;
-  while (loops < 1000) {
-    loops++;
-    try {
-      const { data } = await agent.com.atproto.repo.listRecords({
-        repo: agent.session!.did,
-        collection: 'app.bsky.feed.post',
-        limit: 50, // Keep batch size reasonable
-        cursor,
-      });
-
-      if (data.records.length === 0) break;
-
-      console.log(`[${mapping.bskyIdentifier}] 🗑️ Deleting batch of ${data.records.length} posts...`);
-
-      // Use p-limit like approach or just Promise.all since 50 is manageable
-      await Promise.all(
-        data.records.map((r) =>
-          agent.com.atproto.repo
-            .deleteRecord({
-              repo: agent.session!.did,
-              collection: 'app.bsky.feed.post',
-              rkey: r.uri.split('/').pop()!,
-            })
-            .catch((e) => console.warn(`Failed to delete record ${r.uri}:`, e)),
-        ),
-      );
-
-      deletedCount += data.records.length;
-      cursor = data.cursor;
-
-      if (!cursor) break;
-
-      // Small delay to be nice to the server
-      await new Promise((r) => setTimeout(r, 500));
-    } catch (err) {
-      console.error(`[${mapping.bskyIdentifier}] ❌ Error during deletion loop:`, err);
-      throw err;
+  // Everything the mirror recorded posting.
+  const history = dbService.getTweetsForIdentifierWithUris(mapping.bskyIdentifier);
+  const mirroredUris = new Set<string>();
+  const tails: { root: string; tail: string }[] = [];
+  const repostUris = new Set<string>();
+  for (const row of history) {
+    if (row.status === 'reposted' && row.bsky_uri) {
+      repostUris.add(row.bsky_uri);
+      continue;
+    }
+    if (!row.bsky_uri) continue;
+    mirroredUris.add(row.bsky_uri);
+    if (row.bsky_tail_uri) mirroredUris.add(row.bsky_tail_uri);
+    if (row.bsky_chunk_uris) {
+      try {
+        for (const uri of JSON.parse(row.bsky_chunk_uris) as string[]) mirroredUris.add(uri);
+      } catch {
+        // fall back to the chain walk below
+      }
+    } else if (row.bsky_tail_uri && row.bsky_tail_uri !== row.bsky_uri) {
+      tails.push({ root: row.bsky_uri, tail: row.bsky_tail_uri });
     }
   }
 
-  console.log(`[${mapping.bskyIdentifier}] ✅ Deleted ${deletedCount} posts.`);
-  return deletedCount;
+  // Read the whole repo once: needed for `all`, and to find the middle chunks
+  // of split tweets recorded before chunk tracking existed (each chunk replies
+  // to the one before it, so walking parents from the tail finds them all).
+  const posts = new Map<string, { parent?: string }>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 1000; page++) {
+    const { data } = await agent.com.atproto.repo.listRecords({
+      repo,
+      collection: 'app.bsky.feed.post',
+      limit: 100,
+      cursor,
+    });
+    for (const record of data.records) {
+      const value = record.value as { reply?: { parent?: { uri?: string } } };
+      posts.set(record.uri, { parent: value.reply?.parent?.uri });
+    }
+    cursor = data.cursor;
+    if (!cursor || data.records.length === 0) break;
+  }
+  for (const { root, tail } of tails) {
+    let current: string | undefined = tail;
+    for (let hops = 0; current && current !== root && hops < 200; hops++) {
+      mirroredUris.add(current);
+      current = posts.get(current)?.parent;
+    }
+  }
+
+  const targets = scope === 'all' ? [...posts.keys()] : [...mirroredUris].filter((uri) => posts.has(uri));
+  let deleted = 0;
+  const deleteRecord = async (uri: string, collection: string) => {
+    try {
+      await agent.com.atproto.repo.deleteRecord({ repo, collection, rkey: uri.split('/').pop() as string });
+      deleted += 1;
+    } catch (e) {
+      console.warn(`Failed to delete record ${uri}:`, (e as Error).message);
+    }
+  };
+  for (let i = 0; i < targets.length; i += 25) {
+    await Promise.all(targets.slice(i, i + 25).map((uri) => deleteRecord(uri, 'app.bsky.feed.post')));
+    if (!agentOverride) await new Promise((r) => setTimeout(r, 300));
+  }
+  for (const uri of repostUris) await deleteRecord(uri, 'app.bsky.feed.repost');
+
+  // Keep the history so nothing is re-mirrored; mark it deleted.
+  dbService.markAllDeleted(mapping.bskyIdentifier);
+  postQueueService.deleteByMappingId(mapping.id);
+  updateMappingById(mapping.id, (entry) => {
+    entry.mirrorFromMs = Date.now();
+    entry.lastPinnedTweetId = undefined;
+    return true;
+  });
+
+  console.log(`[${mapping.bskyIdentifier}] ✅ Deleted ${deleted} record(s).`);
+  return { deleted, scope };
 }

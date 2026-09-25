@@ -38,7 +38,13 @@
     "format": "biome format --write .",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "release:tag": "bash scripts/tag-release.sh",
-    "test:account-access": "bun scripts/test-account-access.ts"
+    "test:account-access": "bun scripts/test-account-access.ts",
+    "test:compose": "bun scripts/test-compose.ts",
+    "test:integrity": "bun scripts/test-integrity.ts",
+    "test:delete-sync": "bun scripts/test-delete-sync.ts",
+    "test:discovery": "bun scripts/test-discovery.ts",
+    "test:server-flows": "bun scripts/test-server-flows.ts",
+    "test:offline": "bun run test:scraper-fetch && bun run test:text-split && bun run test:mirror-lag && bun run test:polling && bun run test:video-limits && bun run test:account-health && bun run test:account-access && bun run test:rehandle && bun run test:compose && bun run test:integrity && bun run test:delete-sync && bun run test:discovery && bun run test:server-flows"
   },
   "keywords": [
     "bluesky",
