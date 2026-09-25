@@ -23,6 +23,12 @@ export interface PreviewTweet {
   quote: boolean;
   linkCard: boolean;
   isReply: boolean;
+  /** A retweet that would become a repost of this Bluesky post. */
+  repostOf?: string;
+  /** Language tags the post would carry; absent when unknown. */
+  langs?: string[];
+  /** Media that would follow as replies because it did not fit the first post. */
+  extraMediaPosts?: number;
   /** Set when the tweet would not be posted at all, with the reason why. */
   skipped?: { stage: string; reason: string };
 }

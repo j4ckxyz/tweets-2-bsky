@@ -740,13 +740,25 @@ export function exportLogs(
   };
 }
 
-// Best-effort durability if the process is asked to stop.
-for (const signal of ['beforeExit', 'SIGINT', 'SIGTERM'] as const) {
+// Best-effort durability if the process is asked to stop. A SIGINT/SIGTERM
+// listener replaces the default "exit on signal" behaviour, so after flushing
+// the handler must exit itself: without that, Ctrl+C did nothing and pm2 or
+// `docker stop` waited out their timeout and then SIGKILLed the process —
+// in the middle of whatever post it was writing.
+const flushOnShutdown = () => {
+  try {
+    flushEventLog();
+  } catch {
+    // shutting down anyway
+  }
+};
+process.on('beforeExit', flushOnShutdown);
+for (const [signal, exitCode] of [
+  ['SIGINT', 130],
+  ['SIGTERM', 143],
+] as const) {
   process.on(signal, () => {
-    try {
-      flushEventLog();
-    } catch {
-      // shutting down anyway
-    }
+    flushOnShutdown();
+    process.exit(exitCode);
   });
 }

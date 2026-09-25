@@ -62,11 +62,7 @@ export function tierForActivity(activity: AccountActivity, now: number, tiers = 
   return tiers[tiers.length - 1] as PollingTier;
 }
 
-export function decideCheck(
-  activity: AccountActivity,
-  now: number,
-  tiers = DEFAULT_POLLING_TIERS,
-): PollingDecision {
+export function decideCheck(activity: AccountActivity, now: number, tiers = DEFAULT_POLLING_TIERS): PollingDecision {
   const tier = tierForActivity(activity, now, tiers);
   // Never checked: always check, whatever the tier says.
   if (activity.lastCheckedAt === undefined) {
@@ -86,13 +82,15 @@ export interface PollingPlan<T> {
 
 /**
  * Split accounts into the ones this sweep should check and the ones still
- * serving their tier's interval.
+ * serving their tier's interval. `isForced` marks accounts a person asked to
+ * check right now ("Run now"): they are due whatever their tier says.
  */
 export function planSweep<T>(
   accounts: T[],
   getActivity: (account: T) => AccountActivity,
   now: number,
   tiers = DEFAULT_POLLING_TIERS,
+  isForced: (account: T) => boolean = () => false,
 ): PollingPlan<T> {
   const due: T[] = [];
   const skipped: { account: T; tier: string; dueInMs: number }[] = [];
@@ -101,9 +99,24 @@ export function planSweep<T>(
   for (const account of accounts) {
     const decision = decideCheck(getActivity(account), now, tiers);
     tierCounts[decision.tier] = (tierCounts[decision.tier] ?? 0) + 1;
-    if (decision.check) due.push(account);
+    if (decision.check || isForced(account)) due.push(account);
     else skipped.push({ account, tier: decision.tier, dueInMs: decision.dueInMs });
   }
 
   return { due, skipped, tierCounts };
+}
+
+/**
+ * Activity from a source_activity row. The row is snake_case; the planner
+ * reads camelCase. Handing the raw row over (as the sweep once did) left both
+ * fields undefined, so every account looked never-checked and adaptive polling
+ * silently checked everything on every sweep.
+ */
+export function activityFromRow(
+  row: { last_found_at?: number | null; last_checked_at?: number | null } | null | undefined,
+): AccountActivity {
+  return {
+    lastFoundAt: row?.last_found_at ?? undefined,
+    lastCheckedAt: row?.last_checked_at ?? undefined,
+  };
 }
