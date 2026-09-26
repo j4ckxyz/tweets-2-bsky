@@ -23,53 +23,53 @@ Do not do both on the same machine unless you intentionally want two separate de
 
 ### Option A: Docker (Recommended)
 
-Prerequisite: Docker Desktop (macOS/Windows) or Docker Engine (Linux).
+Prerequisites: `git`, and Docker Desktop (macOS/Windows) or Docker Engine (Linux).
 
-Start with the included compose file:
+Build the image from your own clone, so what runs is the code in this repo:
 
 ```bash
-docker compose up -d
+git clone https://github.com/j4ckxyz/tweets-2-bsky
+cd tweets-2-bsky
+docker compose up -d --build
 ```
 
 Open `http://localhost:3000`.
 
-If you prefer `docker run`:
-
-```bash
-docker run -d \
-  --name tweets-2-bsky \
-  -p 3000:3000 \
-  -v tweets2bsky_data:/app/data \
-  --restart unless-stopped \
-  j4ckxyz/tweets-2-bsky:latest
-```
-
-Important: keep a persistent volume (`-v tweets2bsky_data:/app/data`) so mappings/history survive container recreation.
+Important: keep the persistent volume (`tweets2bsky_data`, already declared in
+`docker-compose.yml`) so mappings and post history survive container recreation.
 
 Useful Docker commands:
 
 ```bash
-docker logs -f tweets-2-bsky
-docker exec -it tweets-2-bsky bun dist/cli.js status
-docker stop tweets-2-bsky
-docker start tweets-2-bsky
+docker compose logs -f
+docker compose exec tweets-2-bsky bun dist/cli.js status
+docker compose stop
+docker compose start
 ```
 
-Update Docker deployment:
+Update a Docker deployment — pull the code, rebuild, restart:
 
 ```bash
-docker pull j4ckxyz/tweets-2-bsky:latest
-docker stop tweets-2-bsky
-docker rm tweets-2-bsky
+git pull
+docker compose up -d --build
+```
+
+If you prefer `docker run` over compose, build the image first:
+
+```bash
+docker build -t tweets-2-bsky:local .
 docker run -d \
   --name tweets-2-bsky \
   -p 3000:3000 \
   -v tweets2bsky_data:/app/data \
   --restart unless-stopped \
-  j4ckxyz/tweets-2-bsky:latest
+  tweets-2-bsky:local
 ```
 
-Alternative image: `ghcr.io/j4ckxyz/tweets-2-bsky:latest`.
+Prebuilt images are also published to `ghcr.io/j4ckxyz/tweets-2-bsky:latest` and
+`j4ckxyz/tweets-2-bsky:latest`. Building locally is recommended instead: it is
+the only way to be certain you are running the current code, and it needs no
+registry availability.
 
 ### Option B: Source Install (PM2 or Manual)
 
@@ -153,6 +153,33 @@ kill "$(cat data/runtime/tweets-2-bsky.pid)"
 
 For some quote-tweet screenshot fallbacks, Chromium is used (bundled in Docker, optional dependency for source installs).
 
+## How Mirrored Posts Behave on Bluesky
+
+The goal is that a mirror reads like an account that lives on Bluesky, not a feed of links back to X.
+
+- **Conversations between mirrors are native.** Everything mirrored on the instance is looked up by tweet id, so when one mirrored account quotes, replies to, retweets or links to another, the Bluesky post is a real quote embed, a threaded reply or a repost — not an `x.com` link. `@mentions` of mirrored accounts become real Bluesky mentions (hover card, follow button, notification); other `@handles` link to their X profile.
+- **Quotes of tweets that are not on Bluesky** become a link card showing the author and the quoted text, instead of a bare `QT:` link.
+- **Languages** come from X's own language detection, so language filters and translation work. When the language is unknown the post carries no tag rather than a wrong one.
+- **Timestamps.** Live mirrors are stamped with the time they reach Bluesky, so they appear at the top of followers' feeds. Backfills keep the tweet's original date (Bluesky shows them as archived).
+- **Media.** Photos keep the author's alt text (or an AI description if configured) — never a placeholder. GIFs loop like native GIFs, videos keep their alt text, and a video too long for Bluesky becomes a card with its poster frame. Tweets mixing a video and photos post the photos as a reply under the video.
+- **Edits and deletions.** An edited tweet is not posted twice. Per account you can instead replace the earlier post, and opt in to deleting mirrors of tweets deleted on X.
+- **Profiles.** Name, avatar, banner and bio follow X daily; a bio edited by hand on Bluesky is left alone. The profile link goes into Bluesky's own website field.
+- **Starter packs.** Each folder can get a Bluesky list and starter pack (Accounts → Manage folders), kept in step with the folder automatically.
+
+Per-account options (Add account → Mirroring options, or Edit):
+
+| Option | Default | Meaning |
+|---|---|---|
+| Where to start | Only new tweets | New accounts record what is already on the X timeline as history. "Also copy the latest tweets" posts up to 50 straight away. |
+| Retweets become reposts | on | Retweets of tweets mirrored on this instance are reposted; other retweets are never copied. |
+| Reply to other mirrors | on | Replies to mirrored accounts are posted as Bluesky replies. |
+| When a tweet is edited | keep first version | Or delete and repost the edited version. |
+| Tweets marked sensitive | sexual | Label for tweets X flags sensitive without a category (per-media categories are always mapped). |
+| Add "{bot}" to the display name | on | The Bluesky `bot` self-label is always applied. |
+| Delete posts deleted on X | off | Checks recent tweets via X's public embed service (not your login); a tweet must be missing on two checks six hours apart, and an account where most tweets vanish at once (suspended, protected) is never touched. |
+
+**Handle changes are safe.** History is keyed by the Bluesky handle, and moves with it — whether the handle is changed in the dashboard, by the rehandle script, or on Bluesky itself (the mirror signs in by DID and follows the new handle). A renamed X account is followed automatically too.
+
 ## Crossposting Pipeline (Fetch Sweep + Post Queue)
 
 The daemon splits each cycle into two independent halves so posting never delays detection:
@@ -174,7 +201,19 @@ Tuning (optional `.env` values, sensible defaults built in):
 | `POST_PACING_MIN_MS` / `POST_PACING_MAX_MS` | `3000` / `8000` | Pause between posts within one account (cosmetic pacing; per-account only). |
 | `QUEUE_MAX_ATTEMPTS` | `8` | Retries (with exponential backoff) before a tweet is parked as failed. |
 | `SWEEP_FETCH_TIMEOUT_MS` | `180000` | Watchdog for a single account's timeline fetch. |
+| `SCRAPER_REQUEST_TIMEOUT_MS` | `25000` | Deadline for one HTTP request to Twitter. Fails fast so a hung request retries instead of holding a fetch slot until the watchdog above fires. |
+| `ADAPTIVE_POLLING` | `1` | Check quiet accounts less often (see below). Set to `0` to check every account on every sweep. |
 | `QUEUE_FAILED_RETENTION_DAYS` | `14` | How long parked failures stay visible before being pruned. |
+| `THREAD_CHUNK_GAP_MS` | `3000` | Pause between the posts of one split tweet. |
+| `LIVE_TIMESTAMP_MAX_AGE_MS` | `21600000` | Tweets older than this (6h) keep their original date even when posted live. |
+| `BATCH_WIND_DOWN_MS` | `300000` | After the post watchdog cancels a batch, how long to wait for it to stop before its tweets are retried. |
+| `DELETE_SYNC_CHECKS_PER_SWEEP` | `20` | Cap on deleted-tweet checks per sweep (public CDN only). |
+
+`SCRAPER_MIN_GAP_MS` applies to every HTTP request the scraper makes — a timeline fetch is a user-id lookup plus one or more pages — including profile lookups. Accounts are fetched by their numeric id once known, which survives renames and skips the lookup request.
+
+**Run now** checks every account regardless of its adaptive-polling interval; a second full "Run now" within five minutes runs a normal sweep instead, to protect the X account. "Check for new tweets now" on an account page forces just that account.
+
+**Adaptive polling.** Accounts are not all worth checking equally often, so each one earns a minimum interval from how recently it last posted: an active account (posted within 6 hours) is checked every sweep, then 10 minutes for the last day, 30 minutes for the last week, and hourly beyond that. Nothing is starved — the coldest tier still has an hourly ceiling, a newly added account starts in the hot tier so its first tweet mirrors immediately, and a single new tweet promotes an account straight back to the top. This keeps the sweep short for the accounts that are actually posting, which is what mirror delay depends on. Set `ADAPTIVE_POLLING=0` to check everything every sweep.
 
 A tweet is stamped with its Bluesky URI the moment the post is accepted, before any other bookkeeping. If the process dies (or the database is busy) between publishing and recording, the queue repairs the record from that stamp instead of re-posting — so a post that is live on Bluesky can never show up as "failed", and a retry can never duplicate it.
 
@@ -249,6 +288,16 @@ Useful flags:
 ./update.sh --skip-install --skip-build
 ```
 
+Docker installs:
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+The `tweets2bsky_data` volume is untouched by a rebuild, so mappings, users and
+post history carry over.
+
 ## Data and Security
 
 Important files:
@@ -275,6 +324,27 @@ bun run typecheck
 bun run lint
 ```
 
+`bun run build` and `bun run typecheck` cover both the server and the web
+dashboard.
+
+Offline tests (no network, no real database — each uses a throwaway data dir):
+
+```bash
+bun run test:scraper-fetch    # request timeout + retry classification
+bun run test:text-split       # post splitting and thread chunking
+bun run test:mirror-lag       # per-account mirror delay statistics
+bun run test:polling          # adaptive polling tiers and activity bookkeeping
+bun run test:video-limits     # Bluesky video size/duration ceilings
+bun run test:account-health    # account outage detection and backoff
+bun run test:account-access   # per-account page authorization between users
+bun run test:compose          # the composer end to end, against a mock Bluesky agent
+bun run test:integrity        # config writes, handle changes, scoped deletion, queue/stats queries
+bun run test:delete-sync      # when a mirror of a deleted tweet may (and may not) be removed
+bun run test:discovery        # per-folder lists and starter packs
+bun run test:server-flows     # dashboard API flows, including concurrent writes
+bun run test:offline          # all of the above
+```
+
 ## Troubleshooting
 
 See `TROUBLESHOOTING.md`.
@@ -286,6 +356,26 @@ bun run rebuild:native
 bun run build
 bun run start
 ```
+
+Note on `better-sqlite3`: it is an optional dependency, listed only as a
+fallback for running under plain Node. On Bun — which is what `install.sh`,
+`update.sh` and the Docker image all use — the database goes through the
+built-in `bun:sqlite`, so `better-sqlite3` is intentionally installed without
+being compiled. A message about it not being built is not a problem.
+
+## Releasing
+
+Releases are cut from a version tag. Bump `version` in `package.json`, commit,
+then:
+
+```bash
+bun run release:tag
+```
+
+That tags the version and pushes it, which starts the `Release` workflow: it
+builds, type-checks, runs the offline tests, verifies the tag matches
+`package.json`, and publishes a GitHub release with generated notes. The Docker
+workflows build images for the same tag, so releases and images stay in step.
 
 ## License
 

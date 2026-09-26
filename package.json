@@ -1,6 +1,6 @@
 {
   "name": "tweets-2-bsky",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "A powerful tool to crosspost Tweets to Bluesky, supporting threads, videos, and high-quality images.",
   "packageManager": "bun@1.3.9",
   "type": "module",
@@ -8,7 +8,7 @@
   "scripts": {
     "setup": "bun install && bun run build",
     "prebuild": "bash scripts/ensure-bun.sh",
-    "build": "tsc && vite build",
+    "build": "tsc && tsc --noEmit -p web/tsconfig.json && vite build",
     "build:server": "tsc",
     "build:web": "vite build",
     "rebuild:native": "bash scripts/rebuild-native.sh",
@@ -18,7 +18,16 @@
     "test:twitter-fetch": "bun scripts/test-twitter-fetch.ts",
     "test:ad-tweet": "bun scripts/test-ad-tweet.ts",
     "test:video-limits": "bun scripts/test-video-limits.ts",
+    "test:scraper-fetch": "bun scripts/test-scraper-fetch.ts",
+    "test:text-split": "bun scripts/test-text-split.ts",
+    "test:mirror-lag": "bun scripts/test-mirror-lag.ts",
+    "test:polling": "bun scripts/test-polling.ts",
     "test:account-health": "bun scripts/test-account-health.ts",
+    "test:rehandle": "bun scripts/test-rehandle.ts && bun scripts/test-wizard-prompts.ts",
+    "wizard": "bun scripts/rehandle-wizard.ts",
+    "rehandle:check": "bun scripts/rehandle.ts --check-cloudflare",
+    "rehandle:dry": "bun scripts/rehandle.ts",
+    "rehandle": "bun scripts/rehandle.ts --apply",
     "start": "bun dist/index.js",
     "cli": "bun src/cli.ts",
     "dev": "bun src/index.ts",
@@ -27,7 +36,15 @@
     "lint": "biome check --write .",
     "preview:web": "vite preview",
     "format": "biome format --write .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
+    "release:tag": "bash scripts/tag-release.sh",
+    "test:account-access": "bun scripts/test-account-access.ts",
+    "test:compose": "bun scripts/test-compose.ts",
+    "test:integrity": "bun scripts/test-integrity.ts",
+    "test:delete-sync": "bun scripts/test-delete-sync.ts",
+    "test:discovery": "bun scripts/test-discovery.ts",
+    "test:server-flows": "bun scripts/test-server-flows.ts",
+    "test:offline": "bun run test:scraper-fetch && bun run test:text-split && bun run test:mirror-lag && bun run test:polling && bun run test:video-limits && bun run test:account-health && bun run test:account-access && bun run test:rehandle && bun run test:compose && bun run test:integrity && bun run test:delete-sync && bun run test:discovery && bun run test:server-flows"
   },
   "keywords": [
     "bluesky",
@@ -45,7 +62,6 @@
     "@the-convocation/twitter-scraper": "^0.21.1",
     "axios": "^1.13.2",
     "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^12.5.0",
     "cheerio": "^1.1.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -66,24 +82,28 @@
     "tailwind-merge": "^3.3.1"
   },
   "devDependencies": {
-    "@types/react": "^19.2.6",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.0",
     "@biomejs/biome": "^1.9.4",
     "@types/bcryptjs": "^2.4.6",
-    "@types/better-sqlite3": "^7.6.13",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/cheerio": "^0.22.35",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/inquirer": "^9.0.9",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.10.2",
+    "@types/react": "^19.2.6",
+    "@types/react-dom": "^19.2.3",
     "@types/sharp": "^0.31.1",
+    "@vitejs/plugin-react": "^5.1.0",
     "autoprefixer": "^10.4.21",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.18",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^7.1.12"
-  }
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^13.0.3"
+  },
+  "trustedDependencies": []
 }

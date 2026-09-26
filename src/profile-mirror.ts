@@ -4,6 +4,7 @@ import { Scraper, type Profile as TwitterProfile } from '@the-convocation/twitte
 import axios from 'axios';
 import sharp from 'sharp';
 import { getConfig } from './config-manager.js';
+import { createScraperFetch } from './scraper-fetch.js';
 
 const PROFILE_IMAGE_MAX_BYTES = 1_000_000;
 const PROFILE_IMAGE_TARGET_BYTES = 950 * 1024;
@@ -62,6 +63,12 @@ export interface TwitterMirrorProfile {
   biography?: string;
   avatarUrl?: string;
   bannerUrl?: string;
+  /** The profile's own website link (expanded, tracking parameters removed). */
+  website?: string;
+  /** What goes in Bluesky's native website field: their site, else the X profile. */
+  mirroredWebsite: string;
+  userId?: string;
+  isPrivate?: boolean;
   mirroredDisplayName: string;
   mirroredDescription: string;
 }
@@ -86,6 +93,7 @@ export interface MirrorProfileSyncResult {
     description: boolean;
     avatar: boolean;
     banner: boolean;
+    website: boolean;
   };
   warnings: string[];
 }
@@ -96,6 +104,7 @@ export interface ProfileMirrorSyncState {
   mirroredDescription?: string;
   avatarUrl?: string;
   bannerUrl?: string;
+  website?: string;
 }
 
 export interface MappingProfileSyncState {
@@ -105,6 +114,7 @@ export interface MappingProfileSyncState {
   lastMirroredDescription?: string;
   lastMirroredAvatarUrl?: string;
   lastMirroredBannerUrl?: string;
+  lastMirroredWebsite?: string;
 }
 
 export interface FediverseBridgeResult {
@@ -177,6 +187,7 @@ const toNormalizedMirrorState = (state?: ProfileMirrorSyncState) => ({
   mirroredDescription: normalizeOptionalString(state?.mirroredDescription),
   avatarUrl: normalizeMirrorStateUrl(state?.avatarUrl),
   bannerUrl: normalizeMirrorStateUrl(state?.bannerUrl),
+  website: normalizeMirrorStateUrl(state?.website),
 });
 
 const buildMirrorStateFromTwitterProfile = (twitterProfile: TwitterMirrorProfile): ProfileMirrorSyncState => ({
@@ -185,9 +196,10 @@ const buildMirrorStateFromTwitterProfile = (twitterProfile: TwitterMirrorProfile
   mirroredDescription: twitterProfile.mirroredDescription,
   avatarUrl: normalizeMirrorStateUrl(twitterProfile.avatarUrl),
   bannerUrl: normalizeMirrorStateUrl(twitterProfile.bannerUrl),
+  website: normalizeMirrorStateUrl(twitterProfile.mirroredWebsite),
 });
 
-const hasMirrorStateChanges = (previous: ProfileMirrorSyncState | undefined, next: ProfileMirrorSyncState) => {
+export const hasMirrorStateChanges = (previous: ProfileMirrorSyncState | undefined, next: ProfileMirrorSyncState) => {
   const normalizedPrevious = toNormalizedMirrorState(previous);
   const normalizedNext = toNormalizedMirrorState(next);
 
@@ -196,7 +208,41 @@ const hasMirrorStateChanges = (previous: ProfileMirrorSyncState | undefined, nex
     description: normalizedPrevious.mirroredDescription !== normalizedNext.mirroredDescription,
     avatar: normalizedPrevious.avatarUrl !== normalizedNext.avatarUrl,
     banner: normalizedPrevious.bannerUrl !== normalizedNext.bannerUrl,
+    website: normalizedPrevious.website !== normalizedNext.website,
   };
+};
+
+/**
+ * The URL for Bluesky's native website field: the account's own site when its
+ * X profile has one, otherwise the X profile itself — which is where the
+ * mirror's posts come from, and far easier to find than a URL buried in a bio.
+ */
+export const buildMirroredWebsite = (website: string | undefined, username: string): string => {
+  const candidate = normalizeOptionalString(website);
+  if (candidate) {
+    try {
+      const url = new URL(candidate);
+      if (url.protocol === 'https:' || url.protocol === 'http:') return url.toString();
+    } catch {
+      // fall through to the X profile
+    }
+  }
+  return `https://x.com/${normalizeTwitterUsername(username)}`;
+};
+
+/**
+ * Whether automatic sync may overwrite the Bluesky bio. Only when it still
+ * holds what the mirror last wrote (or nothing): a bio someone has edited by
+ * hand on Bluesky is theirs, and a daily sync must not quietly revert it.
+ */
+export const canOverwriteDescription = (
+  currentDescription: string | undefined,
+  lastMirroredDescription: string | undefined,
+): boolean => {
+  const current = normalizeOptionalString(currentDescription);
+  if (!current) return true;
+  const previous = normalizeOptionalString(lastMirroredDescription);
+  return previous !== undefined && normalizeWhitespace(current) === normalizeWhitespace(previous);
 };
 
 const normalizeBskyServiceUrl = (value?: string): string => {
@@ -522,21 +568,31 @@ const buildTwitterCookieSets = (): TwitterCookieSet[] => {
   return sets;
 };
 
+// Profile lookups count against the same Twitter account as timeline fetches,
+// so they go through the same process-wide rate limiter.
+const profileScraperFetch = createScraperFetch();
+
 const fetchTwitterProfileWithCookies = async (
   username: string,
   cookieSet: TwitterCookieSet,
 ): Promise<TwitterProfile> => {
-  const scraper = new Scraper();
+  const scraper = new Scraper({ fetch: profileScraperFetch });
   await scraper.setCookies([`auth_token=${cookieSet.authToken}`, `ct0=${cookieSet.ct0}`]);
   return scraper.getProfile(username);
 };
 
-export const buildMirroredDisplayName = (name: string | undefined, username: string): string => {
+export const buildMirroredDisplayName = (name: string | undefined, username: string, withSuffix = true): string => {
   const cleanedName = stripMirrorDisplaySuffixes(normalizeWhitespace(name || ''));
   const baseName = cleanedName || `@${normalizeTwitterUsername(username)}`;
-  const lowerSuffix = MIRROR_SUFFIX.toLowerCase();
-  const merged = baseName.toLowerCase().endsWith(lowerSuffix) ? baseName : `${baseName} ${MIRROR_SUFFIX}`;
-  return truncateGraphemes(merged, 64);
+  // The account already carries Bluesky's own `bot` self-label; the text
+  // suffix is optional on top of it.
+  if (!withSuffix) return truncateGraphemes(baseName, 64);
+  const suffixed = `${baseName} ${MIRROR_SUFFIX}`;
+  // Truncate the name, never the suffix: a long name used to push "{bot}" off the end.
+  const suffixLength = getGraphemeSegments(` ${MIRROR_SUFFIX}`).length;
+  return getGraphemeSegments(suffixed).length <= 64
+    ? suffixed
+    : `${truncateGraphemes(baseName, 64 - suffixLength).trimEnd()} ${MIRROR_SUFFIX}`;
 };
 
 export const buildMirroredDescription = (biography: string | undefined, username: string): string => {
@@ -558,7 +614,10 @@ export const buildMirroredDescription = (biography: string | undefined, username
   return `${intro}\n\n${truncatedBio}`;
 };
 
-export const fetchTwitterMirrorProfile = async (inputUsername: string): Promise<TwitterMirrorProfile> => {
+export const fetchTwitterMirrorProfile = async (
+  inputUsername: string,
+  options: { botDisplayNameSuffix?: boolean } = {},
+): Promise<TwitterMirrorProfile> => {
   const username = normalizeTwitterUsername(inputUsername);
   if (!username) {
     throw new Error('Twitter username is required.');
@@ -576,6 +635,7 @@ export const fetchTwitterMirrorProfile = async (inputUsername: string): Promise<
       const resolvedUsername = normalizeTwitterUsername(profile.username || username);
       const cleanedName = normalizeOptionalString(profile.name);
       const cleanedBio = await expandAndNormalizeTwitterBioLinks(profile.biography);
+      const website = profile.website ? stripTrackingParamsFromUrl(profile.website) : undefined;
 
       return {
         username: resolvedUsername,
@@ -584,7 +644,15 @@ export const fetchTwitterMirrorProfile = async (inputUsername: string): Promise<
         biography: cleanedBio,
         avatarUrl: normalizeTwitterAvatarUrl(profile.avatar),
         bannerUrl: normalizeTwitterBannerUrl(profile.banner),
-        mirroredDisplayName: buildMirroredDisplayName(cleanedName, resolvedUsername),
+        website,
+        mirroredWebsite: buildMirroredWebsite(website, resolvedUsername),
+        userId: profile.userId,
+        isPrivate: profile.isPrivate,
+        mirroredDisplayName: buildMirroredDisplayName(
+          cleanedName,
+          resolvedUsername,
+          options.botDisplayNameSuffix !== false,
+        ),
         mirroredDescription: buildMirroredDescription(cleanedBio, resolvedUsername),
       };
     } catch (error) {
@@ -712,6 +780,7 @@ export const ensureBlueskyDisplayNameBotSuffix = async (args: {
   bskyPassword: string;
   bskyServiceUrl?: string;
   twitterUsername?: string;
+  botDisplayNameSuffix?: boolean;
 }): Promise<EnsureDisplayNameBotSuffixResult> => {
   const { agent, credentials } = await loginBlueskyAgent(args);
   const repo = agent.session?.did || credentials.did;
@@ -751,7 +820,11 @@ export const ensureBlueskyDisplayNameBotSuffix = async (args: {
     sourceUsername = twitterProfile.username;
   }
 
-  const nextDisplayName = buildMirroredDisplayName(sourceDisplayName, sourceUsername);
+  const nextDisplayName = buildMirroredDisplayName(
+    sourceDisplayName,
+    sourceUsername,
+    args.botDisplayNameSuffix !== false,
+  );
   const currentNormalized = normalizeWhitespace(currentDisplayName || '');
   const legacySuffixPresent = currentNormalized.toLowerCase().includes(LEGACY_MIRROR_SUFFIX);
   const updated = currentNormalized !== nextDisplayName || legacySuffixPresent;
@@ -804,6 +877,10 @@ export const applyProfileMirrorSyncState = <T extends MappingProfileSyncState>(
 
   if (result.changed.banner && result.bannerSynced) {
     next.lastMirroredBannerUrl = normalizeMirrorStateUrl(result.twitterProfile.bannerUrl);
+  }
+
+  if (result.changed.website) {
+    next.lastMirroredWebsite = result.twitterProfile.mirroredWebsite;
   }
 
   return next;
@@ -913,8 +990,17 @@ export const syncBlueskyProfileFromTwitter = async (args: {
   syncDescription?: boolean;
   syncAvatar?: boolean;
   syncBanner?: boolean;
+  syncWebsite?: boolean;
+  /**
+   * Overwrite a bio that was edited by hand on Bluesky. Off for automatic
+   * syncs; the explicit "pull bio from X" button sets it.
+   */
+  forceDescription?: boolean;
+  botDisplayNameSuffix?: boolean;
 }): Promise<MirrorProfileSyncResult> => {
-  const twitterProfile = await fetchTwitterMirrorProfile(args.twitterUsername);
+  const twitterProfile = await fetchTwitterMirrorProfile(args.twitterUsername, {
+    botDisplayNameSuffix: args.botDisplayNameSuffix,
+  });
   const nextMirrorState = buildMirrorStateFromTwitterProfile(twitterProfile);
   const rawChanged = hasMirrorStateChanges(args.previousSync, nextMirrorState);
   const changed = {
@@ -922,14 +1008,17 @@ export const syncBlueskyProfileFromTwitter = async (args: {
     description: (args.syncDescription ?? true) ? rawChanged.description : false,
     avatar: (args.syncAvatar ?? true) ? rawChanged.avatar : false,
     banner: (args.syncBanner ?? true) ? rawChanged.banner : false,
+    website: (args.syncWebsite ?? true) ? rawChanged.website : false,
   };
-  const bsky = await validateBlueskyCredentials({
+  // One login serves both the credential check and the profile write (this
+  // used to sign in twice per sync, against a per-account session limit).
+  const { agent, credentials: bsky } = await loginBlueskyAgent({
     bskyIdentifier: args.bskyIdentifier,
     bskyPassword: args.bskyPassword,
     bskyServiceUrl: args.bskyServiceUrl,
   });
 
-  if (!changed.displayName && !changed.description && !changed.avatar && !changed.banner) {
+  if (!changed.displayName && !changed.description && !changed.avatar && !changed.banner && !changed.website) {
     return {
       twitterProfile,
       bsky,
@@ -940,12 +1029,6 @@ export const syncBlueskyProfileFromTwitter = async (args: {
       warnings: [],
     };
   }
-
-  const agent = new BskyAgent({ service: bsky.serviceUrl });
-  await agent.login({
-    identifier: args.bskyIdentifier,
-    password: args.bskyPassword,
-  });
 
   const warnings: string[] = [];
   let avatarBlob: BlobRef | undefined;
@@ -971,16 +1054,32 @@ export const syncBlueskyProfileFromTwitter = async (args: {
     warnings.push('No Twitter banner found for this profile.');
   }
 
-  const shouldUpdateProfile = changed.displayName || changed.description || Boolean(avatarBlob) || Boolean(bannerBlob);
+  const shouldUpdateProfile =
+    changed.displayName || changed.description || changed.website || Boolean(avatarBlob) || Boolean(bannerBlob);
 
   if (shouldUpdateProfile) {
-    await agent.upsertProfile((existing) => ({
-      ...(existing || {}),
-      ...(changed.displayName ? { displayName: twitterProfile.mirroredDisplayName } : {}),
-      ...(changed.description ? { description: twitterProfile.mirroredDescription } : {}),
-      ...(avatarBlob ? { avatar: avatarBlob } : {}),
-      ...(bannerBlob ? { banner: bannerBlob } : {}),
-    }));
+    await agent.upsertProfile((existing) => {
+      let writeDescription = changed.description;
+      if (
+        writeDescription &&
+        !args.forceDescription &&
+        !canOverwriteDescription(existing?.description, args.previousSync?.mirroredDescription)
+      ) {
+        writeDescription = false;
+        changed.description = false;
+        const note = 'The Bluesky bio was edited by hand, so the X bio was not copied over it.';
+        // upsertProfile re-runs this callback on a write conflict.
+        if (!warnings.includes(note)) warnings.push(note);
+      }
+      return {
+        ...(existing || {}),
+        ...(changed.displayName ? { displayName: twitterProfile.mirroredDisplayName } : {}),
+        ...(writeDescription ? { description: twitterProfile.mirroredDescription } : {}),
+        ...(changed.website ? { website: twitterProfile.mirroredWebsite } : {}),
+        ...(avatarBlob ? { avatar: avatarBlob } : {}),
+        ...(bannerBlob ? { banner: bannerBlob } : {}),
+      };
+    });
   }
 
   return {

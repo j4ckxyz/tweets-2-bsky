@@ -10,16 +10,39 @@ import type { Tweet as ScraperTweet } from '@the-convocation/twitter-scraper';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { Command } from 'commander';
-import * as francModule from 'franc-min';
-import iso6391 from 'iso-639-1';
 import puppeteer from 'puppeteer-core';
 import sharp from 'sharp';
 import { generateAltText, isAltTextConfigured } from './ai-manager.js';
 
-import { getConfig, saveConfig } from './config-manager.js';
+import {
+  type FacetLike,
+  type SensitiveFallbackLabel,
+  addTwitterHandleFacets,
+  bskyPostUrl,
+  buildSensitiveLabels,
+  decodeHtmlEntities,
+  dropUnresolvedMentions,
+  isTwitterUrl,
+  parseTweetStatusUrl,
+  resolvePostLangs,
+} from './compose.js';
+import { getConfig, saveConfig, updateConfig } from './config-manager.js';
+import { DELETE_SYNC_MIN_MISSING_SPAN_MS, checkSourceTweet, syncDeletesForAccount } from './delete-sync.js';
+import { refreshDiscoveryDaily } from './discovery-runner.js';
 import type { ErrorDetail } from './event-log.js';
 import { logEvent } from './event-log.js';
+import { activityFromRow, planSweep } from './polling.js';
+import type { PreviewRequest, PreviewResult, PreviewTweet } from './preview.js';
+import { setPreviewRunner } from './preview.js';
 import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './profile-mirror.js';
+import {
+  SCRAPER_JITTER_MS,
+  SCRAPER_MIN_GAP_MS,
+  acquireScraperSlot,
+  createScraperFetch,
+  isRetryableScraperError,
+} from './scraper-fetch.js';
+import { BSKY_POST_LIMIT, graphemeLength, splitText } from './text-split.js';
 import {
   buildPollNote,
   detectCardMedia,
@@ -45,7 +68,15 @@ interface ProcessedTweetEntry {
   tail?: { uri: string; cid: string };
   migrated?: boolean;
   skipped?: boolean;
+  /** Raw history status: migrated | skipped | reposted | deleted | failed. */
+  status?: string;
+  /** Every chunk's URI, first to last, for posts made since chunk tracking. */
+  chunkUris?: string[];
   text?: string;
+  /** Epoch ms of the source tweet, paired with postedAt to measure mirror lag. */
+  tweetCreatedAt?: number;
+  /** Epoch ms the mirrored post landed on Bluesky. */
+  postedAt?: number;
 }
 
 interface ProcessedTweetsMap {
@@ -76,6 +107,22 @@ interface Tweet {
   };
   card?: TweetCard | null;
   permanentUrl?: string;
+  /** Twitter's own language verdict (BCP-47-ish, or und/zxx/q-codes). */
+  lang?: string;
+  /** Every id this tweet has had; more than one means it was edited. */
+  versions?: string[];
+  /** The quoted tweet as the timeline delivered it — no extra request needed. */
+  quoted_status?: QuotedTweetInfo;
+}
+
+interface QuotedTweetInfo {
+  id: string;
+  username?: string;
+  name?: string;
+  text?: string;
+  /** First photo, or a video's poster frame: the card's thumbnail. */
+  imageUrl?: string;
+  url?: string;
 }
 
 interface AspectRatio {
@@ -89,8 +136,8 @@ interface ImageEmbed {
   aspectRatio?: AspectRatio;
 }
 
-import { accountHealthService, dbService, postQueueService } from './db.js';
-import type { QueueBatch } from './db.js';
+import { accountHealthService, dbService, postQueueService, sourceActivityService } from './db.js';
+import type { ProcessedTweet, QueueBatch } from './db.js';
 
 // ============================================================================
 // State Management
@@ -169,8 +216,43 @@ function saveProcessedTweet(
     bsky_root_cid: entry.root?.cid,
     bsky_tail_uri: entry.tail?.uri,
     bsky_tail_cid: entry.tail?.cid,
-    status: entry.migrated || (entry.uri && entry.cid) ? 'migrated' : entry.skipped ? 'skipped' : 'failed',
+    status:
+      (entry.status as ProcessedTweet['status'] | undefined) ??
+      (entry.migrated || (entry.uri && entry.cid) ? 'migrated' : entry.skipped ? 'skipped' : 'failed'),
+    tweet_created_at: entry.tweetCreatedAt,
+    posted_at: entry.postedAt,
+    bsky_chunk_uris: entry.chunkUris && entry.chunkUris.length > 0 ? JSON.stringify(entry.chunkUris) : undefined,
   });
+}
+
+/** A history row as the composer's in-memory map entry. */
+function entryFromRecord(record: ProcessedTweet): ProcessedTweetEntry {
+  const isPost = record.status === 'migrated';
+  let chunkUris: string[] | undefined;
+  if (record.bsky_chunk_uris) {
+    try {
+      const parsed = JSON.parse(record.bsky_chunk_uris);
+      if (Array.isArray(parsed)) chunkUris = parsed.filter((uri): uri is string => typeof uri === 'string');
+    } catch {
+      chunkUris = undefined;
+    }
+  }
+  return {
+    uri: isPost ? record.bsky_uri : undefined,
+    cid: isPost ? record.bsky_cid : undefined,
+    root:
+      isPost && record.bsky_root_uri && record.bsky_root_cid
+        ? { uri: record.bsky_root_uri, cid: record.bsky_root_cid }
+        : undefined,
+    tail:
+      isPost && record.bsky_tail_uri && record.bsky_tail_cid
+        ? { uri: record.bsky_tail_uri, cid: record.bsky_tail_cid }
+        : undefined,
+    migrated: isPost,
+    skipped: record.status === 'skipped',
+    status: record.status,
+    chunkUris,
+  };
 }
 
 // ============================================================================
@@ -180,7 +262,13 @@ function saveProcessedTweet(
 const scraperSessions = new Map<string, Scraper>();
 const sessionCookies = new Map<string, { authToken: string; ct0: string }>();
 let useBackupCredentials = false;
-const lastCreatedAtByBsky = new Map<string, number>();
+// Recently used createdAt values per account. A thread's chunks are posted
+// within milliseconds of each other, and two records with an identical
+// createdAt and text collide; bumping a colliding timestamp by 1ms keeps them
+// distinct. This used to force every timestamp to be later than the last one
+// used, which silently re-dated any backfilled tweet that followed a live post
+// to "now".
+const usedCreatedAtByBsky = new Map<string, Set<number>>();
 const SUBBRANCH_COUNT = 5;
 
 // --- Pipeline tunables (env-overridable) ---
@@ -191,8 +279,8 @@ function envInt(name: string, fallback: number, min: number, max: number): numbe
 }
 
 // How many timeline fetches run concurrently during a sweep. All sessions
-// share one Twitter login, so the global scraper gap below is what actually
-// bounds the request rate — this only hides per-request latency.
+// share one Twitter login, so the global scraper gap (scraper-fetch.ts) is
+// what actually bounds the request rate — this only hides per-request latency.
 const FETCH_CONCURRENCY = envInt('FETCH_CONCURRENCY', 4, 1, 16);
 // How many Bluesky accounts post from the queue at once. Media downloads can
 // buffer hundreds of MB each, so keep this aligned with available RAM.
@@ -202,13 +290,15 @@ const POST_WORKER_CONCURRENCY = envInt('POST_WORKER_CONCURRENCY', 5, 1, 16);
 // and since it now runs inside a per-account worker it never delays others.
 const POST_PACING_MIN_MS = envInt('POST_PACING_MIN_MS', 3000, 0, 120_000);
 const POST_PACING_MAX_MS = Math.max(envInt('POST_PACING_MAX_MS', 8000, 0, 300_000), POST_PACING_MIN_MS);
+// Pause between the chunks of one split tweet.
+const THREAD_CHUNK_GAP_MS = envInt('THREAD_CHUNK_GAP_MS', 3000, 0, 60_000);
 // Retries per queued tweet before it is parked as failed (visible in the UI).
 const QUEUE_MAX_ATTEMPTS = envInt('QUEUE_MAX_ATTEMPTS', 8, 1, 50);
-// Minimum spacing between Twitter API calls across the whole process, plus
-// random jitter. This is the single knob that controls scraper-account risk:
-// every timeline fetch and tweet lookup waits for a slot here.
-const SCRAPER_MIN_GAP_MS = envInt('SCRAPER_MIN_GAP_MS', 800, 0, 60_000);
-const SCRAPER_JITTER_MS = envInt('SCRAPER_JITTER_MS', 400, 0, 60_000);
+// A live mirror is stamped with the time it reaches Bluesky, so it lands at
+// the top of followers' feeds (the AppView sorts by the earlier of createdAt
+// and indexedAt, which buried a post backdated to its tweet). Tweets older
+// than this — and every backfill — keep their original time instead.
+const LIVE_TIMESTAMP_MAX_AGE_MS = envInt('LIVE_TIMESTAMP_MAX_AGE_MS', 6 * 60 * 60 * 1000, 0, 7 * 24 * 60 * 60 * 1000);
 
 const formatDurationMs = (ms: number): string => {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
@@ -216,22 +306,21 @@ const formatDurationMs = (ms: number): string => {
   return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`;
 };
 
-let scraperNextSlotMs = 0;
-async function acquireScraperSlot(): Promise<void> {
-  const gap = SCRAPER_MIN_GAP_MS + Math.floor(Math.random() * (SCRAPER_JITTER_MS + 1));
-  const now = Date.now();
-  const slot = Math.max(now, scraperNextSlotMs);
-  scraperNextSlotMs = slot + gap;
-  if (slot > now) {
-    await new Promise((resolve) => setTimeout(resolve, slot - now));
-  }
-}
-
 function getUniqueCreatedAtIso(bskyIdentifier: string, desiredMs: number): string {
   const key = bskyIdentifier.toLowerCase();
-  const lastMs = lastCreatedAtByBsky.get(key) ?? Number.MIN_SAFE_INTEGER;
-  const nextMs = Math.max(desiredMs, lastMs + 1);
-  lastCreatedAtByBsky.set(key, nextMs);
+  let used = usedCreatedAtByBsky.get(key);
+  if (!used) {
+    used = new Set<number>();
+    usedCreatedAtByBsky.set(key, used);
+  }
+  let nextMs = Math.round(desiredMs);
+  while (used.has(nextMs)) nextMs += 1;
+  used.add(nextMs);
+  // Bounded memory: only recent values can collide in practice.
+  if (used.size > 2000) {
+    const oldest = [...used].sort((a, b) => a - b).slice(0, 1000);
+    for (const value of oldest) used.delete(value);
+  }
   return new Date(nextMs).toISOString();
 }
 
@@ -250,21 +339,11 @@ function getActiveTwitterCredentials(): { authToken: string; ct0: string } | nul
   return { authToken, ct0 };
 }
 
-// Some accounts make the scraper's underlying request hang indefinitely
-// (no response, no error — just a dead socket) instead of failing fast. With
-// no timeout of its own, that hang was only ever caught by the outer 180s
-// sweep watchdog, which stalls a whole concurrency slot per attempt and can
-// turn a sweep of 86 accounts into 30+ minutes. Give every scraper request
-// its own short timeout so a stuck request fails fast and the account's own
-// retry logic (credential switch, 5s backoff) gets a chance to run.
-const SCRAPER_REQUEST_TIMEOUT_MS = envInt('SCRAPER_REQUEST_TIMEOUT_MS', 25_000, 5_000, 120_000);
-
-function timedFetch(...args: Parameters<typeof fetch>): ReturnType<typeof fetch> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SCRAPER_REQUEST_TIMEOUT_MS);
-  const [input, init] = args;
-  return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
-}
+// Every scraper request goes through one fetch: a per-request deadline (so a
+// hung socket fails fast and takes the retry path) behind the process-wide
+// rate limiter (so the gap holds per request — a timeline fetch is a user-id
+// lookup plus pages, and each is a separate hit on the account's limits).
+const scraperFetch = createScraperFetch();
 
 async function getTwitterScraper(sessionKey = 'default', forceReset = false): Promise<Scraper | null> {
   const credentials = getActiveTwitterCredentials();
@@ -276,7 +355,7 @@ async function getTwitterScraper(sessionKey = 'default', forceReset = false): Pr
   const existingCookies = sessionCookies.get(sessionKey);
   if (!existingScraper || forceReset || existingCookies?.authToken !== authToken || existingCookies?.ct0 !== ct0) {
     console.log(`🔄 Initializing Twitter scraper with ${useBackupCredentials ? 'BACKUP' : 'PRIMARY'} credentials...`);
-    const scraper = new Scraper({ fetch: timedFetch as unknown as typeof fetch });
+    const scraper = new Scraper({ fetch: scraperFetch });
     await scraper.setCookies([`auth_token=${authToken}`, `ct0=${ct0}`]);
     scraperSessions.set(sessionKey, scraper);
     sessionCookies.set(sessionKey, {
@@ -287,8 +366,17 @@ async function getTwitterScraper(sessionKey = 'default', forceReset = false): Pr
   return scraperSessions.get(sessionKey) ?? null;
 }
 
-async function switchCredentials() {
+/**
+ * Move off a credential set that just failed. Several fetches run at once, and
+ * a plain toggle meant two of them failing on the primary set flipped to the
+ * backup and straight back again. Each caller says which set it was using; if
+ * another worker already moved off it, this one just retries on the current set.
+ */
+async function switchCredentials(failedOnBackup: boolean = useBackupCredentials): Promise<boolean> {
   const config = getConfig();
+  if (useBackupCredentials !== failedOnBackup) {
+    return true;
+  }
   if (config.twitter.backupAuthToken && config.twitter.backupCt0) {
     useBackupCredentials = !useBackupCredentials;
     console.log(`⚠️ Switching to ${useBackupCredentials ? 'BACKUP' : 'PRIMARY'} Twitter credentials...`);
@@ -341,7 +429,6 @@ type PinnedTweetLookup = { ok: true; pinnedTweetId?: string } | { ok: false };
 async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<PinnedTweetLookup> {
   // Preferred path, in case the scraper exposes it again in a future version
   try {
-    await acquireScraperSlot();
     const profile = await scraper.getProfile(username);
     if (profile.pinnedTweetIds && profile.pinnedTweetIds.length > 0) {
       return { ok: true, pinnedTweetId: profile.pinnedTweetIds[0] };
@@ -355,7 +442,6 @@ async function fetchPinnedTweetId(scraper: Scraper, username: string): Promise<P
   if (!urlTemplate || !credentials) return { ok: false };
 
   try {
-    await acquireScraperSlot();
     const userId = await scraper.getUserIdByScreenName(username);
     const url = urlTemplate.replace(/%22userId%22%3A%22\d+%22/, `%22userId%22%3A%22${userId}%22`);
     await acquireScraperSlot();
@@ -430,6 +516,9 @@ function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
       permanentUrl: scraperTweet.permanentUrl,
       isPin: scraperTweet.isPin,
       possibly_sensitive: scraperTweet.sensitiveContent,
+      retweeted_status_id_str: scraperTweet.retweetedStatusId ?? scraperTweet.retweetedStatus?.id,
+      versions: scraperTweet.versions,
+      quoted_status: toQuotedTweetInfo(scraperTweet.quotedStatus),
     };
   }
 
@@ -448,7 +537,10 @@ function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
     // biome-ignore lint/suspicious/noExplicitAny: raw types match compatible structure
     extended_entities: raw.extended_entities as any,
     quoted_status_id_str: raw.quoted_status_id_str,
-    retweeted_status_id_str: raw.retweeted_status_id_str,
+    // New-style retweets only carry the original inside retweeted_status_result;
+    // the scraper resolves the id either way.
+    retweeted_status_id_str:
+      raw.retweeted_status_id_str ?? scraperTweet.retweetedStatusId ?? scraperTweet.retweetedStatus?.id,
     is_quote_status: !!raw.quoted_status_id_str,
     in_reply_to_status_id_str: raw.in_reply_to_status_id_str,
     // biome-ignore lint/suspicious/noExplicitAny: missing in LegacyTweetRaw type
@@ -456,6 +548,10 @@ function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
     // biome-ignore lint/suspicious/noExplicitAny: card comes from raw tweet
     card: (raw as any).card,
     permanentUrl: scraperTweet.permanentUrl,
+    // biome-ignore lint/suspicious/noExplicitAny: missing in LegacyTweetRaw type
+    lang: typeof (raw as any).lang === 'string' ? (raw as any).lang : undefined,
+    versions: scraperTweet.versions,
+    quoted_status: toQuotedTweetInfo(scraperTweet.quotedStatus),
     user: {
       screen_name: scraperTweet.username,
       id_str: scraperTweet.userId,
@@ -463,27 +559,23 @@ function mapScraperTweetToLocalTweet(scraperTweet: ScraperTweet): Tweet {
   };
 }
 
+function toQuotedTweetInfo(quoted: ScraperTweet | undefined): QuotedTweetInfo | undefined {
+  if (!quoted?.id) return undefined;
+  const photo = quoted.photos?.[0]?.url;
+  const poster = quoted.videos?.[0]?.preview;
+  return {
+    id: quoted.id,
+    username: quoted.username,
+    name: quoted.name,
+    text: quoted.text,
+    imageUrl: photo || poster || undefined,
+    url: quoted.permanentUrl || (quoted.username ? `https://x.com/${quoted.username}/status/${quoted.id}` : undefined),
+  };
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-// Mirror Twitter's sensitive-media flags as Bluesky self labels. Per-media
-// warnings map to specific labels; the tweet-level possibly_sensitive flag has
-// no category, so it maps to the mildest adult label.
-function buildSensitiveLabels(tweet: Tweet, mediaEntities: MediaEntity[]): string[] {
-  const values = new Set<string>();
-  for (const media of mediaEntities) {
-    const warning = media.ext_sensitive_media_warning;
-    if (!warning) continue;
-    if (warning.adult_content) values.add('porn');
-    if (warning.graphic_violence) values.add('graphic-media');
-    if (warning.other) values.add('graphic-media');
-  }
-  if (values.size === 0 && tweet.possibly_sensitive) {
-    values.add('sexual');
-  }
-  return [...values];
-}
 
 function addTextFallbacks(text: string): string {
   return text.replace(/\s+$/g, '').trim();
@@ -542,18 +634,6 @@ function buildAltTextContext(tweet: Tweet, tweetText: string, tweetMap: Map<stri
   return currentText;
 }
 
-function detectLanguage(text: string): string[] {
-  if (!text || text.trim().length === 0) return ['en'];
-  try {
-    const code3 = (francModule as unknown as (text: string) => string)(text);
-    if (code3 === 'und') return ['en'];
-    const code2 = iso6391.getCode(code3);
-    return code2 ? [code2] : ['en'];
-  } catch {
-    return ['en'];
-  }
-}
-
 async function expandUrl(shortUrl: string): Promise<string> {
   try {
     const response = await axios.head(shortUrl, {
@@ -593,15 +673,22 @@ interface DownloadedMedia {
 // of RAM — with 5 subbranches downloading in parallel that risks OOM.
 const MAX_MEDIA_DOWNLOAD_BYTES = 320 * 1024 * 1024;
 
-async function downloadMedia(url: string, maxDurationMs = 120000): Promise<DownloadedMedia> {
-  const response = await axios({
+/** An abort signal that fires on either the deadline or the caller's own signal. */
+function deadlineSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  const deadline = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([deadline, signal]) : deadline;
+}
+
+async function downloadMedia(url: string, maxDurationMs = 120000, signal?: AbortSignal): Promise<DownloadedMedia> {
+  const response = await axios.request({
     url,
     method: 'GET',
     responseType: 'arraybuffer',
     // axios `timeout` only fires on socket inactivity; the abort signal enforces
-    // a hard deadline so a slow-trickling large download can't stall the pipeline.
+    // a hard deadline so a slow-trickling large download can't stall the
+    // pipeline, and lets a cancelled batch stop mid-download.
     timeout: 30000,
-    signal: AbortSignal.timeout(maxDurationMs),
+    signal: deadlineSignal(maxDurationMs, signal),
     maxContentLength: MAX_MEDIA_DOWNLOAD_BYTES,
     maxBodyLength: MAX_MEDIA_DOWNLOAD_BYTES,
   });
@@ -621,18 +708,26 @@ function isDownloadFailure(err: unknown): boolean {
 
 const BLOB_UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
 
+// app.bsky.embed.images caps an image blob at 2,000,000 bytes; stay under it.
+const DEFAULT_IMAGE_MAX_SIZE = 1900 * 1024;
+// app.bsky.embed.external caps its thumb at 1,000,000 bytes — tighter than a
+// post image, and the limit that was parking link-card tweets.
+const EXTERNAL_THUMB_MAX_SIZE = 950 * 1024;
+
 async function uploadToBluesky(
   agent: BskyAgent,
   buffer: Buffer,
   mimeType: string,
-  maxSize = 1900 * 1024,
+  maxSize = DEFAULT_IMAGE_MAX_SIZE,
 ): Promise<BlobRef> {
   let finalBuffer = buffer;
   let finalMimeType = mimeType;
   // Bluesky accepts image blobs up to 2MB; stay slightly under for safety.
   // Callers embedding the blob somewhere with a tighter limit (e.g. link card
-  // thumbnails, capped at 1,000,000 bytes) pass a smaller maxSize.
-  const MAX_SIZE = maxSize;
+  // thumbnails, capped at 1,000,000 bytes) pass a smaller maxSize. A larger one
+  // is clamped rather than honoured: the record would be rejected at post time
+  // and the tweet parked, which is exactly the failure this ceiling prevents.
+  const MAX_SIZE = Math.min(maxSize, DEFAULT_IMAGE_MAX_SIZE);
 
   const isPng = mimeType === 'image/png';
   const isJpeg = mimeType === 'image/jpeg' || mimeType === 'image/jpg';
@@ -678,7 +773,13 @@ async function uploadToBluesky(
 
           quality = Math.max(70, quality - 5);
 
-          image = sharp(buffer).resize({ width, withoutEnlargement: true }).jpeg({ quality, mozjpeg: true });
+          // JPEG has no alpha channel and sharp fills transparency with black
+          // when it drops it, so a transparent PNG logo came out as a black
+          // box. Flatten onto white first.
+          image = sharp(buffer)
+            .resize({ width, withoutEnlargement: true })
+            .flatten({ background: '#ffffff' })
+            .jpeg({ quality, mozjpeg: true });
 
           attemptMimeType = 'image/jpeg';
         }
@@ -811,22 +912,24 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
 const VIDEO_POLL_INTERVAL_MS = 5000;
 const VIDEO_PROCESSING_TIMEOUT_MS = 20 * 60 * 1000;
 const VIDEO_POLL_MAX_ATTEMPTS = Math.ceil(VIDEO_PROCESSING_TIMEOUT_MS / VIDEO_POLL_INTERVAL_MS);
+const VIDEO_UPLOAD_TIMEOUT_MS = 45 * 60 * 1000;
 const videoProcessingTimeoutError = () =>
   new Error(`Video processing timed out after ${Math.round(VIDEO_PROCESSING_TIMEOUT_MS / 60000)} minutes.`);
 
-async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<BlobRef> {
+async function pollForVideoProcessing(agent: BskyAgent, jobId: string, signal?: AbortSignal): Promise<BlobRef> {
   console.log('[VIDEO] ⏳ Polling for processing completion (this can take several minutes)...');
   let attempts = 0;
   let blob: BlobRef | undefined;
 
   while (!blob) {
     attempts++;
+    signal?.throwIfAborted();
     const statusUrl = new URL('https://video.bsky.app/xrpc/app.bsky.video.getJobStatus');
     statusUrl.searchParams.append('jobId', jobId);
 
     let statusResponse: Response;
     try {
-      statusResponse = await fetch(statusUrl, { signal: AbortSignal.timeout(30000) });
+      statusResponse = await fetch(statusUrl, { signal: deadlineSignal(30000, signal) });
     } catch (err) {
       console.warn(`[VIDEO] ⚠️ Job status fetch errored (${(err as Error).message}), retrying...`);
       if (attempts > VIDEO_POLL_MAX_ATTEMPTS) throw videoProcessingTimeoutError();
@@ -841,6 +944,12 @@ async function pollForVideoProcessing(agent: BskyAgent, jobId: string): Promise<
     }
 
     const statusData = (await statusResponse.json()) as any;
+    if (!statusData?.jobStatus) {
+      console.warn('[VIDEO] ⚠️ Job status response had no jobStatus, retrying...');
+      if (attempts > VIDEO_POLL_MAX_ATTEMPTS) throw videoProcessingTimeoutError();
+      await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL_MS));
+      continue;
+    }
     const state = statusData.jobStatus.state;
     const progress = statusData.jobStatus.progress || 0;
 
@@ -899,7 +1008,7 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<any> {
         if (!mimeType.startsWith('image/')) {
           throw new Error(`og:image was not an image (got ${mimeType})`);
         }
-        thumbBlob = await uploadToBluesky(agent, buffer, mimeType, 950 * 1024);
+        thumbBlob = await uploadToBluesky(agent, buffer, mimeType, EXTERNAL_THUMB_MAX_SIZE);
       } catch (e) {
         // Silently fail thumbnail upload
       }
@@ -931,7 +1040,12 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<any> {
   }
 }
 
-async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: string): Promise<BlobRef> {
+async function uploadVideoToBluesky(
+  agent: BskyAgent,
+  buffer: Buffer,
+  filename: string,
+  signal?: AbortSignal,
+): Promise<BlobRef> {
   const sanitizedFilename = filename.split('?')[0] || 'video.mp4';
   console.log(
     `[VIDEO] 🟢 Starting upload process for ${sanitizedFilename} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`,
@@ -976,7 +1090,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
       },
       body: new Blob([new Uint8Array(buffer)]),
       // Videos can be up to ~300MB; allow a generous window but never hang forever.
-      signal: AbortSignal.timeout(45 * 60 * 1000),
+      signal: deadlineSignal(VIDEO_UPLOAD_TIMEOUT_MS, signal),
     });
 
     if (!uploadResponse.ok) {
@@ -997,7 +1111,7 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
 
         if (errorJson.error === 'already_exists' && errorJson.jobId) {
           console.log(`[VIDEO] ♻️ Video already exists. Resuming with Job ID: ${errorJson.jobId}`);
-          return await pollForVideoProcessing(agent, errorJson.jobId);
+          return await pollForVideoProcessing(agent, errorJson.jobId, signal);
         }
         if (
           errorJson.error === 'unconfirmed_email' ||
@@ -1025,141 +1139,52 @@ async function uploadVideoToBluesky(agent: BskyAgent, buffer: Buffer, filename: 
     }
 
     // 3. Poll for processing status
-    return await pollForVideoProcessing(agent, jobStatus.jobId);
+    return await pollForVideoProcessing(agent, jobStatus.jobId, signal);
   } catch (err) {
     console.error('[VIDEO] ❌ Error in uploadVideoToBluesky:', (err as Error).message);
     throw err;
   }
 }
 
-function splitText(text: string, limit = 300): string[] {
-  if (text.length <= limit) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  // Reserve space for numbering like " (1/3)" -> approx 7 chars
-  // We apply this reservation to the limit check
-  const effectiveLimit = limit - 8;
-
-  while (remaining.length > 0) {
-    // Every chunk gets a " (i/n)" suffix appended later, so the final chunk
-    // must also respect the reserved-space limit or it would exceed 300 chars.
-    if (remaining.length <= effectiveLimit) {
-      chunks.push(remaining);
-      break;
-    }
-
-    // Smart splitting priority:
-    // 1. Double newline (paragraph)
-    // 2. Sentence end (.!?)
-    // 3. Space
-    // 4. Force split
-
-    let splitIndex = -1;
-
-    // Check paragraphs
-    let checkIndex = remaining.lastIndexOf('\n\n', effectiveLimit);
-    if (checkIndex !== -1) splitIndex = checkIndex;
-
-    // Check sentences
-    if (splitIndex === -1) {
-      // Look for punctuation followed by space
-      const sentenceMatches = Array.from(remaining.substring(0, effectiveLimit).matchAll(/[.!?]\s/g));
-      if (sentenceMatches.length > 0) {
-        const lastMatch = sentenceMatches[sentenceMatches.length - 1];
-        if (lastMatch && lastMatch.index !== undefined) {
-          splitIndex = lastMatch.index + 1; // Include punctuation
-        }
-      }
-    }
-
-    // Check spaces
-    if (splitIndex === -1) {
-      checkIndex = remaining.lastIndexOf(' ', effectiveLimit);
-      if (checkIndex !== -1) splitIndex = checkIndex;
-    }
-
-    // Force split if no good break point found
-    if (splitIndex === -1) {
-      splitIndex = effectiveLimit;
-    }
-
-    chunks.push(remaining.substring(0, splitIndex).trim());
-    remaining = remaining.substring(splitIndex).trim();
-  }
-
-  return chunks;
+export interface FetchUserTweetsOptions {
+  /**
+   * The account's numeric id. Fetching by id survives renames, and skips the
+   * screen-name lookup request.
+   */
+  userId?: string;
+  /**
+   * Throw once retries are exhausted instead of returning an empty list. The
+   * sweep needs this: an empty list reads as "no new tweets", which is how a
+   * renamed, suspended or protected source used to go quiet forever with no
+   * error anywhere.
+   */
+  throwOnError?: boolean;
 }
 
-function utf16IndexToUtf8Index(text: string, index: number): number {
-  return Buffer.byteLength(text.slice(0, index), 'utf8');
-}
-
-function rangesOverlap(startA: number, endA: number, startB: number, endB: number): boolean {
-  return startA < endB && startB < endA;
-}
-
-function addTwitterHandleLinkFacets(text: string, facets?: any[]): any[] | undefined {
-  const existingFacets = facets ?? [];
-  const newFacets: any[] = [];
-  const regex = /@([A-Za-z0-9_]{1,15})/g;
-
-  for (let match = regex.exec(text); match !== null; match = regex.exec(text)) {
-    const handle = match[1];
-    if (!handle) continue;
-
-    const atIndex = match.index;
-    const prevChar = atIndex > 0 ? text[atIndex - 1] : '';
-    if (prevChar && /[A-Za-z0-9_]/.test(prevChar)) continue;
-
-    const endIndex = atIndex + handle.length + 1;
-    const trailing = text.slice(endIndex);
-    if (trailing.startsWith('.') && /^\.[A-Za-z0-9-]+/.test(trailing)) continue;
-
-    const nextChar = endIndex < text.length ? text[endIndex] : '';
-    if (nextChar && /[A-Za-z0-9_]/.test(nextChar)) continue;
-
-    const byteStart = utf16IndexToUtf8Index(text, atIndex);
-    const byteEnd = utf16IndexToUtf8Index(text, endIndex);
-
-    const overlaps = existingFacets.some((facet) =>
-      rangesOverlap(byteStart, byteEnd, facet.index.byteStart, facet.index.byteEnd),
-    );
-    if (overlaps) continue;
-
-    newFacets.push({
-      index: { byteStart, byteEnd },
-      features: [
-        {
-          $type: 'app.bsky.richtext.facet#link',
-          uri: `https://twitter.com/${handle}`,
-        },
-      ],
-    });
-  }
-
-  if (newFacets.length === 0) return facets;
-  return [...existingFacets, ...newFacets].sort((a, b) => a.index.byteStart - b.index.byteStart);
-}
-
-// Replaced safeSearch with fetchUserTweets to use UserTweets endpoint instead of Search
-// Added processedIds for early stopping optimization
+// Fetches a user's timeline. processedIds enables early stopping.
 async function fetchUserTweets(
   username: string,
   limit: number,
   processedIds?: Set<string>,
   sessionKey = 'default',
+  options: FetchUserTweetsOptions = {},
 ): Promise<Tweet[]> {
   const client = await getTwitterScraper(sessionKey);
-  if (!client) return [];
+  if (!client) {
+    if (options.throwOnError) throw new Error('Twitter credentials are not configured.');
+    return [];
+  }
 
   let retries = 3;
+  let lastError: unknown;
   while (retries > 0) {
+    const usedBackup = useBackupCredentials;
     try {
-      await acquireScraperSlot();
+      const scraper = (await getTwitterScraper(sessionKey)) ?? client;
       const tweets: Tweet[] = [];
-      const generator = client.getTweets(username, limit);
+      const generator = options.userId
+        ? scraper.getTweetsByUserId(options.userId, limit)
+        : scraper.getTweets(username, limit);
       let consecutiveProcessedCount = 0;
 
       for await (const t of generator) {
@@ -1183,12 +1208,12 @@ async function fetchUserTweets(
       }
       return tweets;
     } catch (e: any) {
+      lastError = e;
       retries--;
-      const isRetryable =
-        e.message?.includes('ServiceUnavailable') ||
-        e.message?.includes('Timeout') ||
-        e.message?.includes('429') ||
-        e.message?.includes('401');
+      // Shared with the fetch timeout that produces one of these, so a timed-out
+      // request actually takes the retry/credential-switch path rather than
+      // failing fast and reporting the account as having no new tweets.
+      const isRetryable = isRetryableScraperError(e);
 
       // Check for Twitter Internal Server Error (often returns 400 with specific body)
       if (e?.response?.status === 400 && JSON.stringify(e?.response?.data || {}).includes('InternalServerError')) {
@@ -1204,7 +1229,7 @@ async function fetchUserTweets(
         console.warn(`⚠️ Error fetching tweets for ${username} (${e.message}).`);
 
         // Attempt credential switch if we have backups
-        if (await switchCredentials()) {
+        if (retries > 0 && (await switchCredentials(usedBackup))) {
           console.log('🔄 Retrying with new credentials...');
           continue; // Retry loop with new credentials
         }
@@ -1217,11 +1242,13 @@ async function fetchUserTweets(
       }
 
       console.warn(`Error fetching tweets for ${username}:`, e.message || e);
+      if (options.throwOnError) throw e;
       return [];
     }
   }
 
   console.log(`[${username}] ⚠️ Scraper returned 0 tweets (or failed silently) after retries.`);
+  if (options.throwOnError && lastError) throw lastError;
   return [];
 }
 
@@ -1238,7 +1265,11 @@ async function fetchUserTweets(
 // yet?" — so a tweet that was deliberately skipped, one that failed on its
 // third chunk, and one the batch never even reached all looked identical, and
 // all three ended up parked with the same "Tweet was not posted" placeholder.
-export type TweetOutcomeStatus = 'posted' | 'skipped' | 'failed' | 'not-attempted';
+//
+// `deferred` means "not yet": the tweet depends on another tweet (a reply's
+// parent, a retweet's original) that is still in the queue. It is retried
+// later rather than posted without its context.
+export type TweetOutcomeStatus = 'posted' | 'skipped' | 'failed' | 'deferred' | 'not-attempted';
 
 export interface TweetOutcome {
   status: TweetOutcomeStatus;
@@ -1254,6 +1285,23 @@ export interface TweetOutcome {
   durationMs?: number;
 }
 
+/** Per-mapping mirroring behaviour, resolved from the mapping's settings. */
+export interface MirrorSettings {
+  sensitiveFallbackLabel: SensitiveFallbackLabel;
+  editMode: 'skip' | 'replace';
+  mirrorRetweets: boolean;
+  mirrorRepliesToMirrors: boolean;
+}
+
+export function resolveMirrorSettings(mapping?: Partial<AccountMapping> | null): MirrorSettings {
+  return {
+    sensitiveFallbackLabel: mapping?.sensitiveFallbackLabel ?? 'sexual',
+    editMode: mapping?.editMode ?? 'skip',
+    mirrorRetweets: mapping?.mirrorRetweets !== false,
+    mirrorRepliesToMirrors: mapping?.mirrorRepliesToMirrors !== false,
+  };
+}
+
 /**
  * Optional per-run context threaded through processTweets so callers can learn
  * what happened to each individual tweet, and so a post can be recorded as
@@ -1263,16 +1311,201 @@ export interface TweetOutcome {
 export interface ProcessContext {
   outcomes?: Map<string, TweetOutcome>;
   /** Fired as soon as the PDS accepts a tweet's first chunk. */
-  onPosted?: (twitterId: string, uri: string, cid: string) => void;
+  onPosted?: (twitterId: string, uri: string, cid: string, root: { uri: string; cid: string }) => void;
+  /** Fired as each later chunk (or follow-up media post) lands: the new tail. */
+  onChunkPosted?: (twitterId: string, uri: string, cid: string) => void;
+  /**
+   * Fired once a tweet has been composed, before it is posted. The dry-run
+   * preview reads this so what the dashboard shows is the real composer's
+   * output rather than a second implementation of it.
+   */
+  onComposed?: (preview: ComposedTweet) => void;
+  /**
+   * Skip downloading media bytes, recording only what media the tweet has.
+   * The preview needs to know a tweet carries a video, not to pull 300MB of it
+   * on the way to a mock upload.
+   */
+  skipMediaDownload?: boolean;
   mappingId?: string;
   jobId?: string;
+  /**
+   * Cancels the run. Checked before every tweet and every chunk, and passed to
+   * media downloads and uploads, so a batch the watchdog gives up on actually
+   * stops instead of carrying on posting underneath the retry that replaces it.
+   */
+  signal?: AbortSignal;
+  /** Leave the dashboard's global status and job list alone (the preview). */
+  quiet?: boolean;
+  /**
+   * Whether a tweet is a live mirror (stamped with the posting time) rather
+   * than history (stamped with the tweet's own time). Defaults to history.
+   */
+  isLive?: (twitterId: string) => boolean;
+  /** Mapping behaviour; resolved from the mapping when omitted. */
+  settings?: MirrorSettings;
+}
+
+/** A composed tweet as it would be posted: the thread's chunks and its embeds. */
+export interface ComposedTweet {
+  twitterId: string;
+  chunks: string[];
+  images: number;
+  video: boolean;
+  quote: boolean;
+  linkCard: boolean;
+  isReply: boolean;
+  /** A retweet mirrored as a native repost of this post URI. */
+  repostOf?: string;
+  langs?: string[];
+  /** Media that did not fit the first post and follows as replies. */
+  extraMediaPosts?: number;
 }
 
 function recordOutcome(context: ProcessContext | undefined, twitterId: string, outcome: TweetOutcome): void {
   context?.outcomes?.set(twitterId, outcome);
 }
 
-async function processTweets(
+const isLikelyHandle = (identifier: string): boolean =>
+  identifier.includes('.') && !identifier.includes('@') && !identifier.startsWith('did:');
+
+// Bluesky identifier -> DID for mirrors whose DID has not been captured yet.
+const mirrorDidCache = new Map<string, string>();
+
+/**
+ * Which Twitter usernames in `text` are mirrored on this instance, and the DID
+ * of each mirror. Captured DIDs are used as-is; a mirror that has not logged in
+ * since DIDs were recorded is resolved once through the agent and cached.
+ */
+async function buildMirrorDidResolver(
+  agent: BskyAgent,
+  text: string,
+): Promise<(username: string) => string | undefined> {
+  const mentioned = new Set(
+    [...text.matchAll(/@([A-Za-z0-9_]{1,15})/g)].map((match) => (match[1] ?? '').toLowerCase()),
+  );
+  const resolved = new Map<string, string>();
+  if (mentioned.size === 0) return () => undefined;
+
+  const byUsername = new Map<string, AccountMapping>();
+  // Enabled mappings first so a duplicate username points at the live mirror.
+  const mappings = [...getConfig().mappings].sort((a, b) => Number(b.enabled) - Number(a.enabled));
+  for (const mapping of mappings) {
+    for (const username of mapping.twitterUsernames) {
+      const key = username.toLowerCase();
+      if (!byUsername.has(key)) byUsername.set(key, mapping);
+    }
+  }
+
+  for (const username of mentioned) {
+    const mapping = byUsername.get(username);
+    if (!mapping) continue;
+    const identifier = mapping.bskyIdentifier.toLowerCase();
+    let did =
+      mapping.bskyDid ?? (identifier.startsWith('did:') ? identifier : undefined) ?? mirrorDidCache.get(identifier);
+    // biome-ignore lint/suspicious/noExplicitAny: mock agents (preview, tests) may not implement resolveHandle
+    const resolveHandle = (agent as any)?.resolveHandle;
+    if (!did && typeof resolveHandle === 'function' && isLikelyHandle(identifier)) {
+      try {
+        const response = await withTimeout<{ data: { did: string } }>(
+          resolveHandle.call(agent, { handle: identifier }),
+          10_000,
+          'Handle resolution timed out',
+        );
+        did = response.data.did;
+        mirrorDidCache.set(identifier, did);
+      } catch {
+        did = undefined;
+      }
+    }
+    if (did) resolved.set(username, did);
+  }
+  return (username: string) => resolved.get(username.toLowerCase());
+}
+
+/** at:// post URI -> bsky.app URL, using the handle when the identifier is one. */
+function mirroredPostUrl(record: ProcessedTweet): string | null {
+  if (!record.bsky_uri) return null;
+  return bskyPostUrl(record.bsky_uri, isLikelyHandle(record.bsky_identifier) ? record.bsky_identifier : undefined);
+}
+
+function tweetIdLess(a: string, b: string): boolean {
+  try {
+    return BigInt(a) < BigInt(b);
+  } catch {
+    return a.length === b.length ? a < b : a.length < b.length;
+  }
+}
+
+/** Trim to at most `limit` graphemes, adding an ellipsis when something was cut. */
+function truncateText(text: string, limit: number): string {
+  if (graphemeLength(text) <= limit) return text;
+  const segments = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)].map(
+    (segment) => segment.segment,
+  );
+  return `${segments
+    .slice(0, Math.max(0, limit - 1))
+    .join('')
+    .trimEnd()}…`;
+}
+
+/** Upload a remote image as a link-card thumbnail. Failure just means no thumbnail. */
+async function uploadCardThumb(
+  agent: BskyAgent,
+  imageUrl: string | undefined,
+  dryRun: boolean,
+  context: ProcessContext | undefined,
+): Promise<BlobRef | undefined> {
+  if (!imageUrl) return undefined;
+  if (dryRun || context?.skipMediaDownload) {
+    return { ref: { toString: () => 'preview-thumb' }, mimeType: 'image/jpeg', size: 0 } as unknown as BlobRef;
+  }
+  try {
+    const { buffer, mimeType } = await downloadMedia(imageUrl, 60_000, context?.signal);
+    if (!mimeType.startsWith('image/')) return undefined;
+    return await uploadToBluesky(agent, buffer, mimeType, EXTERNAL_THUMB_MAX_SIZE);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Alt text for an image: the author's own, else an AI description when a
+ * provider is configured, else nothing. "Image from Twitter" used to fill the
+ * gap, which lit up Bluesky's ALT badge while describing nothing.
+ */
+async function resolveImageAlt(
+  media: MediaEntity,
+  buffer: Buffer,
+  mimeType: string,
+  describe: () => string,
+  twitterUsername: string,
+): Promise<string> {
+  if (media.ext_alt_text) return media.ext_alt_text;
+  if (!isAltTextConfigured()) return '';
+  console.log(`[${twitterUsername}] 🤖 Generating alt text via AI provider...`);
+  const generated = await generateAltText(buffer, mimeType, describe());
+  if (generated) console.log(`[${twitterUsername}] ✅ Alt text generated: ${generated.substring(0, 50)}...`);
+  return generated || '';
+}
+
+interface VideoUpload {
+  blob: BlobRef;
+  aspectRatio?: AspectRatio;
+  alt?: string;
+  /** Twitter "GIFs" are silent looping mp4s; Bluesky presents them the same way. */
+  gif: boolean;
+}
+
+function buildVideoEmbed(video: VideoUpload) {
+  // biome-ignore lint/suspicious/noExplicitAny: dynamic record construction
+  const embed: Record<string, any> = { $type: 'app.bsky.embed.video', video: video.blob };
+  if (video.aspectRatio) embed.aspectRatio = video.aspectRatio;
+  if (video.alt) embed.alt = truncateText(video.alt, 1000);
+  if (video.gif) embed.presentation = 'gif';
+  return embed;
+}
+
+export async function processTweets(
   agent: BskyAgent,
   twitterUsername: string,
   bskyIdentifier: string,
@@ -1284,6 +1517,19 @@ async function processTweets(
   context?: ProcessContext,
 ): Promise<void> {
   const logScope = { twitterUsername, bskyIdentifier, mappingId: context?.mappingId, jobId: context?.jobId };
+  const settings =
+    context?.settings ??
+    resolveMirrorSettings(
+      getConfig().mappings.find(
+        (mapping) =>
+          (context?.mappingId && mapping.id === context.mappingId) ||
+          mapping.bskyIdentifier.toLowerCase() === bskyIdentifier.toLowerCase(),
+      ),
+    );
+  // The preview runs this same path; it must not repaint the dashboard's
+  // global status or job list as if a real mapping were mirroring.
+  const reportStatus = context?.quiet ? () => undefined : updateAppStatus;
+  const reportJob = context?.quiet ? () => undefined : updateJob;
 
   // Filter tweets to ensure they're actually from this user
   const filteredTweets = tweets.filter((t) => {
@@ -1342,12 +1588,52 @@ async function processTweets(
   const mirrorJobId = `mirror:${bskyIdentifier.toLowerCase()}:${twitterUsername.toLowerCase()}`;
   let mirroredCount = 0;
 
+  const skip = (
+    tweetId: string,
+    stage: string,
+    reason: string,
+    text: string,
+    level: 'debug' | 'info' | 'warn' = 'debug',
+    event = `tweet.skipped.${stage}`,
+    extra: Partial<TweetOutcome> = {},
+  ) => {
+    logEvent({
+      level,
+      stage: 'post',
+      event,
+      message: `Skipped tweet ${tweetId}: ${reason}`,
+      twitterId: tweetId,
+      error: extra.detail,
+      ...logScope,
+    });
+    recordOutcome(context, tweetId, { status: 'skipped', stage, reason, ...extra });
+    if (!dryRun) {
+      saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, { skipped: true, text });
+      localProcessedMap[tweetId] = { skipped: true, status: 'skipped', text };
+    }
+  };
+
+  const defer = (tweetId: string, stage: string, reason: string) => {
+    logEvent({
+      level: 'info',
+      stage: 'post',
+      event: 'tweet.deferred',
+      message: `Deferred tweet ${tweetId}: ${reason}`,
+      twitterId: tweetId,
+      ...logScope,
+    });
+    recordOutcome(context, tweetId, { status: 'deferred', stage, reason, retryable: true });
+  };
+
   filteredTweets.reverse();
   let count = 0;
   for (const tweet of filteredTweets) {
     count++;
     const tweetId = tweet.id_str || tweet.id;
     if (!tweetId) continue;
+    // A cancelled batch stops here; tweets not reached get no outcome, which
+    // the queue treats as "not attempted" and re-arms without penalty.
+    if (context?.signal?.aborted) break;
 
     const tweetStartedAt = Date.now();
 
@@ -1368,20 +1654,7 @@ async function processTweets(
     // Fallback to DB in case a nested backfill already saved this tweet.
     const dbRecord = dbService.getTweet(tweetId, bskyIdentifier);
     if (dbRecord) {
-      localProcessedMap[tweetId] = {
-        uri: dbRecord.bsky_uri,
-        cid: dbRecord.bsky_cid,
-        root:
-          dbRecord.bsky_root_uri && dbRecord.bsky_root_cid
-            ? { uri: dbRecord.bsky_root_uri, cid: dbRecord.bsky_root_cid }
-            : undefined,
-        tail:
-          dbRecord.bsky_tail_uri && dbRecord.bsky_tail_cid
-            ? { uri: dbRecord.bsky_tail_uri, cid: dbRecord.bsky_tail_cid }
-            : undefined,
-        migrated: dbRecord.status === 'migrated',
-        skipped: dbRecord.status === 'skipped',
-      };
+      localProcessedMap[tweetId] = entryFromRecord(dbRecord);
       recordOutcome(context, tweetId, {
         status: dbRecord.status === 'skipped' ? 'skipped' : 'posted',
         stage: 'already-recorded',
@@ -1392,25 +1665,162 @@ async function processTweets(
       continue;
     }
 
-    const isRetweet = tweet.isRetweet || tweet.retweeted_status_id_str || tweet.text?.startsWith('RT @');
+    const tweetText = tweet.full_text || tweet.text || '';
+    const isRetweet = Boolean(tweet.isRetweet || tweet.retweeted_status_id_str || tweetText.startsWith('RT @'));
 
     if (isRetweet) {
-      const reason = 'Retweets are not mirrored.';
+      // A retweet of a tweet this instance already mirrors becomes a native
+      // Bluesky repost. Anything else still has nothing to point at.
+      const originalId = tweet.retweeted_status_id_str;
+      const original =
+        settings.mirrorRetweets && originalId ? dbService.findMirroredPost(originalId, bskyIdentifier) : null;
+      if (original?.bsky_uri && original.bsky_cid) {
+        context?.onComposed?.({
+          twitterId: tweetId,
+          chunks: [],
+          images: 0,
+          video: false,
+          quote: false,
+          linkCard: false,
+          isReply: false,
+          repostOf: original.bsky_uri,
+        });
+        if (dryRun) {
+          recordOutcome(context, tweetId, {
+            status: 'posted',
+            stage: 'repost',
+            reason: `Would repost ${original.bsky_uri}.`,
+          });
+          continue;
+        }
+        try {
+          const repost = await withTimeout(
+            agent.repost(original.bsky_uri, original.bsky_cid),
+            60_000,
+            'Repost request timed out after 60s',
+          );
+          saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, {
+            status: 'reposted',
+            uri: repost.uri,
+            cid: repost.cid,
+            text: tweetText,
+            postedAt: Date.now(),
+          });
+          localProcessedMap[tweetId] = { status: 'reposted', text: tweetText };
+          mirroredCount++;
+          logEvent({
+            level: 'info',
+            stage: 'post',
+            event: 'tweet.reposted',
+            message: `Mirrored retweet ${tweetId} as a repost of ${original.bsky_uri}.`,
+            twitterId: tweetId,
+            detail: { originalTweetId: originalId, originalUri: original.bsky_uri, repostUri: repost.uri },
+            ...logScope,
+          });
+          recordOutcome(context, tweetId, {
+            status: 'posted',
+            stage: 'repost',
+            reason: `Reposted ${original.bsky_uri}.`,
+            uri: repost.uri,
+            cid: repost.cid,
+          });
+        } catch (err) {
+          const detail = toErrorDetail(err);
+          logEvent({
+            level: 'error',
+            stage: 'bluesky',
+            event: 'tweet.repost.failed',
+            message: `Could not repost ${original.bsky_uri} for retweet ${tweetId}: ${describeErrorDetail(detail)}`,
+            twitterId: tweetId,
+            error: detail,
+            ...logScope,
+          });
+          recordOutcome(context, tweetId, {
+            status: 'failed',
+            stage: 'repost',
+            reason: `Repost failed: ${describeErrorDetail(detail)}`,
+            detail,
+            retryable: detail.retryable ?? true,
+          });
+        }
+        continue;
+      }
+      if (settings.mirrorRetweets && originalId && postQueueService.isQueuedAnywhere(originalId)) {
+        defer(tweetId, 'repost', `Waiting for retweeted tweet ${originalId} to be mirrored so it can be reposted.`);
+        continue;
+      }
+      skip(
+        tweetId,
+        'filter',
+        settings.mirrorRetweets
+          ? 'Retweets are only mirrored as reposts of tweets this instance mirrors.'
+          : 'Retweets are not mirrored for this account.',
+        tweetText,
+        'debug',
+        'tweet.skipped.retweet',
+      );
+      continue;
+    }
+
+    // Edits: X gives an edited tweet a new id, and the timeline then carries
+    // only the new version. Without this check both versions were mirrored.
+    const earlierVersionId = (tweet.versions ?? [])
+      .filter((versionId) => versionId !== tweetId && tweetIdLess(versionId, tweetId))
+      .find((versionId) => {
+        const entry =
+          localProcessedMap[versionId] ??
+          (() => {
+            const record = dbService.getTweet(versionId, bskyIdentifier);
+            return record ? entryFromRecord(record) : undefined;
+          })();
+        return Boolean(entry?.migrated && entry.uri);
+      });
+    if (earlierVersionId) {
+      if (settings.editMode !== 'replace') {
+        skip(
+          tweetId,
+          'edit',
+          `Edited version of tweet ${earlierVersionId}, which is already mirrored (edit mode: skip).`,
+          tweetText,
+          'info',
+          'tweet.skipped.edit',
+        );
+        continue;
+      }
+      const previous =
+        localProcessedMap[earlierVersionId] ??
+        entryFromRecord(dbService.getTweet(earlierVersionId, bskyIdentifier) as ProcessedTweet);
+      const staleUris = [...new Set([...(previous.chunkUris ?? []), previous.uri, previous.tail?.uri])].filter(
+        (uri): uri is string => Boolean(uri),
+      );
+      if (!dryRun) {
+        for (const uri of staleUris) {
+          try {
+            await withTimeout(agent.deletePost(uri), 60_000, 'Delete request timed out after 60s');
+          } catch (err) {
+            logEvent({
+              level: 'warn',
+              stage: 'bluesky',
+              event: 'tweet.edit.delete-failed',
+              message: `Could not delete ${uri} while replacing edited tweet ${earlierVersionId}.`,
+              twitterId: tweetId,
+              error: toErrorDetail(err),
+              ...logScope,
+            });
+          }
+        }
+        dbService.markDeleted(earlierVersionId, bskyIdentifier);
+        localProcessedMap[earlierVersionId] = { status: 'deleted', text: previous.text };
+      }
       logEvent({
-        level: 'debug',
+        level: 'info',
         stage: 'post',
-        event: 'tweet.skipped.retweet',
-        message: `Skipped tweet ${tweetId}: ${reason}`,
+        event: 'tweet.edit.replacing',
+        message: `Tweet ${tweetId} is an edit of ${earlierVersionId}; ${dryRun ? 'would replace' : 'replaced'} the earlier mirror (${staleUris.length} post(s)).`,
         twitterId: tweetId,
+        detail: { earlierVersionId, deletedUris: staleUris },
         ...logScope,
       });
-      recordOutcome(context, tweetId, { status: 'skipped', stage: 'filter', reason });
-      if (!dryRun) {
-        // Save as skipped so we don't check it again
-        saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, { skipped: true, text: tweet.text });
-        localProcessedMap[tweetId] = { skipped: true, text: tweet.text };
-      }
-      continue;
     }
 
     logEvent({
@@ -1421,7 +1831,7 @@ async function processTweets(
       twitterId: tweetId,
       ...logScope,
     });
-    updateJob(mirrorJobId, {
+    reportJob(mirrorJobId, {
       kind: 'mirroring',
       account: twitterUsername,
       target: bskyIdentifier,
@@ -1429,7 +1839,7 @@ async function processTweets(
       processedCount: mirroredCount,
       totalCount: toProcess.length,
     });
-    updateAppStatus({
+    reportStatus({
       state: 'processing',
       currentAccount: twitterUsername,
       processedCount: count,
@@ -1439,147 +1849,143 @@ async function processTweets(
 
     const replyStatusId = tweet.in_reply_to_status_id_str || tweet.in_reply_to_status_id;
     const replyUserId = tweet.in_reply_to_user_id_str || tweet.in_reply_to_user_id;
-    const tweetText = tweet.full_text || tweet.text || '';
-    const isReply = !!replyStatusId || !!replyUserId || tweetText.trim().startsWith('@');
+    // Reply fields only: a standalone tweet that merely starts with "@nasa" is
+    // not a reply, and treating it as one silently dropped it.
+    const isReply = Boolean(replyStatusId || replyUserId);
 
     let replyParentInfo: ProcessedTweetEntry | null = null;
 
     if (isReply) {
-      if (replyStatusId && localProcessedMap[replyStatusId]) {
-        console.log(`[${twitterUsername}] 🧵 Threading reply to post in ${bskyIdentifier}: ${replyStatusId}`);
-        replyParentInfo = localProcessedMap[replyStatusId] ?? null;
-      } else if (replyStatusId) {
-        // Parent missing from local batch/DB. Attempt to fetch it if it's a self-thread.
-        // We assume it's a self-thread if we don't have it, but we'll verify author after fetch.
-        console.log(`[${twitterUsername}] 🕵️ Parent ${replyStatusId} missing. Checking if backfillable...`);
-
-        let parentBackfilled = false;
-        let parentLookupError: ErrorDetail | undefined;
-        try {
-          const scraper = await getTwitterScraper(sessionKey);
-          if (scraper) {
-            await acquireScraperSlot();
-            const parentRaw = await scraper.getTweet(replyStatusId);
-            if (parentRaw) {
-              const parentTweet = mapScraperTweetToLocalTweet(parentRaw);
-              const parentAuthor = parentTweet.user?.screen_name;
-
-              if (parentAuthor?.toLowerCase() === twitterUsername.toLowerCase()) {
-                console.log(`[${twitterUsername}] 🔄 Parent is ours (@${parentAuthor}). Backfilling parent first...`);
-                addTweetsToMap(tweetMap, [parentTweet]);
-                // Recursively process the parent. The nested run gets its own
-                // outcome map so a parent's fate never overwrites the child's
-                // entry in the caller's map.
-                await processTweets(
-                  agent,
-                  twitterUsername,
-                  bskyIdentifier,
-                  [parentTweet],
-                  dryRun,
-                  localProcessedMap,
-                  tweetMap,
-                  sessionKey,
-                  { ...context, outcomes: new Map<string, TweetOutcome>() },
-                );
-
-                // Check if it was saved
-                const savedParent = dbService.getTweet(replyStatusId, bskyIdentifier);
-                if (savedParent && savedParent.status === 'migrated') {
-                  // Update local map
-                  localProcessedMap[replyStatusId] = {
-                    uri: savedParent.bsky_uri,
-                    cid: savedParent.bsky_cid,
-                    root:
-                      savedParent.bsky_root_uri && savedParent.bsky_root_cid
-                        ? { uri: savedParent.bsky_root_uri, cid: savedParent.bsky_root_cid }
-                        : undefined,
-                    tail:
-                      savedParent.bsky_tail_uri && savedParent.bsky_tail_cid
-                        ? { uri: savedParent.bsky_tail_uri, cid: savedParent.bsky_tail_cid }
-                        : undefined,
-                    migrated: true,
-                  };
-                  replyParentInfo = localProcessedMap[replyStatusId] ?? null;
-                  parentBackfilled = true;
-                  console.log(`[${twitterUsername}] ✅ Parent backfilled. Resuming thread.`);
-                }
-              } else {
-                console.log(`[${twitterUsername}] ⏩ Parent is by @${parentAuthor}. Skipping external reply.`);
-              }
-            }
-          }
-        } catch (e) {
-          parentLookupError = toErrorDetail(e);
-          logEvent({
-            level: 'warn',
-            stage: 'twitter',
-            event: 'thread.parent-lookup.failed',
-            message: `Could not fetch parent tweet ${replyStatusId} while threading ${tweetId}.`,
-            twitterId: tweetId,
-            error: parentLookupError,
-            detail: { parentTweetId: replyStatusId },
-            ...logScope,
-          });
-        }
-
-        if (!parentBackfilled) {
-          // Distinguish "this reply is genuinely external" from "we could not
-          // reach Twitter to find out" — the first is a permanent skip, the
-          // second is a transient failure that shouldn't silently discard a
-          // tweet that belongs in the thread.
-          const reason = parentLookupError
-            ? `Parent tweet ${replyStatusId} could not be fetched (${describeErrorDetail(parentLookupError)}); treated as an external reply.`
-            : `Parent tweet ${replyStatusId} is not ours or no longer exists, so this reply is external.`;
-          logEvent({
-            level: parentLookupError ? 'warn' : 'debug',
-            stage: 'post',
-            event: 'tweet.skipped.external-reply',
-            message: `Skipped tweet ${tweetId}: ${reason}`,
-            twitterId: tweetId,
-            error: parentLookupError,
-            detail: { parentTweetId: replyStatusId },
-            ...logScope,
-          });
-          recordOutcome(context, tweetId, {
-            status: 'skipped',
-            stage: 'thread',
-            reason,
-            detail: parentLookupError,
-          });
-          if (!dryRun) {
-            saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, { skipped: true, text: tweetText });
-            localProcessedMap[tweetId] = { skipped: true, text: tweetText };
-          }
+      const localParent = replyStatusId ? localProcessedMap[replyStatusId] : undefined;
+      if (replyStatusId && localParent) {
+        if (localParent.migrated && localParent.uri && localParent.cid) {
+          console.log(`[${twitterUsername}] 🧵 Threading reply to post in ${bskyIdentifier}: ${replyStatusId}`);
+          replyParentInfo = localParent;
+        } else {
+          // The parent is in the history but was not posted (a reply to someone
+          // else, a retweet, an empty shell). Posting this reply anyway put it
+          // on the timeline as a standalone post with no context.
+          skip(
+            tweetId,
+            'thread',
+            `Parent tweet ${replyStatusId} was not mirrored (${localParent.status ?? 'skipped'}), so this reply would appear without its context.`,
+            tweetText,
+            'debug',
+            'tweet.skipped.unmirrored-parent',
+          );
           continue;
         }
-      } else {
-        const reason = 'Reply has no parent tweet id (reply to a user, not a specific post), so it is external.';
-        logEvent({
-          level: 'debug',
-          stage: 'post',
-          event: 'tweet.skipped.external-reply',
-          message: `Skipped tweet ${tweetId}: ${reason}`,
-          twitterId: tweetId,
-          detail: { replyUserId },
-          ...logScope,
-        });
-        recordOutcome(context, tweetId, { status: 'skipped', stage: 'thread', reason });
-        if (!dryRun) {
-          saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, { skipped: true, text: tweetText });
-          localProcessedMap[tweetId] = { skipped: true, text: tweetText };
+      } else if (replyStatusId) {
+        // Another account on this instance may mirror the parent: then this is
+        // a real conversation between two mirrors and threads natively.
+        const mirroredParent = dbService.findMirroredPost(replyStatusId, bskyIdentifier);
+        const isOwnParent = mirroredParent?.bsky_identifier === bskyIdentifier.toLowerCase();
+        if (mirroredParent && (isOwnParent || settings.mirrorRepliesToMirrors)) {
+          console.log(
+            `[${twitterUsername}] 💬 Replying natively to ${mirroredParent.bsky_identifier}'s mirror of ${replyStatusId}`,
+          );
+          replyParentInfo = entryFromRecord(mirroredParent);
+        } else if (
+          postQueueService.isQueuedAnywhere(replyStatusId, settings.mirrorRepliesToMirrors ? undefined : bskyIdentifier)
+        ) {
+          // The parent is still waiting to post. Try again once it has, rather
+          // than fetching it from Twitter or posting the reply out of order.
+          defer(tweetId, 'thread', `Waiting for parent tweet ${replyStatusId} to be mirrored first.`);
+          continue;
+        } else {
+          // Parent missing from local batch/DB. Attempt to fetch it if it's a self-thread.
+          console.log(`[${twitterUsername}] 🕵️ Parent ${replyStatusId} missing. Checking if backfillable...`);
+
+          let parentBackfilled = false;
+          let parentLookupError: ErrorDetail | undefined;
+          try {
+            const scraper = await getTwitterScraper(sessionKey);
+            if (scraper) {
+              const parentRaw = await scraper.getTweet(replyStatusId);
+              if (parentRaw) {
+                const parentTweet = mapScraperTweetToLocalTweet(parentRaw);
+                const parentAuthor = parentTweet.user?.screen_name;
+
+                if (parentAuthor?.toLowerCase() === twitterUsername.toLowerCase()) {
+                  console.log(`[${twitterUsername}] 🔄 Parent is ours (@${parentAuthor}). Backfilling parent first...`);
+                  addTweetsToMap(tweetMap, [parentTweet]);
+                  // Recursively process the parent. The nested run gets its own
+                  // outcome map so a parent's fate never overwrites the child's
+                  // entry in the caller's map.
+                  await processTweets(
+                    agent,
+                    twitterUsername,
+                    bskyIdentifier,
+                    [parentTweet],
+                    dryRun,
+                    localProcessedMap,
+                    tweetMap,
+                    sessionKey,
+                    { ...context, outcomes: new Map<string, TweetOutcome>() },
+                  );
+
+                  const savedParent = dbService.getTweet(replyStatusId, bskyIdentifier);
+                  if (savedParent && savedParent.status === 'migrated') {
+                    localProcessedMap[replyStatusId] = entryFromRecord(savedParent);
+                    replyParentInfo = localProcessedMap[replyStatusId] ?? null;
+                    parentBackfilled = true;
+                    console.log(`[${twitterUsername}] ✅ Parent backfilled. Resuming thread.`);
+                  }
+                } else {
+                  console.log(`[${twitterUsername}] ⏩ Parent is by @${parentAuthor}. Skipping external reply.`);
+                }
+              }
+            }
+          } catch (e) {
+            parentLookupError = toErrorDetail(e);
+            logEvent({
+              level: 'warn',
+              stage: 'twitter',
+              event: 'thread.parent-lookup.failed',
+              message: `Could not fetch parent tweet ${replyStatusId} while threading ${tweetId}.`,
+              twitterId: tweetId,
+              error: parentLookupError,
+              detail: { parentTweetId: replyStatusId },
+              ...logScope,
+            });
+          }
+
+          if (!parentBackfilled) {
+            // Distinguish "this reply is genuinely external" from "we could not
+            // reach Twitter to find out" — the first is a permanent skip, the
+            // second is a transient failure that shouldn't silently discard a
+            // tweet that belongs in the thread.
+            const reason = parentLookupError
+              ? `Parent tweet ${replyStatusId} could not be fetched (${describeErrorDetail(parentLookupError)}); treated as an external reply.`
+              : `Parent tweet ${replyStatusId} is not ours or no longer exists, so this reply is external.`;
+            skip(
+              tweetId,
+              'thread',
+              reason,
+              tweetText,
+              parentLookupError ? 'warn' : 'debug',
+              'tweet.skipped.external-reply',
+              {
+                detail: parentLookupError,
+              },
+            );
+            continue;
+          }
         }
+      } else {
+        skip(
+          tweetId,
+          'thread',
+          'Reply has no parent tweet id (reply to a user, not a specific post), so it is external.',
+          tweetText,
+          'debug',
+          'tweet.skipped.external-reply',
+        );
         continue;
       }
     }
 
-    // Removed early dryRun continue to allow verifying logic
-
-    let text = tweetText
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'");
+    let text = decodeHtmlEntities(tweetText);
 
     // 1. Link Expansion
     console.log(`[${twitterUsername}] 🔗 Expanding links...`);
@@ -1587,7 +1993,7 @@ async function processTweets(
     for (const urlEntity of urls) {
       const tco = urlEntity.url;
       const expanded = urlEntity.expanded_url;
-      if (tco && expanded) text = text.replace(tco, expanded);
+      if (tco && expanded) text = text.split(tco).join(expanded);
     }
 
     // Fallback: Regex for t.co links (if entities failed or missed one)
@@ -1624,18 +2030,24 @@ async function processTweets(
 
     // 2. Media Handling
     const images: ImageEmbed[] = [];
-    let videoBlob: BlobRef | null = null;
-    let videoAspectRatio: AspectRatio | undefined;
+    const videos: VideoUpload[] = [];
+    // Set when a video could not be carried over: the post then links to the
+    // tweet, as a card with the video's poster frame when nothing else claims
+    // the embed, or as a plain link when something does.
+    let videoFallback: { tweetUrl: string; posterUrl?: string } | null = null;
     const mediaEntities = tweet.extended_entities?.media || tweet.entities?.media || [];
     const mediaLinksToRemove: string[] = [];
     // Media that was present on the tweet but did not make it to Bluesky, with
     // the reason. Surfaces in the log line for the post so a mysteriously
     // text-only mirror can be traced back to the upload that failed.
     const droppedMedia: { type: string; url?: string; reason: string }[] = [];
+    const describeForAlt = () => buildAltTextContext(tweet, tweetText, tweetMap);
+    const tweetUrl = `https://x.com/${twitterUsername}/status/${tweetId}`;
 
     console.log(`[${twitterUsername}] 🖼️ Found ${mediaEntities.length} media entities.`);
 
     for (const media of mediaEntities) {
+      if (context?.signal?.aborted) break;
       if (media.url) {
         mediaLinksToRemove.push(media.url);
         if (media.expanded_url) {
@@ -1648,20 +2060,32 @@ async function processTweets(
       }
 
       let aspectRatio: AspectRatio | undefined;
-      if (media.sizes?.large) {
-        aspectRatio = { width: media.sizes.large.w, height: media.sizes.large.h };
-      } else if (media.original_info) {
+      if (media.original_info?.width && media.original_info?.height) {
         aspectRatio = { width: media.original_info.width, height: media.original_info.height };
+      } else if (media.sizes?.large) {
+        aspectRatio = { width: media.sizes.large.w, height: media.sizes.large.h };
       }
 
       if (media.type === 'photo') {
         const url = media.media_url_https;
         if (!url) continue;
+        if (images.length >= 4) {
+          droppedMedia.push({ type: 'photo', url, reason: 'Bluesky posts carry at most four images.' });
+          continue;
+        }
+        if (context?.skipMediaDownload) {
+          images.push({
+            alt: media.ext_alt_text || '',
+            image: { ref: { toString: () => 'preview-blob' }, mimeType: 'image/jpeg', size: 0 } as any,
+            aspectRatio,
+          });
+          continue;
+        }
         try {
           const highQualityUrl = url.includes('?') ? url.replace('?', ':orig?') : `${url}:orig`;
           console.log(`[${twitterUsername}] 📥 Downloading image (high quality): ${path.basename(highQualityUrl)}`);
-          updateAppStatus({ message: 'Downloading high quality image...' });
-          const { buffer, mimeType } = await downloadMedia(highQualityUrl);
+          reportStatus({ message: 'Downloading high quality image...' });
+          const { buffer, mimeType } = await downloadMedia(highQualityUrl, 120000, context?.signal);
 
           let blob: BlobRef;
           if (dryRun) {
@@ -1671,20 +2095,12 @@ async function processTweets(
             blob = { ref: { toString: () => 'mock-blob' }, mimeType, size: buffer.length } as any;
           } else {
             console.log(`[${twitterUsername}] 📤 Uploading image to Bluesky...`);
-            updateAppStatus({ message: 'Uploading image to Bluesky...' });
+            reportStatus({ message: 'Uploading image to Bluesky...' });
             blob = await uploadToBluesky(agent, buffer, mimeType);
           }
 
-          let altText = media.ext_alt_text;
-          if (!altText && isAltTextConfigured()) {
-            console.log(`[${twitterUsername}] 🤖 Generating alt text via AI provider...`);
-            // Use original tweet text for context, not the modified/cleaned one
-            const altTextContext = buildAltTextContext(tweet, tweetText, tweetMap);
-            altText = await generateAltText(buffer, mimeType, altTextContext);
-            if (altText) console.log(`[${twitterUsername}] ✅ Alt text generated: ${altText.substring(0, 50)}...`);
-          }
-
-          images.push({ alt: altText || 'Image from Twitter', image: blob, aspectRatio });
+          const alt = await resolveImageAlt(media, buffer, mimeType, describeForAlt, twitterUsername);
+          images.push({ alt, image: blob, aspectRatio });
           console.log(`[${twitterUsername}] ✅ Image uploaded.`);
         } catch (err) {
           const detail = toErrorDetail(err);
@@ -1700,10 +2116,15 @@ async function processTweets(
           });
           try {
             console.log(`[${twitterUsername}] 🔄 Retrying with standard quality...`);
-            updateAppStatus({ message: 'Retrying with standard quality...' });
-            const { buffer, mimeType } = await downloadMedia(url);
-            const blob = await uploadToBluesky(agent, buffer, mimeType);
-            images.push({ alt: media.ext_alt_text || 'Image from Twitter', image: blob, aspectRatio });
+            reportStatus({ message: 'Retrying with standard quality...' });
+            const { buffer, mimeType } = await downloadMedia(url, 120000, context?.signal);
+            const blob = dryRun
+              ? ({ ref: { toString: () => 'mock-blob' }, mimeType, size: buffer.length } as any)
+              : await uploadToBluesky(agent, buffer, mimeType);
+            // Same alt-text rules as the first attempt: the fallback used to
+            // skip AI descriptions entirely.
+            const alt = await resolveImageAlt(media, buffer, mimeType, describeForAlt, twitterUsername);
+            images.push({ alt, image: blob, aspectRatio });
             console.log(`[${twitterUsername}] ✅ Image uploaded on retry.`);
           } catch (retryErr) {
             const retryDetail = toErrorDetail(retryErr);
@@ -1725,9 +2146,9 @@ async function processTweets(
       } else if (media.type === 'video' || media.type === 'animated_gif') {
         const variants = media.video_info?.variants || [];
         const duration = media.video_info?.duration_millis || 0;
-        const linkBackToTweet = () => {
-          const tweetUrl = `https://twitter.com/${twitterUsername}/status/${tweetId}`;
-          if (!text.includes(tweetUrl)) text += `\n\nVideo: ${tweetUrl}`;
+        const gif = media.type === 'animated_gif';
+        const fallBack = () => {
+          if (!videoFallback) videoFallback = { tweetUrl, posterUrl: media.media_url_https };
         };
 
         if (duration > MAX_VIDEO_DURATION_MS) {
@@ -1743,7 +2164,7 @@ async function processTweets(
             ...logScope,
           });
           droppedMedia.push({ type: 'video', reason });
-          linkBackToTweet();
+          fallBack();
           continue;
         }
 
@@ -1751,6 +2172,16 @@ async function processTweets(
         // size ceiling with. Each is tried in turn so an oversized download steps
         // down a rung instead of dropping the video entirely.
         const candidates = selectVideoVariants(variants, duration);
+
+        if (candidates.length > 0 && context?.skipMediaDownload) {
+          videos.push({
+            blob: { ref: { toString: () => 'preview-blob' }, mimeType: 'video/mp4', size: 0 } as any,
+            aspectRatio,
+            alt: media.ext_alt_text,
+            gif,
+          });
+          continue;
+        }
 
         if (candidates.length > 0) {
           let uploaded = false;
@@ -1761,8 +2192,8 @@ async function processTweets(
             const hasFallbackVariant = index < candidates.length - 1;
             try {
               console.log(`[${twitterUsername}] 📥 Downloading video: ${videoUrl}`);
-              updateAppStatus({ message: `Downloading video: ${path.basename(videoUrl)}` });
-              const { buffer } = await downloadMedia(videoUrl, 30 * 60 * 1000);
+              reportStatus({ message: `Downloading video: ${path.basename(videoUrl)}` });
+              const { buffer } = await downloadMedia(videoUrl, 30 * 60 * 1000, context?.signal);
 
               if (buffer.length > MAX_VIDEO_UPLOAD_BYTES) {
                 const limitMb = Math.round(MAX_VIDEO_UPLOAD_BYTES / 1024 / 1024);
@@ -1784,20 +2215,21 @@ async function processTweets(
               }
 
               const filename = videoUrl.split('/').pop() || 'video.mp4';
+              let blob: BlobRef;
               if (dryRun) {
                 console.log(
                   `[${twitterUsername}] 🧪 [DRY RUN] Would upload video: ${filename} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`,
                 );
-                videoBlob = {
+                blob = {
                   ref: { toString: () => 'mock-video-blob' },
                   mimeType: 'video/mp4',
                   size: buffer.length,
                 } as any;
               } else {
-                updateAppStatus({ message: 'Uploading video to Bluesky...' });
-                videoBlob = await uploadVideoToBluesky(agent, buffer, filename);
+                reportStatus({ message: 'Uploading video to Bluesky...' });
+                blob = await uploadVideoToBluesky(agent, buffer, filename, context?.signal);
               }
-              videoAspectRatio = aspectRatio;
+              videos.push({ blob, aspectRatio, alt: media.ext_alt_text, gif });
               uploaded = true;
               console.log(`[${twitterUsername}] ✅ Video upload process complete.`);
               break;
@@ -1806,7 +2238,7 @@ async function processTweets(
               // VIDEO_FALLBACK_503 is Bluesky's video service being busy — an
               // expected condition with a working fallback, so it stays at info.
               const expected = videoDetail.message === 'VIDEO_FALLBACK_503';
-              const willRetry = isDownloadFailure(err) && hasFallbackVariant;
+              const willRetry = isDownloadFailure(err) && hasFallbackVariant && !context?.signal?.aborted;
               const outcome = willRetry ? 'trying a lower-bitrate variant' : 'linked back to the tweet instead';
               logEvent({
                 level: expected ? 'info' : 'warn',
@@ -1831,14 +2263,26 @@ async function processTweets(
             }
           }
 
-          if (uploaded) break; // Prioritize first video
-          if (lastFailure) {
-            droppedMedia.push({ type: 'video', url: lastFailure.url, reason: lastFailure.reason });
+          if (!uploaded) {
+            if (lastFailure) {
+              droppedMedia.push({ type: 'video', url: lastFailure.url, reason: lastFailure.reason });
+            }
+            fallBack();
           }
-          linkBackToTweet();
         }
       }
     }
+
+    // The batch was cancelled while media was in flight: stop before posting.
+    if (context?.signal?.aborted) break;
+
+    // One Bluesky post holds either a video or up to four images. Mixed-media
+    // tweets used to lose their photos silently; now the first video leads and
+    // the rest follow as replies directly under it.
+    const primaryVideo = videos[0];
+    const primaryImages = primaryVideo ? [] : images;
+    const extraImages = primaryVideo ? images : [];
+    const extraVideos = videos.slice(1);
 
     // Cleanup text
     for (const link of mediaLinksToRemove) text = text.split(link).join('').trim();
@@ -1855,97 +2299,180 @@ async function processTweets(
     text = text.replace(/\n\s*\n/g, '\n\n').trim();
     text = addTextFallbacks(text);
 
+    const hasMedia = Boolean(primaryVideo) || primaryImages.length > 0;
+
     // 3. Quoting Logic
     let quoteEmbed: { $type: string; record: { uri: string; cid: string } } | null = null;
     let externalQuoteUrl: string | null = null;
-    let linkCard: any = null;
+    let quotedInfo: QuotedTweetInfo | undefined;
+    // biome-ignore lint/suspicious/noExplicitAny: app.bsky.embed.external payload
+    let cardEmbed: any = null;
+    const quoteId = tweet.is_quote_status ? tweet.quoted_status_id_str : undefined;
 
-    if (tweet.is_quote_status && tweet.quoted_status_id_str) {
-      const quoteId = tweet.quoted_status_id_str;
-      const quoteRef = localProcessedMap[quoteId];
-      if (quoteRef?.uri && quoteRef.cid) {
-        console.log(`[${twitterUsername}] 🔄 Found quoted tweet in local history. Natively embedding.`);
-        quoteEmbed = { $type: 'app.bsky.embed.record', record: { uri: quoteRef.uri, cid: quoteRef.cid } };
-      } else {
-        const quoteUrlEntity = urls.find((u) => u.expanded_url?.includes(quoteId));
-        const qUrl = quoteUrlEntity?.expanded_url || `https://twitter.com/i/status/${quoteId}`;
-
-        // Check if it's a self-quote (same user)
-        const isSelfQuote =
-          qUrl.toLowerCase().includes(`twitter.com/${twitterUsername.toLowerCase()}/`) ||
-          qUrl.toLowerCase().includes(`x.com/${twitterUsername.toLowerCase()}/`);
-
-        if (!isSelfQuote) {
-          externalQuoteUrl = qUrl;
-          console.log(`[${twitterUsername}] 🔗 Quoted tweet is external: ${externalQuoteUrl}`);
-
-          // Try to capture screenshot for external QTs if we have space for images
-          if (images.length < 4 && !videoBlob) {
-            const ssResult = await captureTweetScreenshot(externalQuoteUrl);
-            if (ssResult) {
-              try {
-                let blob: BlobRef;
-                if (dryRun) {
-                  console.log(
-                    `[${twitterUsername}] 🧪 [DRY RUN] Would upload screenshot for quote (${(ssResult.buffer.length / 1024).toFixed(2)} KB)`,
-                  );
-                  blob = {
-                    ref: { toString: () => 'mock-ss-blob' },
-                    mimeType: 'image/png',
-                    size: ssResult.buffer.length,
-                  } as any;
-                } else {
-                  blob = await uploadToBluesky(agent, ssResult.buffer, 'image/png');
-                }
-                images.push({
-                  alt: `Quote Tweet: ${externalQuoteUrl}`,
-                  image: blob,
-                  aspectRatio: { width: ssResult.width, height: ssResult.height },
-                });
-              } catch (e) {
-                console.warn(`[${twitterUsername}] ⚠️ Failed to upload screenshot blob.`);
-              }
-            }
-          }
-        } else {
-          console.log(`[${twitterUsername}] 🔁 Quoted tweet is a self-quote, skipping link.`);
+    const removeStatusLinks = (id: string) => {
+      for (const urlEntity of urls) {
+        const expanded = urlEntity.expanded_url;
+        if (expanded && parseTweetStatusUrl(expanded)?.id === id) {
+          text = text.split(expanded).join('').replace(/\s\s+/g, ' ').trim();
         }
       }
-    } else if ((images.length === 0 && !videoBlob) || isSponsoredCard) {
+    };
+
+    if (quoteId) {
+      // Quoted tweet mirrored anywhere on this instance — by this account or
+      // another — embeds natively.
+      const localRef = localProcessedMap[quoteId];
+      const ref =
+        localRef?.migrated && localRef.uri && localRef.cid
+          ? { uri: localRef.uri, cid: localRef.cid }
+          : (() => {
+              const row = dbService.findMirroredPost(quoteId, bskyIdentifier);
+              return row?.bsky_uri && row.bsky_cid ? { uri: row.bsky_uri, cid: row.bsky_cid } : null;
+            })();
+      if (ref) {
+        console.log(`[${twitterUsername}] 🔄 Quoted tweet is mirrored on this instance. Natively embedding.`);
+        quoteEmbed = { $type: 'app.bsky.embed.record', record: ref };
+        removeStatusLinks(quoteId);
+      } else {
+        const quoteUrlEntity = urls.find((u) => u.expanded_url && parseTweetStatusUrl(u.expanded_url)?.id === quoteId);
+        quotedInfo = tweet.quoted_status?.id === quoteId ? tweet.quoted_status : undefined;
+        externalQuoteUrl = (
+          quoteUrlEntity?.expanded_url ||
+          quotedInfo?.url ||
+          `https://x.com/i/status/${quoteId}`
+        ).replace(/^https?:\/\/(www\.|mobile\.)?twitter\.com\//, 'https://x.com/');
+        console.log(`[${twitterUsername}] 🔗 Quoted tweet is not on Bluesky: ${externalQuoteUrl}`);
+      }
+    }
+
+    // Links to tweets that are mirrored here point at the Bluesky copy instead
+    // of sending readers back to X. A single such link, with nothing else to
+    // embed, becomes a native quote.
+    const statusLinkRewrites: { from: string; to: string; uri: string; cid: string }[] = [];
+    for (const urlEntity of urls) {
+      const expanded = urlEntity.expanded_url;
+      if (!expanded) continue;
+      const ref = parseTweetStatusUrl(expanded);
+      if (!ref || ref.id === quoteId || ref.id === tweetId) continue;
+      const row = dbService.findMirroredPost(ref.id, bskyIdentifier);
+      const to = row ? mirroredPostUrl(row) : null;
+      if (row?.bsky_uri && row.bsky_cid && to) {
+        statusLinkRewrites.push({ from: expanded, to, uri: row.bsky_uri, cid: row.bsky_cid });
+      }
+    }
+    if (!quoteEmbed && !externalQuoteUrl && !hasMedia && statusLinkRewrites.length === 1) {
+      const only = statusLinkRewrites[0] as (typeof statusLinkRewrites)[number];
+      quoteEmbed = { $type: 'app.bsky.embed.record', record: { uri: only.uri, cid: only.cid } };
+      text = text.split(only.from).join('').replace(/\s\s+/g, ' ').trim();
+    } else {
+      for (const rewrite of statusLinkRewrites) text = text.split(rewrite.from).join(rewrite.to);
+    }
+    const rewrittenTargets = new Set(statusLinkRewrites.map((rewrite) => rewrite.from));
+
+    if (externalQuoteUrl && hasMedia) {
+      // The embed slot holds this tweet's own media, so the quote cannot be a
+      // card. A screenshot rides along as an extra image when a browser exists.
+      let screenshotAdded = false;
+      if (primaryImages.length < 4 && !primaryVideo && !context?.skipMediaDownload) {
+        const ssResult = await captureTweetScreenshot(externalQuoteUrl);
+        if (ssResult) {
+          try {
+            const blob = dryRun
+              ? ({
+                  ref: { toString: () => 'mock-ss-blob' },
+                  mimeType: 'image/png',
+                  size: ssResult.buffer.length,
+                } as any)
+              : await uploadToBluesky(agent, ssResult.buffer, 'image/png');
+            primaryImages.push({
+              alt: quotedInfo?.text
+                ? truncateText(
+                    `Quoted post by @${quotedInfo.username ?? 'unknown'}: ${decodeHtmlEntities(quotedInfo.text)}`,
+                    1000,
+                  )
+                : `Screenshot of the quoted post ${externalQuoteUrl}`,
+              image: blob,
+              aspectRatio: { width: ssResult.width, height: ssResult.height },
+            });
+            screenshotAdded = true;
+          } catch {
+            console.warn(`[${twitterUsername}] ⚠️ Failed to upload screenshot blob.`);
+          }
+        }
+      }
+      if (!screenshotAdded && !text.includes(externalQuoteUrl)) text += `\n\nQT: ${externalQuoteUrl}`;
+    } else if (!quoteEmbed && videoFallback && !hasMedia) {
+      // A video that could not be uploaded: a card with its poster frame reads
+      // like media on Bluesky; a bare "Video: <url>" line did not.
+      const fallback = videoFallback as { tweetUrl: string; posterUrl?: string };
+      const thumb = await uploadCardThumb(agent, fallback.posterUrl, dryRun, context);
+      cardEmbed = {
+        $type: 'app.bsky.embed.external',
+        external: {
+          uri: fallback.tweetUrl,
+          title: `Video from @${twitterUsername} on X`,
+          description: 'This video could not be copied to Bluesky. Watch it on X.',
+          ...(thumb ? { thumb } : {}),
+        },
+      };
+    } else if (externalQuoteUrl && !quoteEmbed) {
+      if (quotedInfo) {
+        // The quoted tweet is not on Bluesky, but the timeline already told us
+        // what it says: show it as a card rather than a bare "QT:" link.
+        const thumb = await uploadCardThumb(agent, quotedInfo.imageUrl, dryRun, context);
+        const author = quotedInfo.username ? `@${quotedInfo.username}` : 'a post';
+        cardEmbed = {
+          $type: 'app.bsky.embed.external',
+          external: {
+            uri: externalQuoteUrl,
+            title: quotedInfo.name && quotedInfo.username ? `${quotedInfo.name} (${author}) on X` : `${author} on X`,
+            description: truncateText(
+              decodeHtmlEntities(quotedInfo.text ?? '')
+                .replace(/https:\/\/t\.co\/\S+/g, '')
+                .trim(),
+              300,
+            ),
+            ...(thumb ? { thumb } : {}),
+          },
+        };
+        removeStatusLinks(quoteId as string);
+      } else if (!text.includes(externalQuoteUrl)) {
+        text += `\n\nQT: ${externalQuoteUrl}`;
+      }
+    }
+
+    if (videoFallback && !cardEmbed) {
+      const fallback = videoFallback as { tweetUrl: string; posterUrl?: string };
+      if (!text.includes(fallback.tweetUrl)) text += `\n\nVideo: ${fallback.tweetUrl}`;
+    }
+
+    // biome-ignore lint/suspicious/noExplicitAny: app.bsky.embed.external payload
+    let linkCard: any = null;
+    if (!quoteEmbed && !cardEmbed && !externalQuoteUrl && (!hasMedia || isSponsoredCard)) {
       // If no media and no quote, check for external links to embed
       // We prioritize the LAST link found as it's often the main content
       const potentialLinks = urls
         .map((u) => u.expanded_url)
-        .filter((u) => u && !u.includes('twitter.com') && !u.includes('x.com')) as string[];
+        .filter((u): u is string => Boolean(u) && !isTwitterUrl(u as string) && !rewrittenTargets.has(u as string));
 
-      if (potentialLinks.length > 0) {
-        const linkToEmbed = potentialLinks[potentialLinks.length - 1];
-        if (linkToEmbed) {
-          // Optimization: If text is too long, but removing the link makes it fit, do it!
-          // The link will be present in the embed card anyway.
-          if (text.length > 300 && text.includes(linkToEmbed)) {
-            const lengthWithoutLink = text.length - linkToEmbed.length;
-            // Allow some buffer (e.g. whitespace cleanup might save 1-2 chars)
-            if (lengthWithoutLink <= 300) {
-              console.log(
-                `[${twitterUsername}] 📏 Optimizing: Removing link ${linkToEmbed} from text to avoid threading (Card will embed it).`,
-              );
-              text = text.replace(linkToEmbed, '').trim();
-              // Clean up potential double punctuation/spaces left behind
-              text = text.replace(/\s\.$/, '.').replace(/\s\s+/g, ' ');
-            }
+      const linkToEmbed = potentialLinks[potentialLinks.length - 1];
+      if (linkToEmbed) {
+        // Optimization: If text is too long, but removing the link makes it fit, do it!
+        // The link will be present in the embed card anyway.
+        if (graphemeLength(text) > BSKY_POST_LIMIT && text.includes(linkToEmbed)) {
+          const withoutLink = text.replace(linkToEmbed, '').trim();
+          if (graphemeLength(withoutLink) <= BSKY_POST_LIMIT) {
+            console.log(
+              `[${twitterUsername}] 📏 Optimizing: Removing link ${linkToEmbed} from text to avoid threading (Card will embed it).`,
+            );
+            // Clean up potential double punctuation/spaces left behind
+            text = withoutLink.replace(/\s\.$/, '.').replace(/\s\s+/g, ' ');
           }
-
-          console.log(`[${twitterUsername}] 🃏 Fetching link card for: ${linkToEmbed}`);
-          linkCard = await fetchEmbedUrlCard(agent, linkToEmbed);
         }
-      }
-    }
 
-    // Only append link for external quotes IF we couldn't natively embed it OR screenshot it
-    const hasScreenshot = images.some((img) => img.alt.startsWith('Quote Tweet:'));
-    if (externalQuoteUrl && !quoteEmbed && !hasScreenshot && !text.includes(externalQuoteUrl)) {
-      text += `\n\nQT: ${externalQuoteUrl}`;
+        console.log(`[${twitterUsername}] 🃏 Fetching link card for: ${linkToEmbed}`);
+        linkCard = await fetchEmbedUrlCard(agent, linkToEmbed);
+      }
     }
 
     if (isSponsoredCard) {
@@ -1957,10 +2484,7 @@ async function processTweets(
 
     // Polls can't be mirrored on Bluesky — point readers at the original tweet.
     // If this pushes the text over the limit, splitText threads it automatically.
-    const pollUrl = (tweet.permanentUrl || `https://x.com/${twitterUsername}/status/${tweetId}`).replace(
-      'twitter.com',
-      'x.com',
-    );
+    const pollUrl = (tweet.permanentUrl || tweetUrl).replace('twitter.com', 'x.com');
     const pollNote = buildPollNote(tweet.card, pollUrl);
     if (pollNote && !text.includes(pollUrl)) {
       console.log(`[${twitterUsername}] 📊 Poll detected. Linking back to the original tweet.`);
@@ -1968,15 +2492,14 @@ async function processTweets(
     }
 
     // 4. Threading and Posting
-    const hasEmbed = Boolean(videoBlob) || images.length > 0 || Boolean(quoteEmbed) || Boolean(linkCard);
+    const hasEmbed = hasMedia || Boolean(quoteEmbed) || Boolean(cardEmbed) || Boolean(linkCard);
+    const extraMediaCount = (extraImages.length > 0 ? 1 : 0) + extraVideos.length;
 
     // A post with neither text nor an embed is rejected by every PDS, so it can
     // never succeed no matter how many times it is retried. This happens for
     // real: a media-only tweet whose t.co links get stripped during cleanup and
-    // whose upload then fails leaves an empty record behind. Previously such a
-    // tweet burned all eight attempts across ~12 hours of backoff and was
-    // parked as "failed" with no explanation. Record it as a skip with the
-    // actual reason instead.
+    // whose upload then fails leaves an empty record behind. Record it as a
+    // skip with the actual reason instead of burning the retry budget.
     if (text.trim().length === 0 && !hasEmbed) {
       const reason =
         droppedMedia.length > 0
@@ -1984,29 +2507,29 @@ async function processTweets(
               .map((entry) => `${entry.type}: ${entry.reason}`)
               .join('; ')}).`
           : 'Nothing left to post: the tweet had no text and no embeddable media.';
-      logEvent({
-        level: 'warn',
-        stage: 'post',
-        event: 'tweet.skipped.empty',
-        message: `Skipped tweet ${tweetId}: ${reason}`,
-        twitterId: tweetId,
-        detail: { droppedMedia, originalText: tweetText.slice(0, 200), mediaEntities: mediaEntities.length },
-        ...logScope,
-      });
-      recordOutcome(context, tweetId, {
-        status: 'skipped',
-        stage: 'compose',
-        reason,
+      skip(tweetId, 'compose', reason, tweetText, 'warn', 'tweet.skipped.empty', {
         durationMs: Date.now() - tweetStartedAt,
       });
-      if (!dryRun) {
-        saveProcessedTweet(twitterUsername, bskyIdentifier, tweetId, { skipped: true, text: tweetText });
-        localProcessedMap[tweetId] = { skipped: true, text: tweetText };
-      }
       continue;
     }
 
+    // Twitter's own language verdict, once per tweet. Per-chunk trigram guesses
+    // on 300 characters were wrong often enough to hide posts from readers.
+    const langs = resolvePostLangs(tweet.lang, tweetText);
+    const resolveMirrorDid = await buildMirrorDidResolver(agent, text);
+
     const chunks = splitText(text);
+    context?.onComposed?.({
+      twitterId: tweetId,
+      chunks,
+      images: primaryImages.length,
+      video: Boolean(primaryVideo),
+      quote: Boolean(quoteEmbed) || Boolean(externalQuoteUrl),
+      linkCard: Boolean(linkCard) || Boolean(cardEmbed),
+      isReply,
+      langs,
+      extraMediaPosts: extraMediaCount,
+    });
     logEvent({
       level: 'debug',
       stage: 'post',
@@ -2015,12 +2538,14 @@ async function processTweets(
       twitterId: tweetId,
       detail: {
         chunks: chunks.length,
-        textLength: text.length,
-        images: images.length,
-        video: Boolean(videoBlob),
+        textLength: graphemeLength(text),
+        images: primaryImages.length,
+        video: Boolean(primaryVideo),
         quote: Boolean(quoteEmbed),
-        linkCard: Boolean(linkCard),
+        card: cardEmbed ? 'external' : linkCard ? 'link' : undefined,
         isReply,
+        langs,
+        extraMediaPosts: extraMediaCount,
         droppedMedia: droppedMedia.length > 0 ? droppedMedia : undefined,
       },
       ...logScope,
@@ -2030,84 +2555,110 @@ async function processTweets(
     // Filled in when a chunk fails, so the outcome below can explain exactly
     // which chunk broke and why rather than falling back to a placeholder.
     let postFailure: { detail: ErrorDetail; chunkIndex: number } | null = null;
+    let cancelledBeforePosting = false;
 
     // We will save the first chunk as the "Root" of this tweet, and the last chunk as the "Tail".
     let firstChunkInfo: { uri: string; cid: string; root?: { uri: string; cid: string } } | null = null;
     let lastChunkInfo: { uri: string; cid: string; root?: { uri: string; cid: string } } | null = null;
+    const chunkUris: string[] = [];
 
-    for (let i = 0; i < chunks.length; i++) {
-      let chunk = chunks[i] as string;
+    // A live mirror carries the moment it reaches Bluesky; history (backfills,
+    // and tweets that sat in the queue for hours) keeps the tweet's own time.
+    const parsedCreatedAt = tweet.created_at ? Date.parse(tweet.created_at) : Number.NaN;
+    const tweetAgeMs = Number.isFinite(parsedCreatedAt) ? Date.now() - parsedCreatedAt : Number.POSITIVE_INFINITY;
+    const live = Boolean(context?.isLive?.(tweetId)) && tweetAgeMs <= LIVE_TIMESTAMP_MAX_AGE_MS;
+    const baseCreatedAtMs = live || !Number.isFinite(parsedCreatedAt) ? Date.now() : parsedCreatedAt;
 
-      // Add (i/n) if split
-      if (chunks.length > 1) {
-        chunk += ` (${i + 1}/${chunks.length})`;
+    // One post per chunk, then one per media item that did not fit the first.
+    // biome-ignore lint/suspicious/noExplicitAny: embed payloads
+    const posts: { text: string; embed?: any; label: string }[] = chunks.map((chunk, index) => ({
+      text: chunk,
+      label: `chunk ${index + 1}/${chunks.length}`,
+    }));
+    if (extraImages.length > 0) {
+      posts.push({
+        text: '',
+        embed: { $type: 'app.bsky.embed.images', images: extraImages.slice(0, 4) },
+        label: 'extra images',
+      });
+    }
+    for (const [index, video] of extraVideos.entries()) {
+      posts.push({ text: '', embed: buildVideoEmbed(video), label: `extra video ${index + 1}` });
+    }
+
+    for (let i = 0; i < posts.length; i++) {
+      const post = posts[i] as (typeof posts)[number];
+      const chunk = post.text;
+      const isChunk = i < chunks.length;
+
+      if (context?.signal?.aborted) {
+        if (i === 0) cancelledBeforePosting = true;
+        else postFailure = { detail: { name: 'AbortError', message: 'Batch cancelled mid-thread.' }, chunkIndex: i };
+        break;
       }
 
-      console.log(`[${twitterUsername}] 📤 Posting chunk ${i + 1}/${chunks.length}...`);
-      updateAppStatus({ message: `Posting chunk ${i + 1}/${chunks.length}...` });
+      console.log(`[${twitterUsername}] 📤 Posting ${post.label}...`);
+      reportStatus({ message: `Posting ${post.label}...` });
 
       const rt = new RichText({ text: chunk });
-      try {
-        await withTimeout(rt.detectFacets(agent), 60000, 'Facet detection timed out');
-      } catch (facetErr) {
-        console.warn(
-          `[${twitterUsername}] ⚠️ Facet detection failed, posting with basic text:`,
-          (facetErr as Error).message,
-        );
+      if (chunk.length > 0) {
+        try {
+          await withTimeout(rt.detectFacets(agent), 60000, 'Facet detection timed out');
+        } catch (facetErr) {
+          console.warn(
+            `[${twitterUsername}] ⚠️ Facet detection failed, posting with basic text:`,
+            (facetErr as Error).message,
+          );
+        }
+        rt.facets = addTwitterHandleFacets(
+          rt.text,
+          dropUnresolvedMentions(rt.facets as FacetLike[] | undefined),
+          resolveMirrorDid,
+        ) as typeof rt.facets | undefined;
       }
-      rt.facets = addTwitterHandleLinkFacets(rt.text, rt.facets);
-      const detectedLangs = detectLanguage(chunk);
-
-      // Preserve original timing when available, but enforce monotonic per-account
-      // timestamps to avoid equal-createdAt collisions in fast self-thread replies.
-      const parsedCreatedAt = tweet.created_at ? Date.parse(tweet.created_at) : Number.NaN;
-      const baseCreatedAtMs = Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : Date.now();
-      const chunkCreatedAtMs = baseCreatedAtMs + i * 1000;
 
       // biome-ignore lint/suspicious/noExplicitAny: dynamic record construction
       const postRecord: Record<string, any> = {
         text: rt.text,
         facets: rt.facets,
-        langs: detectedLangs,
         // CID is generated by the PDS from record content; unique createdAt keeps
         // near-simultaneous self-thread posts from colliding on identical payloads.
-        createdAt: getUniqueCreatedAtIso(bskyIdentifier, chunkCreatedAtMs),
+        createdAt: getUniqueCreatedAtIso(bskyIdentifier, baseCreatedAtMs + i * 1000),
       };
+      if (langs && chunk.length > 0) postRecord.langs = langs;
+      if (post.embed) postRecord.embed = post.embed;
 
       if (i === 0) {
-        if (videoBlob) {
-          const videoEmbed: any = {
-            $type: 'app.bsky.embed.video',
-            video: videoBlob,
-          };
-          if (videoAspectRatio) videoEmbed.aspectRatio = videoAspectRatio;
-          if (quoteEmbed) {
-            postRecord.embed = { $type: 'app.bsky.embed.recordWithMedia', media: videoEmbed, record: quoteEmbed };
-          } else {
-            postRecord.embed = videoEmbed;
-          }
-        } else if (images.length > 0) {
-          const imagesEmbed = { $type: 'app.bsky.embed.images', images };
-          if (quoteEmbed) {
-            postRecord.embed = { $type: 'app.bsky.embed.recordWithMedia', media: imagesEmbed, record: quoteEmbed };
-          } else {
-            postRecord.embed = imagesEmbed;
-          }
+        // biome-ignore lint/suspicious/noExplicitAny: embed payloads
+        let media: any = null;
+        if (primaryVideo) media = buildVideoEmbed(primaryVideo);
+        else if (primaryImages.length > 0) media = { $type: 'app.bsky.embed.images', images: primaryImages };
+
+        if (media && quoteEmbed) {
+          postRecord.embed = { $type: 'app.bsky.embed.recordWithMedia', media, record: quoteEmbed };
+        } else if (media) {
+          postRecord.embed = media;
         } else if (quoteEmbed) {
           postRecord.embed = quoteEmbed;
+        } else if (cardEmbed) {
+          postRecord.embed = cardEmbed;
         } else if (linkCard) {
           postRecord.embed = linkCard;
         }
+      }
 
-        if (videoBlob || images.length > 0) {
-          const sensitiveLabels = buildSensitiveLabels(tweet, mediaEntities);
-          if (sensitiveLabels.length > 0) {
-            console.log(`[${twitterUsername}] 🔞 Applying self labels: ${sensitiveLabels.join(', ')}`);
-            postRecord.labels = {
-              $type: 'com.atproto.label.defs#selfLabels',
-              values: sensitiveLabels.map((val) => ({ val })),
-            };
-          }
+      if (postRecord.embed && (i === 0 ? hasMedia : !isChunk)) {
+        const sensitiveLabels = buildSensitiveLabels(
+          mediaEntities,
+          tweet.possibly_sensitive,
+          settings.sensitiveFallbackLabel,
+        );
+        if (sensitiveLabels.length > 0) {
+          console.log(`[${twitterUsername}] 🔞 Applying self labels: ${sensitiveLabels.join(', ')}`);
+          postRecord.labels = {
+            $type: 'com.atproto.label.defs#selfLabels',
+            values: sensitiveLabels.map((val) => ({ val })),
+          };
         }
       }
 
@@ -2141,7 +2692,7 @@ async function processTweets(
         const maxAttempts = 3;
 
         if (dryRun) {
-          console.log(`[${twitterUsername}] 🧪 [DRY RUN] Would post chunk ${i + 1}/${chunks.length}`);
+          console.log(`[${twitterUsername}] 🧪 [DRY RUN] Would post ${post.label}`);
           if (postRecord.embed) console.log(`   - With embed: ${postRecord.embed.$type}`);
           if (postRecord.reply) console.log(`   - As reply to: ${postRecord.reply.parent.uri}`);
           response = { uri: 'at://did:plc:mock/app.bsky.feed.post/mock', cid: 'mock-cid' };
@@ -2156,15 +2707,15 @@ async function processTweets(
               // The old loop retried everything three times. A rejected record
               // (400) or a deleted account (403) fails identically every time,
               // so those three attempts only delayed the real explanation.
-              if (attempt === maxAttempts || attemptDetail.retryable === false) {
+              if (attempt === maxAttempts || attemptDetail.retryable === false || context?.signal?.aborted) {
                 logEvent({
                   level: 'error',
                   stage: 'bluesky',
                   event: 'post.chunk.failed',
                   message:
                     attemptDetail.retryable === false
-                      ? `Bluesky rejected chunk ${i + 1}/${chunks.length} of tweet ${tweetId}; retrying cannot help.`
-                      : `Chunk ${i + 1}/${chunks.length} of tweet ${tweetId} failed after ${maxAttempts} attempts.`,
+                      ? `Bluesky rejected ${post.label} of tweet ${tweetId}; retrying cannot help.`
+                      : `${post.label} of tweet ${tweetId} failed after ${attempt} attempt(s).`,
                   twitterId: tweetId,
                   attempt,
                   durationMs: Date.now() - chunkStartedAt,
@@ -2172,7 +2723,7 @@ async function processTweets(
                   detail: {
                     chunkIndex: i,
                     chunkCount: chunks.length,
-                    chunkLength: chunk.length,
+                    chunkLength: graphemeLength(chunk),
                     embedType: postRecord.embed?.$type,
                     isReply: Boolean(postRecord.reply),
                   },
@@ -2194,8 +2745,8 @@ async function processTweets(
                 stage: 'bluesky',
                 event: ambiguous ? 'post.chunk.retry-ambiguous' : 'post.chunk.retry',
                 message: ambiguous
-                  ? `Chunk ${i + 1}/${chunks.length} of tweet ${tweetId} timed out without a response; retrying in 5s (the first request may still have landed).`
-                  : `Chunk ${i + 1}/${chunks.length} of tweet ${tweetId} failed; retrying in 5s.`,
+                  ? `${post.label} of tweet ${tweetId} timed out without a response; retrying in 5s (the first request may still have landed).`
+                  : `${post.label} of tweet ${tweetId} failed; retrying in 5s.`,
                 twitterId: tweetId,
                 attempt,
                 error: attemptDetail,
@@ -2223,7 +2774,7 @@ async function processTweets(
           // eventually parked as "failed".
           if (!dryRun) {
             try {
-              context?.onPosted?.(tweetId, response.uri, response.cid);
+              context?.onPosted?.(tweetId, response.uri, response.cid, currentPostInfo.root);
             } catch (hookErr) {
               logEvent({
                 level: 'warn',
@@ -2236,7 +2787,14 @@ async function processTweets(
               });
             }
           }
+        } else if (!dryRun) {
+          try {
+            context?.onChunkPosted?.(tweetId, response.uri, response.cid);
+          } catch {
+            // The stamp is a repair aid; the post itself already landed.
+          }
         }
+        chunkUris.push(response.uri);
         lastChunkInfo = currentPostInfo;
         lastPostInfo = currentPostInfo; // Update for next iteration
 
@@ -2244,30 +2802,49 @@ async function processTweets(
           level: 'info',
           stage: 'bluesky',
           event: 'post.chunk.ok',
-          message: `Posted chunk ${i + 1}/${chunks.length} of tweet ${tweetId}.`,
+          message: `Posted ${post.label} of tweet ${tweetId}.`,
           twitterId: tweetId,
           durationMs: Date.now() - chunkStartedAt,
           detail: { uri: response.uri, cid: response.cid, chunkIndex: i, chunkCount: chunks.length },
           ...logScope,
         });
 
-        if (chunks.length > 1) {
-          await new Promise((r) => setTimeout(r, 3000));
+        if (i < posts.length - 1 && !dryRun && THREAD_CHUNK_GAP_MS > 0) {
+          await new Promise((r) => setTimeout(r, THREAD_CHUNK_GAP_MS));
         }
       } catch (err) {
+        if (!isChunk) {
+          // A follow-up media post failing leaves the tweet itself intact.
+          droppedMedia.push({ type: post.label, reason: describeErrorDetail(toErrorDetail(err)) });
+          continue;
+        }
         postFailure = { detail: toErrorDetail(err), chunkIndex: i };
         break;
       }
     }
 
+    if (cancelledBeforePosting) {
+      // Nothing went out for this tweet; no outcome means "not attempted".
+      break;
+    }
+
     // Save to DB and Map
     if (firstChunkInfo && lastChunkInfo) {
+      // Both timestamps are stored so the dashboard can report real mirror lag.
+      // The tweet's own time is only recorded when Twitter gave us a parseable
+      // one; a missing value stays undefined rather than defaulting to now,
+      // which would report a zero delay that never happened.
       const entry: ProcessedTweetEntry = {
         uri: firstChunkInfo.uri,
         cid: firstChunkInfo.cid,
         root: firstChunkInfo.root,
         tail: { uri: lastChunkInfo.uri, cid: lastChunkInfo.cid }, // Save tail!
         text: tweetText,
+        migrated: true,
+        status: 'migrated',
+        chunkUris,
+        tweetCreatedAt: Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : undefined,
+        postedAt: Date.now(),
       };
 
       if (!dryRun) {
@@ -2308,7 +2885,8 @@ async function processTweets(
           cid: entry.cid,
           chunks: chunks.length,
           images: images.length,
-          video: Boolean(videoBlob),
+          video: Boolean(primaryVideo),
+          extraMediaPosts: extraMediaCount,
           droppedMedia: droppedMedia.length > 0 ? droppedMedia : undefined,
         },
         ...logScope,
@@ -2345,7 +2923,7 @@ async function processTweets(
         detail: {
           chunks: chunks.length,
           images: images.length,
-          video: Boolean(videoBlob),
+          video: Boolean(primaryVideo),
           droppedMedia: droppedMedia.length > 0 ? droppedMedia : undefined,
           textPreview: text.slice(0, 200),
         },
@@ -2362,18 +2940,23 @@ async function processTweets(
     }
 
     // Human-like pause between posts. This only delays the current account's
-    // queue worker — other accounts keep posting in parallel.
-    const wait = POST_PACING_MIN_MS + Math.floor(Math.random() * (POST_PACING_MAX_MS - POST_PACING_MIN_MS + 1));
-    console.log(`[${twitterUsername}] 😴 Pacing: Waiting ${wait / 1000}s before next tweet.`);
-    updateJob(mirrorJobId, {
-      message: `Mirrored tweet ${tweetId}. Pacing ${Math.round(wait / 1000)}s before the next one`,
-      processedCount: mirroredCount,
-    });
-    updateAppStatus({ state: 'pacing', message: `Pacing: Waiting ${wait / 1000}s...` });
-    await new Promise((r) => setTimeout(r, wait));
+    // queue worker — other accounts keep posting in parallel. A dry run (the
+    // preview included) posts nothing, so it has nothing to pace.
+    if (!dryRun) {
+      const wait = POST_PACING_MIN_MS + Math.floor(Math.random() * (POST_PACING_MAX_MS - POST_PACING_MIN_MS + 1));
+      if (wait > 0) {
+        console.log(`[${twitterUsername}] 😴 Pacing: Waiting ${wait / 1000}s before next tweet.`);
+        reportJob(mirrorJobId, {
+          message: `Mirrored tweet ${tweetId}. Pacing ${Math.round(wait / 1000)}s before the next one`,
+          processedCount: mirroredCount,
+        });
+        reportStatus({ state: 'pacing', message: `Pacing: Waiting ${wait / 1000}s...` });
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
   }
 
-  updateJob(mirrorJobId, null);
+  reportJob(mirrorJobId, null);
 }
 
 import { getAgent, invalidateAgent } from './bsky.js';
@@ -2394,8 +2977,10 @@ import { getAgent, invalidateAgent } from './bsky.js';
 // ============================================================================
 
 // Filters a fetched timeline down to enqueueable tweets and inserts them.
-// Retweets are recorded as skipped immediately so they never occupy queue
-// space; author-mismatch entries (stray timeline injections) are dropped.
+// Author-mismatch entries (stray timeline injections) are dropped. Retweets
+// only take queue space when they can become a native repost — the original is
+// already mirrored on this instance, or waiting in the queue to be — and are
+// otherwise recorded as skipped on the spot.
 function enqueueTweetsForMapping(
   mapping: AccountMapping,
   twitterUsername: string,
@@ -2404,15 +2989,42 @@ function enqueueTweetsForMapping(
   requestId?: string,
 ): number {
   const inputs = [];
+  let historySkipped = 0;
   for (const tweet of tweets) {
     const tweetId = tweet.id_str || tweet.id;
     if (!tweetId) continue;
     const author = tweet.user?.screen_name?.toLowerCase();
     if (author && author !== twitterUsername.toLowerCase()) continue;
+
+    // "Only new tweets" mappings (and accounts wiped with "delete all posts")
+    // record what was already on the timeline as history instead of posting
+    // it. The pinned tweet is exempt so pin sync still has something to pin;
+    // explicit backfills ignore the cutoff entirely.
+    const createdMs = tweet.created_at ? Date.parse(tweet.created_at) : Number.NaN;
+    if (
+      kind === 'scheduled' &&
+      mapping.mirrorFromMs &&
+      Number.isFinite(createdMs) &&
+      createdMs < mapping.mirrorFromMs &&
+      !tweet.isPin
+    ) {
+      saveProcessedTweet(twitterUsername, mapping.bskyIdentifier, tweetId, { skipped: true, text: tweet.text });
+      historySkipped++;
+      continue;
+    }
+
     const isRetweet = tweet.isRetweet || tweet.retweeted_status_id_str || (tweet.text || '').startsWith('RT @');
     if (isRetweet) {
-      saveProcessedTweet(twitterUsername, mapping.bskyIdentifier, tweetId, { skipped: true, text: tweet.text });
-      continue;
+      const originalId = tweet.retweeted_status_id_str;
+      const repostable =
+        mapping.mirrorRetweets !== false &&
+        Boolean(originalId) &&
+        (Boolean(dbService.findMirroredPost(originalId as string)) ||
+          postQueueService.isQueuedAnywhere(originalId as string));
+      if (!repostable) {
+        saveProcessedTweet(twitterUsername, mapping.bskyIdentifier, tweetId, { skipped: true, text: tweet.text });
+        continue;
+      }
     }
     inputs.push({
       twitter_id: tweetId,
@@ -2425,36 +3037,117 @@ function enqueueTweetsForMapping(
       tweet_text: (tweet.full_text || tweet.text || '').slice(0, 300),
     });
   }
+  if (historySkipped > 0) {
+    logEvent({
+      level: 'info',
+      stage: 'sweep',
+      event: 'account.history-skipped',
+      message: `Recorded ${historySkipped} tweet(s) from @${twitterUsername} as history: they predate this mirror's start point.`,
+      mappingId: mapping.id,
+      bskyIdentifier: mapping.bskyIdentifier,
+      twitterUsername,
+      detail: { historySkipped, mirrorFromMs: mapping.mirrorFromMs },
+    });
+  }
   return postQueueService.enqueue(inputs);
 }
 
+/**
+ * A source account changed its @handle. Fetching by numeric id keeps working
+ * through a rename, so the new name shows up on the account's own tweets for
+ * free; follow it everywhere the old name is stored — config, history, queue,
+ * polling state — so the mirror carries on instead of failing "user not found".
+ */
+function followSourceRename(mapping: AccountMapping, fromUsername: string, toUsername: string): void {
+  const from = fromUsername.toLowerCase();
+  const to = toUsername.toLowerCase();
+  if (!to || from === to) return;
+  updateConfig((config) => {
+    let changed = false;
+    for (const entry of config.mappings) {
+      if (!entry.twitterUsernames.some((username) => username.toLowerCase() === from)) continue;
+      entry.twitterUsernames = [...new Set(entry.twitterUsernames.map((u) => (u.toLowerCase() === from ? to : u)))];
+      if (entry.profileSyncSourceUsername?.toLowerCase() === from) entry.profileSyncSourceUsername = to;
+      changed = true;
+    }
+    return changed;
+  });
+  dbService.renameTwitterUsername(from, to);
+  // Keep the in-memory copy the sweep is holding consistent too.
+  mapping.twitterUsernames = [...new Set(mapping.twitterUsernames.map((u) => (u.toLowerCase() === from ? to : u)))];
+  if (mapping.profileSyncSourceUsername?.toLowerCase() === from) mapping.profileSyncSourceUsername = to;
+  logEvent({
+    level: 'warn',
+    stage: 'sweep',
+    event: 'source.renamed',
+    message: `@${from} is now @${to} on X. The mapping, its history and its queue were updated to follow the rename.`,
+    mappingId: mapping.id,
+    bskyIdentifier: mapping.bskyIdentifier,
+    twitterUsername: to,
+    detail: { from, to },
+  });
+}
+
 // Fetch-only pass over one source account. Returns tweets that are neither in
-// processed_tweets nor already sitting in the queue.
+// processed_tweets nor already sitting in the queue, and the account's current
+// username (which differs from the configured one after a rename).
 async function sweepAccountForNewTweets(
   mapping: AccountMapping,
   twitterUsername: string,
   sessionKey: string,
-): Promise<Tweet[]> {
+): Promise<{ tweets: Tweet[]; username: string }> {
   const seenIds = new Set(Object.keys(loadProcessedTweets(mapping.bskyIdentifier)));
   for (const id of postQueueService.getQueuedIdSet(mapping.bskyIdentifier)) {
     seenIds.add(id);
   }
 
-  const tweets = await fetchUserTweets(twitterUsername, 50, seenIds, sessionKey);
-  if (tweets.length === 0) return [];
+  // The numeric id is learned from the account's own tweets (no extra
+  // request). Once known, fetching by id survives renames and skips the
+  // screen-name lookup the scraper would otherwise make.
+  const knownUserId = sourceActivityService.get(twitterUsername)?.twitter_user_id ?? undefined;
+  const tweets = await fetchUserTweets(twitterUsername, 50, seenIds, sessionKey, {
+    userId: knownUserId,
+    throwOnError: true,
+  });
+
+  let username = twitterUsername;
+  const ownTweets = tweets.filter((tweet) => tweet.user?.screen_name && tweet.user.id_str);
+  if (knownUserId) {
+    const current = ownTweets.find((tweet) => tweet.user?.id_str === knownUserId)?.user?.screen_name;
+    if (current && current.toLowerCase() !== twitterUsername.toLowerCase()) {
+      followSourceRename(mapping, twitterUsername, current);
+      username = current.toLowerCase();
+    }
+  } else {
+    const userId = ownTweets.find((tweet) => tweet.user?.screen_name?.toLowerCase() === twitterUsername.toLowerCase())
+      ?.user?.id_str;
+    if (userId) sourceActivityService.setUserId(twitterUsername, userId);
+  }
+
+  if (tweets.length === 0) return { tweets: [], username };
 
   // The fetched window carries the isPin flag, so pin changes sync for free.
-  await maybeSyncPinnedTweetFromTimeline(mapping, twitterUsername, tweets, false, getMappingLogPrefix(mapping));
+  await maybeSyncPinnedTweetFromTimeline(mapping, username, tweets, false, getMappingLogPrefix(mapping));
 
-  return tweets.filter((tweet) => {
-    const tweetId = tweet.id_str || tweet.id;
-    return Boolean(tweetId) && !seenIds.has(String(tweetId));
-  });
+  return {
+    tweets: tweets.filter((tweet) => {
+      const tweetId = tweet.id_str || tweet.id;
+      return Boolean(tweetId) && !seenIds.has(String(tweetId));
+    }),
+    username,
+  };
 }
 
 // Sweep every enabled source account and enqueue whatever is new. Returns the
 // number of tweets queued.
-async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
+export interface SweepOptions {
+  /** Check every account now, ignoring adaptive-polling intervals ("Run now"). */
+  force?: boolean;
+  /** Check just these mappings' accounts now, ignoring their intervals. */
+  forceMappingIds?: Set<string>;
+}
+
+async function runFetchSweep(mappings: AccountMapping[], options: SweepOptions = {}): Promise<number> {
   const accounts: { mapping: AccountMapping; twitterUsername: string }[] = [];
   for (const mapping of mappings) {
     if (!mapping.enabled) continue;
@@ -2474,23 +3167,70 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
 
   const fetchTimeoutMs = envInt('SWEEP_FETCH_TIMEOUT_MS', 180_000, 30_000, 1_800_000);
   const startedAt = Date.now();
+
+  // Adaptive polling: accounts that have been silent for a while earn a longer
+  // minimum interval, so each sweep spends its fetch budget on the accounts
+  // actually posting. Set ADAPTIVE_POLLING=0 to check everything every sweep.
+  const adaptivePolling = process.env.ADAPTIVE_POLLING !== '0';
+  // Mappings come and go; without this the activity table keeps a row for every
+  // source account ever mirrored.
+  sourceActivityService.pruneMissing(accounts.map((account) => account.twitterUsername));
+  const activity = sourceActivityService.getAll();
+  const isForced = (account: { mapping: AccountMapping }) =>
+    Boolean(options.force) || Boolean(options.forceMappingIds?.has(account.mapping.id));
+  // A manual "Run now" is a request to check now; adaptive tiers must not
+  // quietly decide that an account which just tweeted is not due for an hour.
+  const plan = adaptivePolling
+    ? planSweep(
+        accounts,
+        (account) => activityFromRow(activity.get(account.twitterUsername.toLowerCase())),
+        startedAt,
+        undefined,
+        isForced,
+      )
+    : { due: accounts, skipped: [], tierCounts: {} };
+  const dueAccounts = plan.due;
+
   logEvent({
     level: 'info',
     stage: 'sweep',
     event: 'sweep.start',
-    message: `Checking ${accounts.length} source account(s) with a concurrency of ${FETCH_CONCURRENCY}.`,
-    detail: { accounts: accounts.length, concurrency: FETCH_CONCURRENCY, fetchTimeoutMs },
+    message: adaptivePolling
+      ? `Checking ${dueAccounts.length} of ${accounts.length} source account(s) with a concurrency of ${FETCH_CONCURRENCY}; ${plan.skipped.length} not due yet.`
+      : `Checking ${accounts.length} source account(s) with a concurrency of ${FETCH_CONCURRENCY}.`,
+    detail: {
+      forced: options.force ? 'all' : options.forceMappingIds ? [...options.forceMappingIds] : undefined,
+      accounts: dueAccounts.length,
+      totalAccounts: accounts.length,
+      skipped: plan.skipped.length,
+      tiers: plan.tierCounts,
+      adaptivePolling,
+      concurrency: FETCH_CONCURRENCY,
+      fetchTimeoutMs,
+    },
   });
+
+  if (dueAccounts.length === 0) {
+    logEvent({
+      level: 'info',
+      stage: 'sweep',
+      event: 'sweep.completed',
+      message: 'No source accounts were due for a check this sweep.',
+      durationMs: Date.now() - startedAt,
+      detail: { accountsChecked: 0, queued: 0, skipped: plan.skipped.length },
+    });
+    return 0;
+  }
 
   let cursor = 0;
   let enqueuedTotal = 0;
-  const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, accounts.length) }, async (_, slot) => {
+  const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, dueAccounts.length) }, async (_, slot) => {
     const sessionKey = `sweep-${slot + 1}`;
     while (true) {
       const index = cursor;
       cursor += 1;
-      if (index >= accounts.length) break;
-      const ref = accounts[index];
+      if (index >= dueAccounts.length) break;
+      const ref = dueAccounts[index];
       if (!ref) continue;
       const { mapping, twitterUsername } = ref;
       const checkJobId = `check:${mapping.id}:${twitterUsername.toLowerCase()}`;
@@ -2509,16 +3249,20 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
           mappingId: mapping.id,
           message: 'Checking for new tweets',
         });
-        const fresh = await withTimeout(
+        const swept = await withTimeout(
           sweepAccountForNewTweets(mapping, twitterUsername, sessionKey),
           fetchTimeoutMs,
           `Timeline fetch for @${twitterUsername} exceeded its ${Math.round(fetchTimeoutMs / 1000)}s watchdog`,
         );
+        const fresh = swept.tweets;
         let inserted = 0;
         if (fresh.length > 0) {
-          inserted = enqueueTweetsForMapping(mapping, twitterUsername, fresh, 'scheduled');
+          inserted = enqueueTweetsForMapping(mapping, swept.username, fresh, 'scheduled');
           enqueuedTotal += inserted;
         }
+        // Drives the next sweep's tiering. `fresh` rather than `inserted`: a
+        // tweet deduped against the queue still proves the account is posting.
+        sourceActivityService.recordCheck(swept.username, fresh.length > 0);
         logEvent({
           level: 'info',
           stage: 'sweep',
@@ -2535,6 +3279,9 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
         });
       } catch (err) {
         const detail = toErrorDetail(err);
+        // Kept on the source row so the dashboard shows a renamed, suspended
+        // or protected account as failing, not as one that went quiet.
+        sourceActivityService.recordError(twitterUsername, describeErrorDetail(detail));
         logEvent({
           level: 'error',
           stage: 'sweep',
@@ -2563,6 +3310,12 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
       console.error(`${logPrefix} ❌ Daily sync failed: ${describeError(err)}`);
     }
   }
+  try {
+    await runDeleteSyncPass(mappings);
+    await refreshDiscoveryDaily();
+  } catch (err) {
+    console.error(`[Scheduler] ❌ Housekeeping failed: ${describeError(err)}`);
+  }
 
   const counts = postQueueService.getCounts();
   logEvent({
@@ -2570,11 +3323,13 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
     stage: 'sweep',
     event: 'sweep.completed',
     message:
-      `Swept ${accounts.length} account(s) in ${formatDurationMs(Date.now() - startedAt)}; queued ${enqueuedTotal} new tweet(s). ` +
+      `Swept ${dueAccounts.length} of ${accounts.length} account(s) in ${formatDurationMs(Date.now() - startedAt)}; queued ${enqueuedTotal} new tweet(s). ` +
       `Queue now: ${counts.ready} ready, ${counts.backoff} waiting on retry backoff, ${counts.processing} posting, ${counts.failed} parked as failed.`,
     durationMs: Date.now() - startedAt,
     detail: {
-      accountsChecked: accounts.length,
+      accountsChecked: dueAccounts.length,
+      totalAccounts: accounts.length,
+      skipped: plan.skipped.length,
       queued: enqueuedTotal,
       queue: {
         ready: counts.ready,
@@ -2585,6 +3340,61 @@ async function runFetchSweep(mappings: AccountMapping[]): Promise<number> {
     },
   });
   return enqueuedTotal;
+}
+
+// Delete sync spends public-CDN requests only (never the scraper account), and
+// still caps them per sweep so a large instance never floods the CDN.
+const DELETE_SYNC_CHECKS_PER_SWEEP = envInt('DELETE_SYNC_CHECKS_PER_SWEEP', 20, 0, 200);
+const DELETE_SYNC_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function runDeleteSyncPass(mappings: AccountMapping[]): Promise<void> {
+  let budget = DELETE_SYNC_CHECKS_PER_SWEEP;
+  for (const mapping of mappings) {
+    if (budget <= 0) break;
+    if (!mapping.enabled || !mapping.syncDeletes) continue;
+    // A failing or protected source 404s on tweets that still exist; checking
+    // it would only produce false "deleted" verdicts.
+    const unhealthy = mapping.twitterUsernames.some((username) => {
+      const row = sourceActivityService.get(username);
+      return Boolean(row?.last_error || row?.protected_since);
+    });
+    if (unhealthy) continue;
+    const candidates = dbService.listDeleteSyncCandidates(
+      mapping.bskyIdentifier,
+      DELETE_SYNC_WINDOW_MS,
+      DELETE_SYNC_MIN_MISSING_SPAN_MS,
+      Math.min(budget, 10),
+    );
+    if (candidates.length === 0) continue;
+    budget -= candidates.length;
+    const agent = await getAgent(mapping);
+    if (!agent) continue;
+    const identifier = mapping.bskyIdentifier;
+    const result = await syncDeletesForAccount(candidates, {
+      check: checkSourceTweet,
+      recordPresent: (id) => dbService.recordSourcePresent(id, identifier),
+      recordInconclusive: (id) => dbService.recordSourceChecked(id, identifier),
+      recordMissing: (id) => dbService.recordSourceMissing(id, identifier),
+      deletePost: async (uri) => {
+        await agent.deletePost(uri);
+      },
+      markDeleted: (id) => dbService.markDeleted(id, identifier),
+      log: (level, event, message, detail) =>
+        logEvent({ level, stage: 'sweep', event, message, detail, mappingId: mapping.id, bskyIdentifier: identifier }),
+      pauseMs: 500,
+    });
+    if (result.deleted > 0 || result.stoodDown) {
+      logEvent({
+        level: result.stoodDown ? 'warn' : 'info',
+        stage: 'sweep',
+        event: 'delete-sync.pass',
+        message: `Delete sync for ${identifier}: checked ${result.checked}, removed ${result.deleted} mirror(s) of deleted tweets.`,
+        detail: { ...result },
+        mappingId: mapping.id,
+        bskyIdentifier: identifier,
+      });
+    }
+  }
 }
 
 // Fetch phase of a queued backfill: pull history for one source account and
@@ -2654,10 +3464,56 @@ async function fetchAndEnqueueBackfill(
 const activePostMappings = new Set<string>();
 let postWorkersStarted = false;
 
-function queueBatchTimeoutMs(itemCount: number): number {
+// A video upload may legitimately take VIDEO_UPLOAD_TIMEOUT_MS plus
+// VIDEO_PROCESSING_TIMEOUT_MS; a watchdog shorter than that cancelled healthy
+// video batches and retried them from scratch.
+const VIDEO_BATCH_FLOOR_MS = VIDEO_UPLOAD_TIMEOUT_MS + VIDEO_PROCESSING_TIMEOUT_MS + 5 * 60 * 1000;
+// After the watchdog cancels a batch, how long to wait for it to actually stop
+// (finish the request in flight, notice the abort) before settling its rows.
+const BATCH_WIND_DOWN_MS = envInt('BATCH_WIND_DOWN_MS', 5 * 60 * 1000, 1000, 30 * 60 * 1000);
+
+function batchHasVideo(batch: QueueBatch): boolean {
+  return batch.items.some((item) => /"type":"(video|animated_gif)"/.test(item.tweet_json));
+}
+
+function queueBatchTimeoutMs(itemCount: number, hasVideo = false): number {
   // Pacing plus media work make big batches legitimately slow; scale the
   // watchdog with batch size so it only catches genuine hangs.
-  return Math.max(resolveScheduledAccountTimeoutMs(), itemCount * 120_000);
+  return Math.max(resolveScheduledAccountTimeoutMs(), itemCount * 120_000, hasVideo ? VIDEO_BATCH_FLOOR_MS : 0);
+}
+
+/**
+ * The history entry for a tweet the queue knows is live on Bluesky but that
+ * never got a history row. Uses the thread position stamped at post time: the
+ * old repair recorded the first chunk as its own root and tail, so any later
+ * reply in that thread pointed at the wrong root and a split tweet's
+ * continuation attached to its first chunk.
+ */
+function repairEntryFromStamp(item: {
+  posted_uri?: string;
+  posted_cid?: string;
+  posted_root_uri?: string;
+  posted_root_cid?: string;
+  posted_tail_uri?: string;
+  posted_tail_cid?: string;
+  tweet_text?: string;
+}): ProcessedTweetEntry {
+  const uri = item.posted_uri as string;
+  const cid = item.posted_cid as string;
+  return {
+    uri,
+    cid,
+    root:
+      item.posted_root_uri && item.posted_root_cid
+        ? { uri: item.posted_root_uri, cid: item.posted_root_cid }
+        : { uri, cid },
+    tail:
+      item.posted_tail_uri && item.posted_tail_cid
+        ? { uri: item.posted_tail_uri, cid: item.posted_tail_cid }
+        : { uri, cid },
+    text: item.tweet_text,
+    migrated: true,
+  };
 }
 
 /**
@@ -2679,14 +3535,7 @@ function reconcilePostedButUnrecorded(): number {
       continue;
     }
     try {
-      saveProcessedTweet(item.twitter_username, item.bsky_identifier, item.twitter_id, {
-        uri: item.posted_uri,
-        cid: item.posted_cid,
-        root: { uri: item.posted_uri, cid: item.posted_cid },
-        tail: { uri: item.posted_uri, cid: item.posted_cid },
-        text: item.tweet_text,
-        migrated: true,
-      });
+      saveProcessedTweet(item.twitter_username, item.bsky_identifier, item.twitter_id, repairEntryFromStamp(item));
       postQueueService.markDone(item.twitter_id, item.bsky_identifier);
       repaired += 1;
     } catch (err) {
@@ -2768,6 +3617,12 @@ async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionK
 
   let batchFailure: ErrorDetail | null = null;
   let batchStage = 'batch';
+  // Cancels processTweets when the watchdog fires. Without it the timed-out
+  // run kept posting in the background while its rows were released and
+  // re-claimed by the next batch — two workers posting the same tweets.
+  const controller = new AbortController();
+  // Scheduled rows are live mirrors; backfill rows are history.
+  const liveTweetIds = new Set(batch.items.filter((item) => item.kind === 'scheduled').map((item) => item.twitter_id));
 
   logEvent({
     level: 'info',
@@ -2786,6 +3641,17 @@ async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionK
 
   try {
     const agent = await getAgent(mapping);
+    // A login can discover that the account changed its handle on Bluesky and
+    // migrate its history to the new identifier. This batch was claimed under
+    // the old one; hand it back so it is re-claimed under the new key rather
+    // than writing fresh history rows where nothing will ever look for them.
+    const current = getConfig().mappings.find((entry) => entry.id === mapping.id);
+    if (current && current.bskyIdentifier.toLowerCase() !== batch.bsky_identifier.toLowerCase()) {
+      batchStage = 'identifier-changed';
+      throw new Error(
+        `${batch.bsky_identifier} is now ${current.bskyIdentifier}; the batch will be re-claimed under the new identifier.`,
+      );
+    }
     if (!agent) {
       batchStage = 'login';
       // "Check the app password" is wrong and misleading when the account is
@@ -2829,29 +3695,48 @@ async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionK
     // (newest first) and reverses internally.
     tweets.reverse();
 
-    await withTimeout(
-      processTweets(
-        agent,
-        batch.twitter_username,
-        batch.bsky_identifier,
-        tweets,
-        false,
-        undefined,
-        undefined,
-        sessionKey,
-        {
-          outcomes,
-          mappingId: mapping.id,
-          jobId,
-          onPosted: (twitterId, uri, cid) => {
-            stampedUris.set(twitterId, { uri, cid });
-            postQueueService.markPosted(twitterId, batch.bsky_identifier, uri, cid);
-          },
+    const watchdogMs = queueBatchTimeoutMs(batch.items.length, batchHasVideo(batch));
+    const run = processTweets(
+      agent,
+      batch.twitter_username,
+      batch.bsky_identifier,
+      tweets,
+      false,
+      undefined,
+      undefined,
+      sessionKey,
+      {
+        outcomes,
+        mappingId: mapping.id,
+        jobId,
+        signal: controller.signal,
+        isLive: (twitterId) => liveTweetIds.has(twitterId),
+        settings: resolveMirrorSettings(mapping),
+        onPosted: (twitterId, uri, cid, root) => {
+          stampedUris.set(twitterId, { uri, cid });
+          postQueueService.markPosted(twitterId, batch.bsky_identifier, uri, cid, root);
         },
-      ),
-      queueBatchTimeoutMs(batch.items.length),
-      `Posting batch for @${batch.twitter_username} exceeded its ${formatDurationMs(queueBatchTimeoutMs(batch.items.length))} watchdog`,
+        onChunkPosted: (twitterId, uri, cid) => {
+          postQueueService.markChunkPosted(twitterId, batch.bsky_identifier, uri, cid);
+        },
+      },
     );
+    try {
+      await withTimeout(
+        run,
+        watchdogMs,
+        `Posting batch for @${batch.twitter_username} exceeded its ${formatDurationMs(watchdogMs)} watchdog`,
+      );
+    } catch (watchdogErr) {
+      // Stop the run, then wait for it to actually stop before this batch's
+      // rows are settled and become claimable again.
+      controller.abort();
+      await Promise.race([
+        run.catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, BATCH_WIND_DOWN_MS)),
+      ]);
+      throw watchdogErr;
+    }
   } catch (err) {
     batchFailure = toErrorDetail(err);
 
@@ -2932,14 +3817,17 @@ async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionK
         (item.posted_uri && item.posted_cid ? { uri: item.posted_uri, cid: item.posted_cid } : undefined);
       if (stamped) {
         try {
-          saveProcessedTweet(batch.twitter_username, item.bsky_identifier, item.twitter_id, {
-            uri: stamped.uri,
-            cid: stamped.cid,
-            root: { uri: stamped.uri, cid: stamped.cid },
-            tail: { uri: stamped.uri, cid: stamped.cid },
-            text: item.tweet_text,
-            migrated: true,
-          });
+          // Re-read the row: the stamps for root and tail are written during
+          // the run, after this batch's copy of the row was taken.
+          const freshRow = postQueueService
+            .listPostedButUnrecorded(5000)
+            .find((row) => row.twitter_id === item.twitter_id && row.bsky_identifier === item.bsky_identifier);
+          saveProcessedTweet(
+            batch.twitter_username,
+            item.bsky_identifier,
+            item.twitter_id,
+            repairEntryFromStamp({ ...item, ...freshRow, posted_uri: stamped.uri, posted_cid: stamped.cid }),
+          );
           postQueueService.markDone(item.twitter_id, item.bsky_identifier);
           repaired += 1;
           logEvent({
@@ -2976,6 +3864,19 @@ async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionK
         });
         postQueueService.markDone(item.twitter_id, item.bsky_identifier);
         skipped += 1;
+        continue;
+      }
+
+      // 3b. Waiting on another tweet (a reply's parent, a retweet's original)
+      //     that is still queued. Retried with the normal backoff, and parked
+      //     with this explanation if it never becomes postable.
+      if (outcome?.status === 'deferred') {
+        const result = postQueueService.releaseForRetry(item, outcome.reason, QUEUE_MAX_ATTEMPTS, {
+          stage: outcome.stage,
+          retryable: true,
+        });
+        if (result.status === 'failed') parked += 1;
+        else deferred += 1;
         continue;
       }
 
@@ -3622,10 +4523,16 @@ async function applyPinnedTweet(
   }
 
   const record = dbService.getTweet(pinnedTweetId, mapping.bskyIdentifier);
-  if (record && record.status === 'skipped') {
+  if (record && record.status !== 'migrated' && record.status !== 'failed') {
     // Pinned retweets/external replies are never mirrored — remember that so we
-    // don't retry (and log) every cycle.
-    console.log(`${logPrefix} 📌 Pinned tweet ${pinnedTweetId} was skipped (retweet/external reply). Not pinning.`);
+    // don't retry (and log) every cycle. The previous pin is now wrong too:
+    // leaving it would keep advertising a tweet the account has since unpinned.
+    console.log(
+      `${logPrefix} 📌 Pinned tweet ${pinnedTweetId} was not mirrored (${record.status}). Clearing the Bluesky pin.`,
+    );
+    if (mapping.lastPinnedTweetId) {
+      await setBlueskyPinnedPost(agent, null, dryRun, logPrefix);
+    }
     if (!dryRun) {
       mapping.lastPinnedTweetId = pinnedTweetId;
       await persistPinnedTweetState(mapping.id, pinnedTweetId);
@@ -3824,18 +4731,29 @@ async function maybeSyncMappingProfileInBackground(
       bskyIdentifier: mapping.bskyIdentifier,
       bskyPassword: mapping.bskyPassword,
       bskyServiceUrl: mapping.bskyServiceUrl,
-      syncDescription: false,
+      // Bios now follow X automatically, except where someone has edited the
+      // Bluesky bio by hand (see canOverwriteDescription).
+      syncDescription: true,
+      botDisplayNameSuffix: mapping.botDisplayNameSuffix !== false,
       previousSync: {
         sourceUsername: mapping.profileSyncSourceUsername,
         mirroredDisplayName: mapping.lastMirroredDisplayName,
         mirroredDescription: mapping.lastMirroredDescription,
         avatarUrl: mapping.lastMirroredAvatarUrl,
         bannerUrl: mapping.lastMirroredBannerUrl,
+        website: mapping.lastMirroredWebsite,
       },
     });
 
     Object.assign(mapping, applyProfileMirrorSyncState(mapping, sourceTwitterUsername, result));
     await persistProfileSyncResult(mapping.id, sourceTwitterUsername, result);
+
+    // The daily profile read is also the one place a protected account shows
+    // itself: its timeline just comes back empty, which looks like silence.
+    sourceActivityService.setProtected(sourceTwitterUsername, Boolean(result.twitterProfile.isPrivate));
+    if (result.twitterProfile.userId && !sourceActivityService.get(sourceTwitterUsername)?.twitter_user_id) {
+      sourceActivityService.setUserId(sourceTwitterUsername, result.twitterProfile.userId);
+    }
 
     if (result.skipped) {
       console.log(`${logPrefix} 🪞 Profile sync skipped (no Twitter profile changes).`);
@@ -3849,7 +4767,11 @@ async function maybeSyncMappingProfileInBackground(
 
     console.log(`${logPrefix} ✅ Profile sync completed.`);
   } catch (error) {
-    console.error(`${logPrefix} ❌ Automatic profile sync failed: ${describeError(error)}`);
+    const message = describeError(error);
+    console.error(`${logPrefix} ❌ Automatic profile sync failed: ${message}`);
+    if (/suspended|does not exist|not found|private/i.test(message)) {
+      sourceActivityService.recordError(sourceTwitterUsername, message);
+    }
   } finally {
     updateJob(profileJobId, null);
   }
@@ -4057,16 +4979,26 @@ async function runAccountTask(
             }
 
             console.log(`[${twitterUsername}] 📥 Fetched ${tweets.length} tweets.`);
+            // One-shot runs (--run-once) apply the same "only new tweets"
+            // cutoff as the queue path, then post inline as live mirrors.
+            const cutoff = mapping.mirrorFromMs;
+            const postable = cutoff
+              ? tweets.filter((tweet) => {
+                  const createdMs = tweet.created_at ? Date.parse(tweet.created_at) : Number.NaN;
+                  return tweet.isPin || !Number.isFinite(createdMs) || createdMs >= cutoff;
+                })
+              : tweets;
             await withTimeout(
               processTweets(
                 agent,
                 twitterUsername,
                 mapping.bskyIdentifier,
-                tweets,
+                postable,
                 dryRun,
                 undefined,
                 undefined,
                 sessionKey,
+                { mappingId: mapping.id, isLive: () => true, settings: resolveMirrorSettings(mapping) },
               ),
               scheduledAccountTimeoutMs,
               `[${twitterUsername}] Scheduled processing timed out after ${Math.round(scheduledAccountTimeoutMs / 1000)}s`,
@@ -4108,11 +5040,82 @@ import {
   getPendingPinSyncs,
   getSchedulerWakeSignal,
   startServer,
+  takeForcedSweep,
   updateAppStatus,
   updateJob,
   updateLastCheckTime,
 } from './server.js';
 import type { PendingBackfill } from './server.js';
+
+/**
+ * Compose the most recent tweets for an account exactly as the mirror would,
+ * without posting anything. Runs the real processTweets path with dryRun set,
+ * against a mock agent so no blob is uploaded and no session is needed — the
+ * point is to answer "what would this mirror look like?" before committing to
+ * it, and a preview that used its own compose logic would eventually lie.
+ */
+async function previewTweetsForAccount(request: PreviewRequest): Promise<PreviewResult> {
+  const { twitterUsername, mappingId, limit } = request;
+  const config = getConfig();
+  const mapping = mappingId ? config.mappings.find((entry) => entry.id === mappingId) : undefined;
+  const bskyIdentifier = mapping?.bskyIdentifier ?? 'preview.invalid';
+
+  const tweets = await fetchUserTweets(twitterUsername, limit, undefined, 'preview');
+  if (tweets.length === 0) {
+    return { twitterUsername, fetched: 0, tweets: [] };
+  }
+
+  // A mock agent keeps the preview read-only: uploads return a fake blob ref and
+  // nothing is ever written to Bluesky. dryRun also stops processTweets touching
+  // the processed-tweets table, so previewing does not mark anything as mirrored.
+  // biome-ignore lint/suspicious/noExplicitAny: mock agent, same shape as the dry-run import path
+  const mockAgent: any = {
+    post: async () => ({ uri: 'at://did:plc:preview/app.bsky.feed.post/preview', cid: 'preview-cid' }),
+    uploadBlob: async () => ({ data: { blob: { ref: { toString: () => 'preview-blob' } } } }),
+    session: { did: 'did:plc:preview' },
+    com: { atproto: { repo: { describeRepo: async () => ({ data: {} }) } } },
+  };
+
+  const composed = new Map<string, ComposedTweet>();
+  const outcomes = new Map<string, TweetOutcome>();
+  await processTweets(mockAgent, twitterUsername, bskyIdentifier, tweets, true, undefined, undefined, 'preview', {
+    outcomes,
+    onComposed: (preview) => composed.set(preview.twitterId, preview),
+    skipMediaDownload: true,
+    mappingId: mapping?.id,
+    // The preview must not show up in the dashboard as a real mirror running.
+    quiet: true,
+    isLive: () => true,
+    settings: resolveMirrorSettings(mapping),
+  });
+
+  const previews: PreviewTweet[] = tweets.map((tweet) => {
+    const twitterId = String(tweet.id_str || tweet.id || '');
+    const entry = composed.get(twitterId);
+    const outcome = outcomes.get(twitterId);
+    return {
+      twitterId,
+      originalText: tweet.text ?? '',
+      createdAt: tweet.created_at,
+      chunks: (entry?.chunks ?? []).map((text) => ({ text, length: graphemeLength(text) })),
+      images: entry?.images ?? 0,
+      video: entry?.video ?? false,
+      quote: entry?.quote ?? false,
+      linkCard: entry?.linkCard ?? false,
+      isReply: entry?.isReply ?? false,
+      repostOf: entry?.repostOf,
+      langs: entry?.langs,
+      extraMediaPosts: entry?.extraMediaPosts ?? 0,
+      // A tweet with no composed output was filtered out — a retweet, a reply to
+      // someone else, an empty shell. Saying which is more useful than omitting it.
+      skipped: entry
+        ? undefined
+        : { stage: outcome?.stage ?? 'filter', reason: outcome?.reason ?? 'This tweet would not be mirrored.' },
+    };
+  });
+
+  return { twitterUsername, fetched: tweets.length, tweets: previews };
+}
 
 async function main(): Promise<void> {
   const program = new Command();
@@ -4135,6 +5138,10 @@ async function main(): Promise<void> {
   const config = getConfig();
 
   await migrateJsonToSqlite();
+
+  // The dashboard's preview runs the real composer through this, so what it
+  // shows is what would actually be posted.
+  setPreviewRunner(previewTweetsForAccount);
 
   if (!options.web) {
     console.log('🌐 Web interface is disabled.');
@@ -4478,7 +5485,11 @@ async function main(): Promise<void> {
 
       // Fetch-only sweep: new tweets land in the post queue and the workers
       // post them in parallel, so the next check is never blocked by posting.
-      await runFetchSweep(config.mappings);
+      const forced = takeForcedSweep();
+      await runFetchSweep(config.mappings, {
+        force: forced.all,
+        forceMappingIds: forced.mappingIds.size > 0 ? forced.mappingIds : undefined,
+      });
 
       updateAppStatus({ state: 'idle', message: 'Scheduled checks complete' });
     }
@@ -4488,4 +5499,14 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+// The offline tests import this module for processTweets and set this so the
+// scheduler, web server and CLI parser do not start. It is an explicit opt-out
+// rather than an entry-point check on purpose: process managers that load the
+// script through a wrapper (pm2 with a custom interpreter) would otherwise
+// quietly never start the daemon.
+if (process.env.TWEETS2BSKY_NO_AUTOSTART !== '1') {
+  main();
+}
+
+export { enqueueTweetsForMapping, mapScraperTweetToLocalTweet, uploadToBluesky, reconcilePostedButUnrecorded };
+export type { Tweet, QuotedTweetInfo };

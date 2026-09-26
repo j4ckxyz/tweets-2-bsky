@@ -1,6 +1,14 @@
 services:
   tweets-2-bsky:
-    image: j4ckxyz/tweets-2-bsky:latest
+    # Built from this checkout rather than pulled from a registry, so what runs
+    # is the code you have. Rebuild after `git pull` with:
+    #   docker compose up -d --build
+    # To use a prebuilt image instead, replace `build` with:
+    #   image: ghcr.io/j4ckxyz/tweets-2-bsky:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tweets-2-bsky:local
     container_name: tweets-2-bsky
     restart: unless-stopped
     ports:
