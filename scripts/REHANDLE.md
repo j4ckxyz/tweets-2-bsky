@@ -61,9 +61,11 @@ to script the run or repeat an exact command.
 ## Post history follows the handle
 
 The mirror's post history, queue and account health are keyed by the Bluesky
-handle. Each migrated account's rows move to the new handle in the same step
-as the config change (and the old handle is kept as an alias), so the next
-sweep still knows which tweets are already mirrored and re-posts nothing.
+handle. Each migrated account's history is copied to the new handle in the same
+step as the config change (old rows are kept as an audit trail), so the next
+sweep still knows which tweets are already mirrored and re-posts nothing. If the
+database cannot be updated, the run says so: do not start the service until
+`bun run rehandle -- --repair-history` has re-filed the history.
 
 ## Putting a new domain on Cloudflare
 
