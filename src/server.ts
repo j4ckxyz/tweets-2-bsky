@@ -3138,13 +3138,16 @@ app.get('/api/status', authenticateToken, (req: any, res) => {
   // Accounts that cannot be posted to at all (taken down, suspended,
   // deactivated). Surfaced here rather than only in the log because otherwise
   // the queue just looks stuck for no visible reason.
-  const downAccounts = accountHealthService.list();
+  // Keyed once rather than scanned per mapping: the dashboard polls this
+  // endpoint, and large instances have hundreds of mappings.
+  const downByIdentifier = new Map(accountHealthService.list().map((row) => [row.bsky_identifier, row]));
+  const queueByMappingId = new Map(queueCounts.perMapping.map((entry) => [entry.mapping_id, entry]));
   const accountAlerts = config.mappings
     .filter((mapping) => visibleMappingIds.has(mapping.id))
     .flatMap((mapping) => {
-      const health = downAccounts.find((row) => row.bsky_identifier === mapping.bskyIdentifier.toLowerCase());
+      const health = downByIdentifier.get(mapping.bskyIdentifier.toLowerCase());
       if (!health) return [];
-      const queued = queueCounts.perMapping.find((entry) => entry.mapping_id === mapping.id);
+      const queued = queueByMappingId.get(mapping.id);
       return [
         {
           mappingId: mapping.id,
