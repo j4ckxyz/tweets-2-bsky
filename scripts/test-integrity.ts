@@ -17,8 +17,7 @@ console.error = () => undefined;
 
 const { getConfig, saveConfig, updateConfig, updateMappingById } = await import('../src/config-manager.js');
 const { dbService, postQueueService, sourceActivityService, rawDb } = await import('../src/db.js');
-const { getAgent, deletePosts, invalidateAgent } = await import('../src/bsky.js');
-const { persistNewHandle } = await import('../scripts/rehandle.js');
+const { getAgent, deletePosts, invalidateAgent, moveMappingToIdentifier } = await import('../src/bsky.js');
 const profile = await import('../src/profile-mirror.js');
 const { BskyAgent } = await import('@atproto/api');
 
@@ -125,9 +124,9 @@ realLog('\nHandle changes keep history\n');
   ]);
   postQueueService.claimNextBatch(new Set(), new Set(['m1']));
 
-  // The rehandle script's persist step.
-  const result = await persistNewHandle('m1', 'alice.new.test', 'did:plc:alice');
-  assert(result.updated && result.history === 3, `Rehandle moves the history (${result.history} rows)`);
+  // The service-side move (dashboard edit, handle change found at login). The
+  // rehandle script has its own copy-based re-key, covered by test:rehandle.
+  moveMappingToIdentifier('m1', 'alice.old.test', 'alice.new.test');
   assert(getConfig().mappings.find((m) => m.id === 'm1')?.bskyIdentifier === 'alice.new.test', '…and updates config');
   const seen = Object.keys(dbService.getTweetsByBskyIdentifier('alice.new.test'));
   assert(seen.length === 3, 'The next sweep sees the old tweets as already mirrored (no re-post)');
