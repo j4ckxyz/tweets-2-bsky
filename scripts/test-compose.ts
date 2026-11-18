@@ -546,6 +546,140 @@ realLog('\nMedia\n');
   assert(!p5?.text.includes('Video:'), '…instead of a bare "Video:" link');
 }
 
+realLog('\nMany images (X allows 20, Bluesky galleries hold 10)\n');
+{
+  // No sizes on purpose: the scraper's fallback path has none, and gallery
+  // items need an aspect ratio, so the composer must measure each image.
+  const photos = (count: number, tag: string) =>
+    Array.from({ length: count }, (_, i) => ({
+      type: 'photo',
+      media_url_https: `https://pbs.twimg.com/media/${tag}-${i + 1}.jpg`,
+      ext_alt_text: `${tag} ${i + 1}`,
+    }));
+  const withPhotos = (count: number, tag: string, extra: Partial<Tweet> = {}) =>
+    tweet({ text: `${tag} photos`, extended_entities: { media: photos(count, tag) }, ...extra } as Partial<Tweet>);
+  // biome-ignore lint/suspicious/noExplicitAny: records are free-form
+  const parentOf = (posts: any[], post: any) => post?.reply?.parent?.uri;
+  const uriOf = (index: number) => `at://did:plc:alice/app.bsky.feed.post/p${index + 1}`;
+
+  {
+    const { captured } = await run([withPhotos(4, 'four')]);
+    assert(
+      captured.posts.length === 1 && captured.posts[0]?.embed?.$type === 'app.bsky.embed.images',
+      'Four images keep the classic images embed every app can show',
+    );
+  }
+  {
+    const { captured } = await run([withPhotos(7, 'seven')]);
+    const embed = captured.posts[0]?.embed;
+    assert(
+      captured.posts.length === 1 && embed?.$type === 'app.bsky.embed.gallery' && embed.items?.length === 7,
+      'Seven images post as one gallery instead of losing three',
+    );
+    assert(
+      // biome-ignore lint/suspicious/noExplicitAny: records are free-form
+      embed?.items?.every((item: any) => item.$type === 'app.bsky.embed.gallery#image'),
+      '…each item typed as a gallery image',
+    );
+    assert(
+      // biome-ignore lint/suspicious/noExplicitAny: records are free-form
+      embed?.items?.every((item: any) => item.aspectRatio?.width === 8 && item.aspectRatio?.height === 8),
+      '…each with an aspect ratio measured from the image when the tweet gave none',
+    );
+    assert(
+      // biome-ignore lint/suspicious/noExplicitAny: records are free-form
+      embed?.items?.map((item: any) => item.alt).join(',') ===
+        photos(7, 'seven')
+          .map((p) => p.ext_alt_text)
+          .join(','),
+      '…in tweet order, with alt text kept',
+    );
+  }
+  {
+    const { captured, outcomes } = await run([withPhotos(20, 'twenty')]);
+    const [first, second] = captured.posts;
+    assert(
+      captured.posts.length === 2 &&
+        first?.embed?.$type === 'app.bsky.embed.gallery' &&
+        first.embed.items.length === 10 &&
+        second?.embed?.$type === 'app.bsky.embed.gallery' &&
+        second.embed.items.length === 10,
+      'Twenty images become two galleries of ten',
+    );
+    assert(parentOf(captured.posts, second) === uriOf(0), '…the second replying to the first');
+    assert(second?.embed?.items?.[0]?.alt === 'twenty 11', '…carrying on in tweet order');
+    assert(second?.text === '', '…with no repeated text');
+    const outcome = [...outcomes.values()][0];
+    assert(outcome?.status === 'posted', '…and the tweet is recorded as posted');
+  }
+  {
+    const { captured } = await run([withPhotos(11, 'eleven')]);
+    assert(
+      captured.posts[0]?.embed?.items?.length === 10 &&
+        captured.posts[1]?.embed?.$type === 'app.bsky.embed.images' &&
+        captured.posts[1]?.embed?.images?.length === 1,
+      'An eleventh image follows as a plain images reply',
+    );
+  }
+  {
+    const { captured } = await run([withPhotos(10, 'classic')], { settings: { imageLayout: 'classic' } });
+    assert(
+      captured.posts.length === 3 &&
+        // biome-ignore lint/suspicious/noExplicitAny: records are free-form
+        captured.posts.every((post: any) => post.embed?.$type === 'app.bsky.embed.images') &&
+        // biome-ignore lint/suspicious/noExplicitAny: records are free-form
+        captured.posts.map((post: any) => post.embed.images.length).join(',') === '4,4,2',
+      'The classic layout splits ten images 4 + 4 + 2, never using a gallery',
+    );
+    assert(
+      parentOf(captured.posts, captured.posts[1]) === uriOf(0) &&
+        parentOf(captured.posts, captured.posts[2]) === uriOf(1),
+      '…each reply hanging under the one before',
+    );
+  }
+  {
+    const quoted = newId();
+    seedMirrored(quoted, 'bob', 'bob.test', 'did:plc:bob', 'gallery-quoted');
+    const { captured } = await run([
+      withPhotos(6, 'quoting', { is_quote_status: true, quoted_status_id_str: quoted } as Partial<Tweet>),
+    ]);
+    const embed = captured.posts[0]?.embed;
+    assert(
+      embed?.$type === 'app.bsky.embed.recordWithMedia' &&
+        embed.media?.$type === 'app.bsky.embed.gallery' &&
+        embed.media.items.length === 6 &&
+        embed.record?.record?.uri === 'at://did:plc:bob/app.bsky.feed.post/gallery-quoted',
+      'A quote tweet with six images carries the quote and a gallery together',
+    );
+  }
+  {
+    const mixed = tweet({
+      text: 'video and five photos',
+      extended_entities: {
+        media: [
+          {
+            type: 'video',
+            media_url_https: 'https://pbs.twimg.com/amplify_video_thumb/g.jpg',
+            video_info: {
+              variants: [{ content_type: 'video/mp4', url: 'https://video.twimg.com/g.mp4', bitrate: 832000 }],
+              duration_millis: 5000,
+            },
+          },
+          ...photos(5, 'with-video'),
+        ],
+      },
+    } as Partial<Tweet>);
+    const { captured } = await run([mixed]);
+    assert(
+      captured.posts[0]?.embed?.$type === 'app.bsky.embed.video' &&
+        captured.posts[1]?.embed?.$type === 'app.bsky.embed.gallery' &&
+        captured.posts[1]?.embed?.items?.length === 5 &&
+        captured.posts.length === 2,
+      'A video with five photos: the video leads, the photos follow as one gallery',
+    );
+  }
+}
+
 realLog('\nLabels\n');
 {
   const flagged = () =>

@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import { type SensitiveFallbackLabel, normalizeSensitiveFallbackLabel } from './compose.js';
+import {
+  type ImageLayout,
+  type SensitiveFallbackLabel,
+  normalizeImageLayout,
+  normalizeSensitiveFallbackLabel,
+} from './compose.js';
 import { ACTIVE_CONFIG_FILE, LEGACY_CONFIG_FILE, USING_EXTERNAL_DATA_DIR } from './storage-paths.js';
 
 const CONFIG_FILE = ACTIVE_CONFIG_FILE;
@@ -103,6 +108,8 @@ export interface AccountMapping {
   mirrorRetweets?: boolean;
   /** Replies to tweets mirrored on this instance become Bluesky replies. Default on. */
   mirrorRepliesToMirrors?: boolean;
+  /** How tweets with more than four images are laid out. Default 'gallery'. */
+  imageLayout?: ImageLayout;
   /** Append " {bot}" to the mirrored display name. Default on. */
   botDisplayNameSuffix?: boolean;
   /** Delete the Bluesky post when its tweet is deleted on X. Default off. */
@@ -400,6 +407,7 @@ const normalizeMapping = (rawMapping: unknown, users: WebUser[], adminUserId?: s
     editMode: record.editMode === 'replace' || record.editMode === 'skip' ? record.editMode : undefined,
     mirrorRetweets: normalizeOptionalBoolean(record.mirrorRetweets),
     mirrorRepliesToMirrors: normalizeOptionalBoolean(record.mirrorRepliesToMirrors),
+    imageLayout: normalizeImageLayout(record.imageLayout),
     botDisplayNameSuffix: normalizeOptionalBoolean(record.botDisplayNameSuffix),
     syncDeletes: normalizeOptionalBoolean(record.syncDeletes),
     mirrorFromMs: normalizeEpochMs(record.mirrorFromMs),
