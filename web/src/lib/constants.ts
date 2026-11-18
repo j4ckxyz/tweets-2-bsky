@@ -14,6 +14,7 @@ export const defaultMirrorSettings = (): MirrorSettings => ({
   editMode: 'skip',
   mirrorRetweets: true,
   mirrorRepliesToMirrors: true,
+  imageLayout: 'gallery',
   botDisplayNameSuffix: true,
   syncDeletes: false,
 });
@@ -24,6 +25,7 @@ export const mirrorSettingsFromMapping = (mapping: Partial<MirrorSettings>): Mir
   editMode: mapping.editMode ?? 'skip',
   mirrorRetweets: mapping.mirrorRetweets !== false,
   mirrorRepliesToMirrors: mapping.mirrorRepliesToMirrors !== false,
+  imageLayout: mapping.imageLayout ?? 'gallery',
   botDisplayNameSuffix: mapping.botDisplayNameSuffix !== false,
   syncDeletes: mapping.syncDeletes === true,
 });

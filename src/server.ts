@@ -9,7 +9,7 @@ import cors from 'cors';
 import express from 'express';
 import jwt, { type SignOptions } from 'jsonwebtoken';
 import { type DeletePostsScope, deletePosts } from './bsky.js';
-import { normalizeSensitiveFallbackLabel } from './compose.js';
+import { normalizeImageLayout, normalizeSensitiveFallbackLabel } from './compose.js';
 import {
   ADMIN_USER_PERMISSIONS,
   type AccountMapping,
@@ -450,6 +450,21 @@ function extractMediaFromEmbed(embed: any): EnrichedPostMedia[] {
       width: typeof image.aspectRatio?.width === 'number' ? image.aspectRatio.width : undefined,
       height: typeof image.aspectRatio?.height === 'number' ? image.aspectRatio.height : undefined,
     }));
+  }
+
+  if (type === 'app.bsky.embed.gallery#view') {
+    // Gallery views name the thumbnail `thumbnail`, not `thumb`.
+    const items = Array.isArray(embed.items) ? embed.items : [];
+    return items
+      .filter((item: any) => !item?.$type || item.$type === 'app.bsky.embed.gallery#viewImage')
+      .map((item: any) => ({
+        type: 'image' as const,
+        url: typeof item.fullsize === 'string' ? item.fullsize : undefined,
+        thumb: typeof item.thumbnail === 'string' ? item.thumbnail : undefined,
+        alt: typeof item.alt === 'string' ? item.alt : undefined,
+        width: typeof item.aspectRatio?.width === 'number' ? item.aspectRatio.width : undefined,
+        height: typeof item.aspectRatio?.height === 'number' ? item.aspectRatio.height : undefined,
+      }));
   }
 
   if (type === 'app.bsky.embed.video#view') {
@@ -1275,6 +1290,7 @@ type MappingSettings = Pick<
   | 'editMode'
   | 'mirrorRetweets'
   | 'mirrorRepliesToMirrors'
+  | 'imageLayout'
   | 'botDisplayNameSuffix'
   | 'syncDeletes'
 >;
@@ -1287,6 +1303,8 @@ const parseMappingSettings = (body: Record<string, unknown> | undefined): Partia
     settings.sensitiveFallbackLabel = normalizeSensitiveFallbackLabel(body.sensitiveFallbackLabel);
   }
   if (body.editMode === 'skip' || body.editMode === 'replace') settings.editMode = body.editMode;
+  const imageLayout = normalizeImageLayout(body.imageLayout);
+  if (imageLayout) settings.imageLayout = imageLayout;
   for (const key of ['mirrorRetweets', 'mirrorRepliesToMirrors', 'botDisplayNameSuffix', 'syncDeletes'] as const) {
     if (typeof body[key] === 'boolean') settings[key] = body[key] as boolean;
   }
@@ -3246,6 +3264,7 @@ app.get('/api/accounts/:id', authenticateToken, (req: any, res) => {
       editMode: mapping.editMode ?? 'skip',
       mirrorRetweets: mapping.mirrorRetweets !== false,
       mirrorRepliesToMirrors: mapping.mirrorRepliesToMirrors !== false,
+      imageLayout: mapping.imageLayout ?? 'gallery',
       botDisplayNameSuffix: mapping.botDisplayNameSuffix !== false,
       syncDeletes: mapping.syncDeletes === true,
       // Deliberately absent: bskyPassword.

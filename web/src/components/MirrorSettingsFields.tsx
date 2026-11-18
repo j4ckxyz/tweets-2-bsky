@@ -1,5 +1,5 @@
 import { selectClassName } from '../lib/constants';
-import type { EditMode, MirrorSettings, SensitiveFallbackLabel } from '../types';
+import type { EditMode, ImageLayout, MirrorSettings, SensitiveFallbackLabel } from '../types';
 import { Label } from './ui/label';
 
 interface MirrorSettingsFieldsProps {
@@ -13,6 +13,11 @@ const SENSITIVE_OPTIONS: { value: SensitiveFallbackLabel; label: string }[] = [
   { value: 'nudity', label: 'Nudity' },
   { value: 'graphic-media', label: 'Graphic media' },
   { value: 'none', label: 'No label' },
+];
+
+const IMAGE_LAYOUT_OPTIONS: { value: ImageLayout; label: string }[] = [
+  { value: 'gallery', label: 'Up to 10 per post (default)' },
+  { value: 'classic', label: 'Up to 4 per post' },
 ];
 
 const EDIT_OPTIONS: { value: EditMode; label: string }[] = [
@@ -124,6 +129,25 @@ export function MirrorSettingsFields({ idPrefix, value, onChange }: MirrorSettin
             Used when X flags a tweet without saying why. Media X does categorise is always labelled to match.
           </p>
         </div>
+        <div className="space-y-2 sm:col-span-2">
+          <Label htmlFor={`${idPrefix}-image-layout`}>Tweets with more than four images</Label>
+          <select
+            id={`${idPrefix}-image-layout`}
+            className={selectClassName}
+            value={value.imageLayout}
+            onChange={(event) => set('imageLayout', event.target.value as ImageLayout)}
+          >
+            {IMAGE_LAYOUT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-muted-foreground">
+            X allows 20 images. Up to 10 posts five or more as a Bluesky gallery, which some third-party apps cannot
+            show yet. Up to 4 works in every app. Images that do not fit follow as replies.
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -136,6 +160,7 @@ export function pickMirrorSettings(value: MirrorSettings): MirrorSettings {
     editMode: value.editMode,
     mirrorRetweets: value.mirrorRetweets,
     mirrorRepliesToMirrors: value.mirrorRepliesToMirrors,
+    imageLayout: value.imageLayout,
     botDisplayNameSuffix: value.botDisplayNameSuffix,
     syncDeletes: value.syncDeletes,
   };

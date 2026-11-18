@@ -16,12 +16,17 @@ import { generateAltText, isAltTextConfigured } from './ai-manager.js';
 
 import {
   type FacetLike,
+  type ImageLayout,
   type SensitiveFallbackLabel,
+  TWEET_IMAGES_MAX,
   addTwitterHandleFacets,
   bskyPostUrl,
+  buildImagesEmbed,
   buildSensitiveLabels,
   decodeHtmlEntities,
   dropUnresolvedMentions,
+  groupImagesForPosts,
+  imagesPerPost,
   isTwitterUrl,
   parseTweetStatusUrl,
   resolvePostLangs,
@@ -817,6 +822,21 @@ async function uploadToBluesky(
   return data.blob;
 }
 
+/**
+ * Pixel dimensions of an image, for its aspect ratio. Gallery embeds require
+ * one, and tweets read through the scraper's fallback path carry no sizes.
+ */
+async function measureAspectRatio(buffer: Buffer): Promise<AspectRatio | undefined> {
+  try {
+    const { width, height, orientation } = await sharp(buffer).metadata();
+    if (!width || !height) return undefined;
+    // EXIF orientations 5–8 rotate the image a quarter turn.
+    return orientation && orientation >= 5 ? { width: height, height: width } : { width, height };
+  } catch {
+    return undefined;
+  }
+}
+
 interface ScreenshotResult {
   buffer: Buffer;
   width: number;
@@ -1291,6 +1311,7 @@ export interface MirrorSettings {
   editMode: 'skip' | 'replace';
   mirrorRetweets: boolean;
   mirrorRepliesToMirrors: boolean;
+  imageLayout: ImageLayout;
 }
 
 export function resolveMirrorSettings(mapping?: Partial<AccountMapping> | null): MirrorSettings {
@@ -1299,6 +1320,7 @@ export function resolveMirrorSettings(mapping?: Partial<AccountMapping> | null):
     editMode: mapping?.editMode ?? 'skip',
     mirrorRetweets: mapping?.mirrorRetweets !== false,
     mirrorRepliesToMirrors: mapping?.mirrorRepliesToMirrors !== false,
+    imageLayout: mapping?.imageLayout ?? 'gallery',
   };
 }
 
@@ -2069,8 +2091,8 @@ export async function processTweets(
       if (media.type === 'photo') {
         const url = media.media_url_https;
         if (!url) continue;
-        if (images.length >= 4) {
-          droppedMedia.push({ type: 'photo', url, reason: 'Bluesky posts carry at most four images.' });
+        if (images.length >= TWEET_IMAGES_MAX) {
+          droppedMedia.push({ type: 'photo', url, reason: `A tweet carries at most ${TWEET_IMAGES_MAX} images.` });
           continue;
         }
         if (context?.skipMediaDownload) {
@@ -2100,7 +2122,7 @@ export async function processTweets(
           }
 
           const alt = await resolveImageAlt(media, buffer, mimeType, describeForAlt, twitterUsername);
-          images.push({ alt, image: blob, aspectRatio });
+          images.push({ alt, image: blob, aspectRatio: aspectRatio ?? (await measureAspectRatio(buffer)) });
           console.log(`[${twitterUsername}] ✅ Image uploaded.`);
         } catch (err) {
           const detail = toErrorDetail(err);
@@ -2124,7 +2146,7 @@ export async function processTweets(
             // Same alt-text rules as the first attempt: the fallback used to
             // skip AI descriptions entirely.
             const alt = await resolveImageAlt(media, buffer, mimeType, describeForAlt, twitterUsername);
-            images.push({ alt, image: blob, aspectRatio });
+            images.push({ alt, image: blob, aspectRatio: aspectRatio ?? (await measureAspectRatio(buffer)) });
             console.log(`[${twitterUsername}] ✅ Image uploaded on retry.`);
           } catch (retryErr) {
             const retryDetail = toErrorDetail(retryErr);
@@ -2276,12 +2298,14 @@ export async function processTweets(
     // The batch was cancelled while media was in flight: stop before posting.
     if (context?.signal?.aborted) break;
 
-    // One Bluesky post holds either a video or up to four images. Mixed-media
-    // tweets used to lose their photos silently; now the first video leads and
-    // the rest follow as replies directly under it.
+    // One Bluesky post holds either a video or a set of images: up to 10 as a
+    // gallery, or 4 in the classic layout. X allows 20 images and mixes video
+    // with photos, so whatever does not fit the first post follows as replies
+    // directly under it, in tweet order, instead of being dropped.
+    const imagesPerFirstPost = imagesPerPost(settings.imageLayout);
     const primaryVideo = videos[0];
-    const primaryImages = primaryVideo ? [] : images;
-    const extraImages = primaryVideo ? images : [];
+    const primaryImages = primaryVideo ? [] : images.slice(0, imagesPerFirstPost);
+    const extraImages = primaryVideo ? images : images.slice(imagesPerFirstPost);
     const extraVideos = videos.slice(1);
 
     // Cleanup text
@@ -2373,7 +2397,7 @@ export async function processTweets(
       // The embed slot holds this tweet's own media, so the quote cannot be a
       // card. A screenshot rides along as an extra image when a browser exists.
       let screenshotAdded = false;
-      if (primaryImages.length < 4 && !primaryVideo && !context?.skipMediaDownload) {
+      if (primaryImages.length < imagesPerFirstPost && !primaryVideo && !context?.skipMediaDownload) {
         const ssResult = await captureTweetScreenshot(externalQuoteUrl);
         if (ssResult) {
           try {
@@ -2493,7 +2517,8 @@ export async function processTweets(
 
     // 4. Threading and Posting
     const hasEmbed = hasMedia || Boolean(quoteEmbed) || Boolean(cardEmbed) || Boolean(linkCard);
-    const extraMediaCount = (extraImages.length > 0 ? 1 : 0) + extraVideos.length;
+    const extraImageGroups = groupImagesForPosts(extraImages, settings.imageLayout);
+    const extraMediaCount = extraImageGroups.length + extraVideos.length;
 
     // A post with neither text nor an embed is rejected by every PDS, so it can
     // never succeed no matter how many times it is retried. This happens for
@@ -2575,11 +2600,11 @@ export async function processTweets(
       text: chunk,
       label: `chunk ${index + 1}/${chunks.length}`,
     }));
-    if (extraImages.length > 0) {
+    for (const [index, group] of extraImageGroups.entries()) {
       posts.push({
         text: '',
-        embed: { $type: 'app.bsky.embed.images', images: extraImages.slice(0, 4) },
-        label: 'extra images',
+        embed: buildImagesEmbed(group),
+        label: extraImageGroups.length > 1 ? `extra images ${index + 1}/${extraImageGroups.length}` : 'extra images',
       });
     }
     for (const [index, video] of extraVideos.entries()) {
@@ -2632,7 +2657,7 @@ export async function processTweets(
         // biome-ignore lint/suspicious/noExplicitAny: embed payloads
         let media: any = null;
         if (primaryVideo) media = buildVideoEmbed(primaryVideo);
-        else if (primaryImages.length > 0) media = { $type: 'app.bsky.embed.images', images: primaryImages };
+        else if (primaryImages.length > 0) media = buildImagesEmbed(primaryImages);
 
         if (media && quoteEmbed) {
           postRecord.embed = { $type: 'app.bsky.embed.recordWithMedia', media, record: quoteEmbed };

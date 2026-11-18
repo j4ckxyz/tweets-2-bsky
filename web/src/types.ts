@@ -41,6 +41,7 @@ export interface AccountMapping {
   editMode?: EditMode;
   mirrorRetweets?: boolean;
   mirrorRepliesToMirrors?: boolean;
+  imageLayout?: ImageLayout;
   botDisplayNameSuffix?: boolean;
   syncDeletes?: boolean;
   createdByUser?: {
@@ -53,6 +54,7 @@ export interface AccountMapping {
 
 export type SensitiveFallbackLabel = 'sexual' | 'nudity' | 'graphic-media' | 'none';
 export type EditMode = 'skip' | 'replace';
+export type ImageLayout = 'gallery' | 'classic';
 
 /** Per-mapping mirroring behaviour, as edited in the account forms. */
 export interface MirrorSettings {
@@ -60,6 +62,7 @@ export interface MirrorSettings {
   editMode: EditMode;
   mirrorRetweets: boolean;
   mirrorRepliesToMirrors: boolean;
+  imageLayout: ImageLayout;
   botDisplayNameSuffix: boolean;
   syncDeletes: boolean;
 }

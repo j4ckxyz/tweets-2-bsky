@@ -245,6 +245,76 @@ export function resolvePostLangs(twitterLang: string | null | undefined, text: s
 }
 
 // ---------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------
+
+/** X allows up to 20 images on a tweet. */
+export const TWEET_IMAGES_MAX = 20;
+/** `app.bsky.embed.images` holds at most four, and it is read by every Bluesky client. */
+export const BSKY_IMAGES_EMBED_MAX = 4;
+/**
+ * `app.bsky.embed.gallery` caps `items` at 20 in the lexicon, but Bluesky asks
+ * clients to stay at 10 until it says otherwise. Raise this when it does.
+ */
+export const BSKY_GALLERY_MAX = 10;
+
+/**
+ * How a many-image tweet is laid out on Bluesky.
+ * - `gallery`: up to 10 per post. Five or more use the gallery embed, which
+ *   apps without gallery support show as a text-only post.
+ * - `classic`: up to 4 per post, always the images embed, so every app shows
+ *   them. Extra images follow as replies.
+ */
+export type ImageLayout = 'gallery' | 'classic';
+
+export const IMAGE_LAYOUTS: ImageLayout[] = ['gallery', 'classic'];
+
+export function normalizeImageLayout(value: unknown): ImageLayout | undefined {
+  return typeof value === 'string' && (IMAGE_LAYOUTS as string[]).includes(value) ? (value as ImageLayout) : undefined;
+}
+
+export function imagesPerPost(layout: ImageLayout): number {
+  return layout === 'classic' ? BSKY_IMAGES_EMBED_MAX : BSKY_GALLERY_MAX;
+}
+
+/** Images in tweet order, split into one group per post, none empty. */
+export function groupImagesForPosts<T>(images: T[], layout: ImageLayout): T[][] {
+  const size = imagesPerPost(layout);
+  const groups: T[][] = [];
+  for (let start = 0; start < images.length; start += size) groups.push(images.slice(start, start + size));
+  return groups;
+}
+
+export interface ImageEmbedItem<Blob = unknown> {
+  alt: string;
+  image: Blob;
+  aspectRatio?: { width: number; height: number };
+}
+
+/**
+ * The embed for one post's images. Four or fewer keep `app.bsky.embed.images`
+ * so every app shows them; five or more need `app.bsky.embed.gallery`, whose
+ * items must carry a `$type` and an `aspectRatio`. Both embeds may sit inside
+ * `app.bsky.embed.recordWithMedia`.
+ */
+export function buildImagesEmbed<Blob>(images: ImageEmbedItem<Blob>[]) {
+  if (images.length <= BSKY_IMAGES_EMBED_MAX) {
+    return { $type: 'app.bsky.embed.images' as const, images };
+  }
+  return {
+    $type: 'app.bsky.embed.gallery' as const,
+    items: images.slice(0, BSKY_GALLERY_MAX).map((item) => ({
+      $type: 'app.bsky.embed.gallery#image' as const,
+      image: item.image,
+      alt: item.alt,
+      // Required by the gallery lexicon. The composer measures every image, so
+      // this square fallback only stops one unmeasured image failing the post.
+      aspectRatio: item.aspectRatio ?? { width: 1, height: 1 },
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Content labels
 // ---------------------------------------------------------------------------
 

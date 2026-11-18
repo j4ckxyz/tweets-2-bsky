@@ -7,6 +7,7 @@
 // The helpers here recover the card from the public syndication API and expand
 // it back into normal media entities + destination links.
 import axios from 'axios';
+import { TWEET_IMAGES_MAX } from './compose.js';
 
 export interface UrlEntity {
   url?: string;
@@ -345,7 +346,11 @@ export function detectSponsoredCard(tweet: CardTweet): boolean {
   return hasMultipleImages || hasPromoName;
 }
 
-export function mergeMediaEntities(primary: MediaEntity[], secondary: MediaEntity[], limit = 4): MediaEntity[] {
+export function mergeMediaEntities(
+  primary: MediaEntity[],
+  secondary: MediaEntity[],
+  limit = TWEET_IMAGES_MAX,
+): MediaEntity[] {
   const merged: MediaEntity[] = [];
   const seen = new Set<string>();
   const ordered = [
@@ -516,7 +521,7 @@ export async function recoverCardData(tweet: CardTweet): Promise<{ isSponsoredCa
 
 export function injectSyndicationMedia(tweet: CardTweet, syndication: { images: string[] }) {
   if (syndication.images.length === 0) return;
-  const media = syndication.images.slice(0, 4).map((url) => ({
+  const media = syndication.images.slice(0, TWEET_IMAGES_MAX).map((url) => ({
     media_url_https: url,
     type: 'photo' as const,
     ext_alt_text: 'Image from Twitter',
