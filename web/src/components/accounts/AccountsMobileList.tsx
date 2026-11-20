@@ -32,12 +32,12 @@ export function AccountsMobileList() {
     isBackfillQueued,
     isBridgeAllBusy,
     isSyncAllProfilesBusy,
+    openAccount,
     pagedGroupedMappings,
     pullingBioMappingId,
     requestBackfill,
     requestPinSync,
     selectedAccountMappingIdSet,
-    setAccountDetailId,
     showAccountAvatars,
     startEditMapping,
     syncingProfileMappingId,
@@ -92,7 +92,7 @@ export function AccountsMobileList() {
                 <button
                   type="button"
                   className="block max-w-full truncate text-left text-sm font-medium hover:underline"
-                  onClick={() => setAccountDetailId(mapping.id)}
+                  onClick={() => openAccount(mapping.id)}
                   title={`Open ${profileName}`}
                 >
                   {profileName}

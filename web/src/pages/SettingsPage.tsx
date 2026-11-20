@@ -9,8 +9,8 @@ import { NavList } from '../components/ui/nav-list';
 import { useDashboard } from '../lib/dashboard-context';
 
 export function SettingsPage() {
-  const { activeTab, setSettingsActiveSection, settingsActiveSection, settingsNavItems } = useDashboard();
-  return activeTab === 'settings' ? (
+  const { setSettingsActiveSection, settingsActiveSection, settingsNavItems } = useDashboard();
+  return (
     <section className="grid gap-6 lg:grid-cols-[180px_1fr] animate-fade-in">
       <div className="h-fit lg:sticky lg:top-6">
         <NavList
@@ -38,5 +38,5 @@ export function SettingsPage() {
         <DataSection />
       </div>
     </section>
-  ) : null;
+  );
 }

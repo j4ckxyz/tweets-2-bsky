@@ -5,16 +5,8 @@ import { NavList } from '../ui/nav-list';
 
 // Desktop navigation rail.
 export function Sidebar() {
-  const {
-    activeTab,
-    countdown,
-    dashboardTabs,
-    handleLogout,
-    runtimeBranchLabel,
-    runtimeVersionLabel,
-    setAccountDetailId,
-    setActiveTab,
-  } = useDashboard();
+  const { activeTab, countdown, dashboardTabs, handleLogout, openTab, runtimeBranchLabel, runtimeVersionLabel } =
+    useDashboard();
   return (
     <aside className="sticky top-0 hidden h-screen w-52 shrink-0 flex-col border-r border-border bg-rail lg:flex">
       <div className="flex items-center gap-2.5 px-4 pb-5 pt-5">
@@ -30,8 +22,7 @@ export function Sidebar() {
           items={dashboardTabs}
           activeId={activeTab}
           onSelect={(id) => {
-            setAccountDetailId(null);
-            setActiveTab(id);
+            openTab(id);
           }}
           ariaLabel="Dashboard sections"
         />

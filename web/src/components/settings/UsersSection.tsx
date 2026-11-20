@@ -21,9 +21,9 @@ export function UsersSection() {
     managedUsers,
     me,
     newUserForm,
+    openTab,
     resetEditingUser,
     setAccountsCreatorFilter,
-    setActiveTab,
     setEditingUserForm,
     setNewUserForm,
     settingsActiveSection,
@@ -269,7 +269,7 @@ export function UsersSection() {
                           variant="outline"
                           onClick={() => {
                             setAccountsCreatorFilter(user.id);
-                            setActiveTab('accounts');
+                            openTab('accounts');
                           }}
                         >
                           View Accounts

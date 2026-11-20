@@ -1,4 +1,6 @@
 import { useEffect } from 'react';
+import type { ReactNode } from 'react';
+import { Route, Routes } from 'react-router';
 import { AccountAlertsBanner } from './components/AccountAlertsBanner';
 import { AddAccountSheet } from './components/AddAccountSheet';
 import { EditMappingDialog } from './components/EditMappingDialog';
@@ -9,6 +11,7 @@ import { MobileNav } from './components/layout/MobileNav';
 import { PageHeader } from './components/layout/PageHeader';
 import { Sidebar } from './components/layout/Sidebar';
 import { DashboardProvider, useDashboard } from './lib/dashboard-context';
+import type { DashboardTab } from './lib/types';
 import { AccountDetailPage } from './pages/AccountDetailPage';
 import { AccountsPage } from './pages/AccountsPage';
 import { ActivityPage } from './pages/ActivityPage';
@@ -17,8 +20,16 @@ import { OverviewPage } from './pages/OverviewPage';
 import { PostsPage } from './pages/PostsPage';
 import { SettingsPage } from './pages/SettingsPage';
 
+const pageForTab: Record<DashboardTab, ReactNode> = {
+  overview: <OverviewPage />,
+  accounts: <AccountsPage />,
+  posts: <PostsPage />,
+  activity: <ActivityPage />,
+  settings: <SettingsPage />,
+};
+
 function AppShell() {
-  const { token } = useDashboard();
+  const { accountDetailId, activeTab, token } = useDashboard();
 
   useEffect(() => {
     console.log(
@@ -52,17 +63,21 @@ function AppShell() {
 
             <JobsStrip />
 
-            <OverviewPage />
+            <Routes>
+              <Route caseSensitive path="/" element={<OverviewPage />} />
+              <Route caseSensitive path="/accounts" element={<AccountsPage />} />
+              <Route
+                caseSensitive
+                path="/accounts/:accountId"
+                element={accountDetailId ? <AccountDetailPage /> : pageForTab[activeTab]}
+              />
+              <Route caseSensitive path="/posts" element={<PostsPage />} />
+              <Route caseSensitive path="/activity" element={<ActivityPage />} />
+              <Route caseSensitive path="/settings" element={<SettingsPage />} />
+              {/* Not a dashboard path: show the fallback tab while useRouting redirects to it. */}
+              <Route path="*" element={pageForTab[activeTab]} />
+            </Routes>
 
-            <AccountDetailPage />
-
-            <AccountsPage />
-
-            <PostsPage />
-
-            <ActivityPage />
-
-            <SettingsPage />
             <AddAccountSheet />
 
             <EditMappingDialog />

@@ -2,14 +2,13 @@ import { useDashboard } from '../lib/dashboard-context';
 
 // One-line problem summary shown on every tab except Overview.
 export function StatusStrip() {
-  const { accountAlerts, activeJobs, activeTab, postQueue, setAccountDetailId, setActiveTab } = useDashboard();
+  const { accountAlerts, activeJobs, activeTab, openTab, postQueue } = useDashboard();
   return activeTab !== 'overview' &&
     (accountAlerts.length > 0 || activeJobs.length > 0 || (postQueue?.failed ?? 0) > 0) ? (
     <button
       type="button"
       onClick={() => {
-        setAccountDetailId(null);
-        setActiveTab('overview');
+        openTab('overview');
       }}
       className="mb-6 flex w-full flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-border bg-card px-3 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:border-foreground/25"
     >

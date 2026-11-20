@@ -5,22 +5,20 @@ import { formatRelativeTime, formatState } from '../lib/format';
 
 export function OverviewPage() {
   const {
-    activeTab,
     authHeaders,
     countdown,
     currentStatus,
     handleLogout,
     latestActivity,
     mappings,
+    openAccount,
     pendingBackfills,
     queuedPostCount,
-    setAccountDetailId,
-    setActiveTab,
     setRouteSummary,
     topAccount,
     topAccountProfile,
   } = useDashboard();
-  return activeTab === 'overview' ? (
+  return (
     <section className="space-y-8 animate-fade-in">
       <section aria-labelledby="routes-heading">
         <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
@@ -35,8 +33,7 @@ export function OverviewPage() {
           authHeaders={authHeaders}
           onAuthFailure={handleLogout}
           onOpenAccount={(mappingId) => {
-            setActiveTab('accounts');
-            setAccountDetailId(mappingId);
+            openAccount(mappingId);
           }}
           onSummary={setRouteSummary}
         />
@@ -109,5 +106,5 @@ export function OverviewPage() {
         </dl>
       </section>
     </section>
-  ) : null;
+  );
 }

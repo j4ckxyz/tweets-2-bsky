@@ -9,15 +9,8 @@ import { Card, CardContent } from '../components/ui/card';
 import { useDashboard } from '../lib/dashboard-context';
 
 export function AccountsPage() {
-  const {
-    accountDetailId,
-    accountMatchesCount,
-    activeTab,
-    canCreateMappings,
-    normalizedAccountsQuery,
-    openAddAccountSheet,
-  } = useDashboard();
-  return activeTab === 'accounts' && !accountDetailId ? (
+  const { accountMatchesCount, canCreateMappings, normalizedAccountsQuery, openAddAccountSheet } = useDashboard();
+  return (
     <section className="grid gap-6 lg:grid-cols-[200px_1fr] animate-fade-in">
       <FolderSidebar />
 
@@ -51,5 +44,5 @@ export function AccountsPage() {
         )}
       </div>
     </section>
-  ) : null;
+  );
 }

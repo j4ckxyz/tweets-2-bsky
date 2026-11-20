@@ -13,7 +13,6 @@ import { cn } from '../lib/utils';
 
 export function PostsPage() {
   const {
-    activeTab,
     filteredLocalPostSearchResults,
     filteredPostedActivity,
     getProfileForActor,
@@ -26,7 +25,7 @@ export function PostsPage() {
     setPostsGroupFilter,
     setPostsSearchQuery,
   } = useDashboard();
-  return activeTab === 'posts' ? (
+  return (
     <section className="space-y-6 animate-fade-in">
       <Card className="">
         <CardHeader className="pb-3">
@@ -394,5 +393,5 @@ export function PostsPage() {
         </CardContent>
       </Card>
     </section>
-  ) : null;
+  );
 }

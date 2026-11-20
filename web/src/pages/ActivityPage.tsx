@@ -5,8 +5,8 @@ import { useDashboard } from '../lib/dashboard-context';
 import { cn } from '../lib/utils';
 
 export function ActivityPage() {
-  const { activeTab, activityView, postQueue, setActivityView } = useDashboard();
-  return activeTab === 'activity' ? (
+  const { activityView, postQueue, setActivityView } = useDashboard();
+  return (
     <section className="space-y-6 animate-fade-in">
       <div
         className="inline-flex max-w-full gap-0.5 overflow-x-auto rounded-md border border-border bg-rail p-0.5"
@@ -45,5 +45,5 @@ export function ActivityPage() {
 
       <OutcomesView />
     </section>
-  ) : null;
+  );
 }

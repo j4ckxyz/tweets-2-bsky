@@ -3,7 +3,7 @@ import { cn } from '../../lib/utils';
 
 // Sticky top bar with the five-tab grid on small screens.
 export function MobileNav() {
-  const { activeTab, dashboardTabs, setAccountDetailId, setActiveTab } = useDashboard();
+  const { activeTab, dashboardTabs, openTab } = useDashboard();
   return (
     <div className="sticky top-0 z-30 border-b border-border bg-rail/95 px-3 pb-2 pt-3 backdrop-blur lg:hidden">
       <div className="mb-2 flex items-center gap-2 px-1">
@@ -28,8 +28,7 @@ export function MobileNav() {
                     : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground',
                 )}
                 onClick={() => {
-                  setAccountDetailId(null);
-                  setActiveTab(tab.id);
+                  openTab(tab.id);
                 }}
                 type="button"
                 aria-current={isActive ? 'page' : undefined}

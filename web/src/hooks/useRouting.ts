@@ -1,73 +1,66 @@
 import { History, LayoutDashboard, Newspaper, Settings2, Users } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useLocation, useNavigate } from 'react-router';
 import { TAB_PATHS } from '../lib/constants';
 import { getAccountIdFromPath, getTabFromPath, normalizePath } from '../lib/format';
 import type { DashboardTab } from '../lib/types';
 
-// Active tab and account detail id, kept in sync with the URL and history.
+function readSavedTab(): DashboardTab {
+  const saved = localStorage.getItem('dashboard-tab');
+  if (
+    saved === 'overview' ||
+    saved === 'accounts' ||
+    saved === 'posts' ||
+    saved === 'activity' ||
+    saved === 'settings'
+  ) {
+    return saved;
+  }
+  return 'overview';
+}
+
+// Active tab and account detail id, derived from the URL. React Router owns the
+// history; the path helpers in lib/format decide what a path means, so URLs
+// resolve exactly as they always have (case-sensitive, trailing slash allowed).
 export function useRouting() {
-  const [activeTab, setActiveTab] = useState<DashboardTab>(() => {
-    // The account detail route lives under the accounts tab but is not one of
-    // TAB_PATHS, so it has to select the tab itself — otherwise a refresh or a
-    // pasted /accounts/<id> link lands on whatever tab was last saved and the
-    // detail page never renders.
-    if (getAccountIdFromPath(window.location.pathname)) {
-      return 'accounts';
-    }
-
-    const fromPath = getTabFromPath(window.location.pathname);
-    if (fromPath) {
-      return fromPath;
-    }
-
-    const saved = localStorage.getItem('dashboard-tab');
-    if (
-      saved === 'overview' ||
-      saved === 'accounts' ||
-      saved === 'posts' ||
-      saved === 'activity' ||
-      saved === 'settings'
-    ) {
-      return saved;
-    }
-    return 'overview';
-  });
+  const location = useLocation();
+  const navigate = useNavigate();
 
   // The account detail page is a sub-route of the accounts tab rather than a
   // tab of its own, so it keeps the tab highlighted and the back button works.
-  const [accountDetailId, setAccountDetailId] = useState<string | null>(() =>
-    getAccountIdFromPath(window.location.pathname),
-  );
+  const accountDetailId = getAccountIdFromPath(location.pathname);
+  const tabFromPath = accountDetailId ? 'accounts' : getTabFromPath(location.pathname);
+
+  // A path that is not a dashboard route opens the last-used tab on first load,
+  // and Overview when reached later through back/forward.
+  const fallbackTabRef = useRef<DashboardTab>(readSavedTab());
+  const activeTab: DashboardTab = tabFromPath ?? fallbackTabRef.current;
 
   useEffect(() => {
     localStorage.setItem('dashboard-tab', activeTab);
   }, [activeTab]);
 
   useEffect(() => {
-    const expectedPath = accountDetailId ? `/accounts/${accountDetailId}` : TAB_PATHS[activeTab];
-    const currentPath = normalizePath(window.location.pathname);
-    if (currentPath !== expectedPath) {
-      window.history.pushState({ tab: activeTab, accountDetailId }, '', expectedPath);
+    if (tabFromPath === null) {
+      navigate(TAB_PATHS[activeTab]);
     }
-  }, [activeTab, accountDetailId]);
+    fallbackTabRef.current = 'overview';
+  }, [activeTab, navigate, tabFromPath]);
 
-  useEffect(() => {
-    const onPopState = () => {
-      const accountId = getAccountIdFromPath(window.location.pathname);
-      setAccountDetailId(accountId);
-      if (accountId) {
-        setActiveTab('accounts');
-        return;
+  // Push a history entry only when the path actually changes, like the old
+  // pushState sync did; re-selecting the current tab adds nothing to history.
+  const goTo = useCallback(
+    (path: string) => {
+      if (normalizePath(window.location.pathname) !== path) {
+        navigate(path);
       }
-      const tabFromPath = getTabFromPath(window.location.pathname);
-      setActiveTab(tabFromPath ?? 'overview');
-    };
+    },
+    [navigate],
+  );
+  const openTab = useCallback((tab: DashboardTab) => goTo(TAB_PATHS[tab]), [goTo]);
+  const openAccount = useCallback((mappingId: string) => goTo(`/accounts/${mappingId}`), [goTo]);
+  const closeAccount = useCallback(() => goTo(TAB_PATHS.accounts), [goTo]);
 
-    window.addEventListener('popstate', onPopState);
-    return () => {
-      window.removeEventListener('popstate', onPopState);
-    };
-  }, []);
   const dashboardTabs = useMemo(
     () => [
       {
@@ -101,5 +94,5 @@ export function useRouting() {
 
   const activeTabMeta = dashboardTabs.find((tab) => tab.id === activeTab);
 
-  return { activeTab, setActiveTab, accountDetailId, setAccountDetailId, dashboardTabs, activeTabMeta };
+  return { activeTab, accountDetailId, openTab, openAccount, closeAccount, dashboardTabs, activeTabMeta };
 }

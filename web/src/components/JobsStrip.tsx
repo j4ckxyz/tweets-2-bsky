@@ -14,12 +14,12 @@ export function JobsStrip() {
     currentStatus,
     isAdmin,
     jobsExpanded,
+    openTab,
     pendingBackfills,
     postQueue,
     progressPercent,
     queuedPostCount,
     retryFailedQueue,
-    setActiveTab,
     setActivityView,
     setJobsExpanded,
   } = useDashboard();
@@ -83,7 +83,7 @@ export function JobsStrip() {
               type="button"
               className="text-xs text-red-600 underline-offset-4 hover:underline dark:text-red-400"
               onClick={() => {
-                setActiveTab('activity');
+                openTab('activity');
                 setActivityView('failures');
               }}
             >
