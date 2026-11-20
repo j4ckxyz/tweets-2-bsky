@@ -1,13 +1,6 @@
 // Fixed values the dashboard renders from: tab routes, default form state,
 // permission options and the log level/stage vocabularies.
-import type {
-  DashboardTab,
-  LogLevel,
-  MappingFormState,
-  MirrorSettings,
-  UserFormState,
-  UserPermissions,
-} from '../types';
+import type { DashboardTab, LogLevel, MappingFormState, MirrorSettings, UserFormState, UserPermissions } from './types';
 
 export const defaultMirrorSettings = (): MirrorSettings => ({
   sensitiveFallbackLabel: 'sexual',

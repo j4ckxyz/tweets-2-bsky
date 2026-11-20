@@ -1,5 +1,5 @@
 import { selectClassName } from '../lib/constants';
-import type { EditMode, ImageLayout, MirrorSettings, SensitiveFallbackLabel } from '../types';
+import type { EditMode, ImageLayout, MirrorSettings, SensitiveFallbackLabel } from '../lib/types';
 import { Label } from './ui/label';
 
 interface MirrorSettingsFieldsProps {

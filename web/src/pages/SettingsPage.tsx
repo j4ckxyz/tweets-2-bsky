@@ -1,0 +1,42 @@
+import { AccessScopeSection } from '../components/settings/AccessScopeSection';
+import { AccountSecuritySection } from '../components/settings/AccountSecuritySection';
+import { AiSection } from '../components/settings/AiSection';
+import { DataSection } from '../components/settings/DataSection';
+import { SystemSection } from '../components/settings/SystemSection';
+import { TwitterSection } from '../components/settings/TwitterSection';
+import { UsersSection } from '../components/settings/UsersSection';
+import { NavList } from '../components/ui/nav-list';
+import { useDashboard } from '../lib/dashboard-context';
+
+export function SettingsPage() {
+  const { activeTab, setSettingsActiveSection, settingsActiveSection, settingsNavItems } = useDashboard();
+  return activeTab === 'settings' ? (
+    <section className="grid gap-6 lg:grid-cols-[180px_1fr] animate-fade-in">
+      <div className="h-fit lg:sticky lg:top-6">
+        <NavList
+          items={settingsNavItems}
+          activeId={settingsActiveSection}
+          onSelect={setSettingsActiveSection}
+          ariaLabel="Settings sections"
+          className="flex-row overflow-x-auto lg:flex-col"
+        />
+      </div>
+
+      <div className="min-w-0 space-y-6">
+        <AccountSecuritySection />
+
+        <AccessScopeSection />
+
+        <SystemSection />
+
+        <UsersSection />
+
+        <TwitterSection />
+
+        <AiSection />
+
+        <DataSection />
+      </div>
+    </section>
+  ) : null;
+}

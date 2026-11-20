@@ -3,7 +3,10 @@ const path = require('node:path');
 
 const shades = (token) =>
   Object.fromEntries(
-    [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950].map((step) => [step, `oklch(var(${token}) / <alpha-value>)`]),
+    [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950].map((step) => [
+      step,
+      `oklch(var(${token}) / <alpha-value>)`,
+    ]),
   );
 
 module.exports = {
@@ -59,7 +62,16 @@ module.exports = {
         sm: '0.25rem',
       },
       fontFamily: {
-        sans: ['system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'Helvetica Neue', 'Arial', 'sans-serif'],
+        sans: [
+          'system-ui',
+          '-apple-system',
+          'BlinkMacSystemFont',
+          'Segoe UI',
+          'Roboto',
+          'Helvetica Neue',
+          'Arial',
+          'sans-serif',
+        ],
         mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
       },
     },

@@ -1,15 +1,6 @@
 // Presentation helpers: turning API values into the strings and URLs the UI
 // shows. No React and no state, so they can be unit tested directly.
 import axios from 'axios';
-import type {
-  AccountMapping,
-  ActivityLog,
-  AppState,
-  AuthUser,
-  DashboardTab,
-  LogEntry,
-  UserPermissions,
-} from '../types';
 import {
   DEFAULT_GROUP_EMOJI,
   DEFAULT_GROUP_NAME,
@@ -17,6 +8,7 @@ import {
   FEDIVERSE_BRIDGE_MIN_AGE_MS,
   TAB_PATHS,
 } from './constants';
+import type { AccountMapping, ActivityLog, AppState, AuthUser, DashboardTab, LogEntry, UserPermissions } from './types';
 
 export function getApiErrorMessage(error: unknown, fallback: string): string {
   if (axios.isAxiosError(error)) {
