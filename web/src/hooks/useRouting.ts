@@ -44,8 +44,16 @@ export function useRouting() {
     if (tabFromPath === null) {
       navigate(TAB_PATHS[activeTab]);
     }
-    fallbackTabRef.current = 'overview';
   }, [activeTab, navigate, tabFromPath]);
+
+  // Only once a real dashboard path is showing does the fallback become
+  // Overview. Switching earlier let a re-render during the (transition-based)
+  // redirect send a first load to Overview instead of the last-used tab.
+  useEffect(() => {
+    if (tabFromPath !== null) {
+      fallbackTabRef.current = 'overview';
+    }
+  }, [tabFromPath]);
 
   // Push a history entry only when the path actually changes, like the old
   // pushState sync did; re-selecting the current tab adds nothing to history.
