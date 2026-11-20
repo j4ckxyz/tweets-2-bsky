@@ -897,7 +897,10 @@ async function captureTweetScreenshot(tweetUrl: string): Promise<ScreenshotResul
       </html>
     `;
 
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    // puppeteer 24 narrowed setContent's waitUntil to load/domcontentloaded;
+    // wait for network idle explicitly to keep the old networkidle0 behaviour.
+    await page.setContent(html, { waitUntil: 'load' });
+    await page.waitForNetworkIdle({ idleTime: 500 });
 
     // Wait for the twitter iframe to load and render
     try {

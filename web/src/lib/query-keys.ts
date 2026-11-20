@@ -1,0 +1,22 @@
+// Query keys for every server resource the dashboard reads.
+export const queryKeys = {
+  bootstrapStatus: ['auth', 'bootstrap-status'] as const,
+  me: ['me'] as const,
+  mappings: ['mappings'] as const,
+  groups: ['groups'] as const,
+  status: ['status'] as const,
+  recentActivity: ['recent-activity'] as const,
+  enrichedPosts: ['posts', 'enriched'] as const,
+  postSearch: (query: string) => ['posts', 'search', query] as const,
+  bskyProfiles: ['bsky-profiles'] as const,
+  version: ['version'] as const,
+  updateStatus: ['update-status'] as const,
+  users: ['admin', 'users'] as const,
+  twitterConfig: ['twitter-config'] as const,
+  aiConfig: ['ai-config'] as const,
+  logs: (query: string) => ['logs', query] as const,
+  queueFailures: ['queue', 'failures'] as const,
+  accountHealth: ['account-health'] as const,
+  accountDetail: (mappingId: string) => ['accounts', mappingId] as const,
+  discovery: ['discovery'] as const,
+};

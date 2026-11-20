@@ -44,6 +44,8 @@ export interface AccountMapping {
   imageLayout?: ImageLayout;
   botDisplayNameSuffix?: boolean;
   syncDeletes?: boolean;
+  /** Checked every sweep and first in line for the scraper budget. */
+  priority?: boolean;
   createdByUser?: {
     id: string;
     username?: string;
@@ -65,6 +67,8 @@ export interface MirrorSettings {
   imageLayout: ImageLayout;
   botDisplayNameSuffix: boolean;
   syncDeletes: boolean;
+  /** Optional so forms built before the flag existed still type-check; absent means unchanged on save. */
+  priority?: boolean;
 }
 
 export interface AccountGroup {
@@ -236,8 +240,8 @@ export const JOB_KIND_DOT: Record<string, string> = {
   checking: 'bg-sky-500',
   mirroring: 'bg-emerald-500',
   backfilling: 'bg-amber-500',
-  'profile-sync': 'bg-violet-500',
-  'pin-sync': 'bg-pink-500',
+  'profile-sync': 'bg-primary',
+  'pin-sync': 'bg-primary',
 };
 
 export interface QueueMappingCounts {
@@ -516,4 +520,141 @@ export interface AccountSecurityPasswordState {
   currentPassword: string;
   newPassword: string;
   confirmPassword: string;
+}
+
+// Response shapes for the account health, account detail, discovery and preview endpoints.
+export interface AccountHealthSource {
+  twitterUsername: string;
+  tier: string;
+  lastCheckedAt: number | null;
+  lastFoundAt: number | null;
+  dueInMs: number;
+  lastError?: string | null;
+  protectedSince?: number | null;
+}
+
+export interface AccountHealthRow {
+  mappingId: string;
+  bskyIdentifier: string;
+  twitterUsernames: string[];
+  enabled: boolean;
+  groupName?: string;
+  groupEmoji?: string;
+  down: { state: string; reason: string; detectedAt: number } | null;
+  lag: { samples: number; averageMs: number; medianMs: number; p95Ms: number; worstMs: number } | null;
+  posts: { posted: number; skipped: number; failed: number; lastPostedAt: number | null };
+  queue: { pending: number; processing: number; failed: number };
+  sources: AccountHealthSource[];
+}
+
+export interface AccountHealthResponse {
+  windowDays: number;
+  accounts: AccountHealthRow[];
+  summary: {
+    accounts: number;
+    down: number;
+    averageLagMs: number | null;
+    lagSamples: number;
+    postedInWindow: number;
+  };
+}
+
+export interface QueueItemView {
+  twitter_id: string;
+  twitter_username: string;
+  status: string;
+  attempts: number;
+  tweet_text?: string;
+  last_error?: string;
+  failure_stage?: string;
+  enqueued_at: number;
+  not_before: number;
+  updated_at: number;
+}
+
+export interface AccountDetailResponse {
+  mapping: {
+    id: string;
+    bskyIdentifier: string;
+    bskyServiceUrl?: string;
+    twitterUsernames: string[];
+    enabled: boolean;
+    owner?: string;
+    groupName?: string;
+    groupEmoji?: string;
+    hasBotLabel?: boolean;
+    profileSyncSourceUsername?: string;
+    lastProfileSyncAt?: string;
+    lastPinnedTweetId?: string;
+    lastPinSyncAt?: string;
+  };
+  permissions: { canManage: boolean; canQueueBackfills: boolean; canRunNow: boolean; isAdmin: boolean };
+  down: { state: string; reason: string; detectedAt: number; nextRecheckAt: number; checks: number } | null;
+  lag: { samples: number; averageMs: number; medianMs: number; p95Ms: number; worstMs: number } | null;
+  posts: { posted: number; skipped: number; failed: number; lastPostedAt: number | null };
+  queue: {
+    pending: number;
+    ready: number;
+    backoff: number;
+    processing: number;
+    failed: number;
+    nextRetryAt: number | null;
+    oldestEnqueuedAt: number | null;
+    items: QueueItemView[];
+  };
+  sources: {
+    twitterUsername: string;
+    tier: string;
+    dueInMs: number;
+    lastCheckedAt: number | null;
+    lastFoundAt: number | null;
+    emptyStreak: number;
+    lastError: string | null;
+    lastErrorAt: number | null;
+    errorStreak: number;
+    protectedSince: number | null;
+  }[];
+  recentPosts: {
+    twitter_id: string;
+    tweet_text?: string;
+    bsky_uri?: string;
+    status: string;
+    created_at?: string;
+    posted_at?: number;
+    tweet_created_at?: number;
+  }[];
+  // Log rows carry `ts` (epoch ms); reading `timestamp` showed every entry as "never".
+  recentLogs: { id: number; level: string; stage: string; event: string; message: string; ts: number }[];
+}
+
+export interface DiscoveryState {
+  curatorMappingId: string | null;
+  groups: { name: string; listUri: string | null; starterPackUri: string | null; lastDiscoverySyncAt: string | null }[];
+}
+
+export interface PreviewChunk {
+  text: string;
+  length: number;
+}
+
+export interface PreviewTweet {
+  twitterId: string;
+  originalText: string;
+  createdAt?: string;
+  chunks: PreviewChunk[];
+  images: number;
+  video: boolean;
+  quote: boolean;
+  linkCard: boolean;
+  isReply: boolean;
+  repostOf?: string;
+  langs?: string[];
+  extraMediaPosts?: number;
+  skipped?: { stage: string; reason: string };
+}
+
+export interface PreviewResult {
+  twitterUsername: string;
+  fetched: number;
+  tweets: PreviewTweet[];
 }

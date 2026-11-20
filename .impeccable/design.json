@@ -1,0 +1,709 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-20T15:24:04+00:00",
+  "title": "Design System: tweets-2-bsky",
+  "extensions": {
+    "colorMeta": {
+      "airmail-blue": {
+        "role": "primary",
+        "displayName": "Airmail Blue",
+        "canonical": "oklch(43% 0.165 264)",
+        "tonalRamp": [
+          "oklch(15% 0.087 264)",
+          "oklch(27% 0.11 264)",
+          "oklch(39% 0.134 264)",
+          "oklch(51% 0.157 264)",
+          "oklch(63% 0.149 264)",
+          "oklch(75% 0.126 264)",
+          "oklch(86% 0.105 264)",
+          "oklch(95% 0.087 264)"
+        ]
+      },
+      "airmail-blue-ring": {
+        "role": "primary",
+        "displayName": "Airmail Blue Ring",
+        "canonical": "oklch(52% 0.15 264)",
+        "tonalRamp": [
+          "oklch(15% 0.079 264)",
+          "oklch(27% 0.1 264)",
+          "oklch(39% 0.122 264)",
+          "oklch(51% 0.143 264)",
+          "oklch(63% 0.136 264)",
+          "oklch(75% 0.115 264)",
+          "oklch(86% 0.095 264)",
+          "oklch(95% 0.079 264)"
+        ]
+      },
+      "aerogramme-paper": {
+        "role": "neutral",
+        "displayName": "Aerogramme Paper",
+        "canonical": "oklch(96.8% 0.011 250)",
+        "tonalRamp": [
+          "oklch(15% 0.016 250)",
+          "oklch(27% 0.02 250)",
+          "oklch(39% 0.024 250)",
+          "oklch(51% 0.029 250)",
+          "oklch(63% 0.027 250)",
+          "oklch(75% 0.023 250)",
+          "oklch(86% 0.019 250)",
+          "oklch(95% 0.016 250)"
+        ]
+      },
+      "sheet": {
+        "role": "neutral",
+        "displayName": "Sheet",
+        "canonical": "oklch(98.8% 0.005 250)",
+        "tonalRamp": [
+          "oklch(15% 0.016 250)",
+          "oklch(27% 0.02 250)",
+          "oklch(39% 0.024 250)",
+          "oklch(51% 0.029 250)",
+          "oklch(63% 0.027 250)",
+          "oklch(75% 0.023 250)",
+          "oklch(86% 0.019 250)",
+          "oklch(95% 0.016 250)"
+        ]
+      },
+      "sorting-rail": {
+        "role": "neutral",
+        "displayName": "Sorting Rail",
+        "canonical": "oklch(94% 0.017 252)",
+        "tonalRamp": [
+          "oklch(15% 0.016 252)",
+          "oklch(27% 0.02 252)",
+          "oklch(39% 0.024 252)",
+          "oklch(51% 0.029 252)",
+          "oklch(63% 0.027 252)",
+          "oklch(75% 0.023 252)",
+          "oklch(86% 0.019 252)",
+          "oklch(95% 0.016 252)"
+        ]
+      },
+      "franking-tint": {
+        "role": "neutral",
+        "displayName": "Franking Tint",
+        "canonical": "oklch(93.5% 0.016 252)",
+        "tonalRamp": [
+          "oklch(15% 0.016 252)",
+          "oklch(27% 0.02 252)",
+          "oklch(39% 0.024 252)",
+          "oklch(51% 0.029 252)",
+          "oklch(63% 0.027 252)",
+          "oklch(75% 0.023 252)",
+          "oklch(86% 0.019 252)",
+          "oklch(95% 0.016 252)"
+        ]
+      },
+      "hairline": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "oklch(88.5% 0.02 252)",
+        "tonalRamp": [
+          "oklch(15% 0.016 252)",
+          "oklch(27% 0.02 252)",
+          "oklch(39% 0.024 252)",
+          "oklch(51% 0.029 252)",
+          "oklch(63% 0.027 252)",
+          "oklch(75% 0.023 252)",
+          "oklch(86% 0.019 252)",
+          "oklch(95% 0.016 252)"
+        ]
+      },
+      "field-edge": {
+        "role": "neutral",
+        "displayName": "Field Edge",
+        "canonical": "oklch(86% 0.024 252)",
+        "tonalRamp": [
+          "oklch(15% 0.016 252)",
+          "oklch(27% 0.02 252)",
+          "oklch(39% 0.024 252)",
+          "oklch(51% 0.029 252)",
+          "oklch(63% 0.027 252)",
+          "oklch(75% 0.023 252)",
+          "oklch(86% 0.019 252)",
+          "oklch(95% 0.016 252)"
+        ]
+      },
+      "faded-ink": {
+        "role": "neutral",
+        "displayName": "Faded Ink",
+        "canonical": "oklch(48% 0.032 258)",
+        "tonalRamp": [
+          "oklch(15% 0.017 258)",
+          "oklch(27% 0.021 258)",
+          "oklch(39% 0.026 258)",
+          "oklch(51% 0.03 258)",
+          "oklch(63% 0.029 258)",
+          "oklch(75% 0.024 258)",
+          "oklch(86% 0.02 258)",
+          "oklch(95% 0.017 258)"
+        ]
+      },
+      "postal-ink": {
+        "role": "neutral",
+        "displayName": "Postal Ink",
+        "canonical": "oklch(25% 0.045 262)",
+        "tonalRamp": [
+          "oklch(15% 0.024 262)",
+          "oklch(27% 0.03 262)",
+          "oklch(39% 0.036 262)",
+          "oklch(51% 0.043 262)",
+          "oklch(63% 0.041 262)",
+          "oklch(75% 0.034 262)",
+          "oklch(86% 0.029 262)",
+          "oklch(95% 0.024 262)"
+        ]
+      },
+      "on-airmail": {
+        "role": "neutral",
+        "displayName": "On-Airmail",
+        "canonical": "oklch(98.5% 0.005 250)",
+        "tonalRamp": [
+          "oklch(15% 0.016 250)",
+          "oklch(27% 0.02 250)",
+          "oklch(39% 0.024 250)",
+          "oklch(51% 0.029 250)",
+          "oklch(63% 0.027 250)",
+          "oklch(75% 0.023 250)",
+          "oklch(86% 0.019 250)",
+          "oklch(95% 0.016 250)"
+        ]
+      },
+      "cancellation-red": {
+        "role": "secondary",
+        "displayName": "Cancellation Red",
+        "canonical": "oklch(53% 0.19 27)",
+        "tonalRamp": [
+          "oklch(15% 0.1 27)",
+          "oklch(27% 0.127 27)",
+          "oklch(39% 0.154 27)",
+          "oklch(51% 0.181 27)",
+          "oklch(63% 0.172 27)",
+          "oklch(75% 0.145 27)",
+          "oklch(86% 0.12 27)",
+          "oklch(95% 0.1 27)"
+        ]
+      },
+      "customs-amber": {
+        "role": "secondary",
+        "displayName": "Customs Amber",
+        "canonical": "oklch(50% 0.125 62)",
+        "tonalRamp": [
+          "oklch(15% 0.069 62)",
+          "oklch(27% 0.087 62)",
+          "oklch(39% 0.105 62)",
+          "oklch(51% 0.124 62)",
+          "oklch(63% 0.118 62)",
+          "oklch(75% 0.099 62)",
+          "oklch(86% 0.082 62)",
+          "oklch(95% 0.069 62)"
+        ]
+      },
+      "cleared-green": {
+        "role": "tertiary",
+        "displayName": "Cleared Green",
+        "canonical": "oklch(50% 0.1 165)",
+        "tonalRamp": [
+          "oklch(15% 0.053 165)",
+          "oklch(27% 0.067 165)",
+          "oklch(39% 0.081 165)",
+          "oklch(51% 0.095 165)",
+          "oklch(63% 0.091 165)",
+          "oklch(75% 0.076 165)",
+          "oklch(86% 0.063 165)",
+          "oklch(95% 0.053 165)"
+        ]
+      },
+      "tracking-blue": {
+        "role": "tertiary",
+        "displayName": "Tracking Blue",
+        "canonical": "oklch(50% 0.12 240)",
+        "tonalRamp": [
+          "oklch(15% 0.063 240)",
+          "oklch(27% 0.08 240)",
+          "oklch(39% 0.097 240)",
+          "oklch(51% 0.114 240)",
+          "oklch(63% 0.109 240)",
+          "oklch(75% 0.092 240)",
+          "oklch(86% 0.076 240)",
+          "oklch(95% 0.063 240)"
+        ]
+      },
+      "airmail-blue-dark": {
+        "role": "primary",
+        "displayName": "Airmail Blue (dark)",
+        "canonical": "oklch(74% 0.115 258)",
+        "tonalRamp": [
+          "oklch(15% 0.061 258)",
+          "oklch(27% 0.077 258)",
+          "oklch(39% 0.093 258)",
+          "oklch(51% 0.11 258)",
+          "oklch(63% 0.104 258)",
+          "oklch(75% 0.088 258)",
+          "oklch(86% 0.073 258)",
+          "oklch(95% 0.061 258)"
+        ]
+      },
+      "postal-navy": {
+        "role": "neutral",
+        "displayName": "Postal Navy (dark ground)",
+        "canonical": "oklch(20% 0.035 263)",
+        "tonalRamp": [
+          "oklch(15% 0.018 263)",
+          "oklch(27% 0.023 263)",
+          "oklch(39% 0.028 263)",
+          "oklch(51% 0.033 263)",
+          "oklch(63% 0.032 263)",
+          "oklch(75% 0.027 263)",
+          "oklch(86% 0.022 263)",
+          "oklch(95% 0.018 263)"
+        ]
+      },
+      "sheet-dark": {
+        "role": "neutral",
+        "displayName": "Sheet (dark)",
+        "canonical": "oklch(22.5% 0.04 263)",
+        "tonalRamp": [
+          "oklch(15% 0.021 263)",
+          "oklch(27% 0.027 263)",
+          "oklch(39% 0.032 263)",
+          "oklch(51% 0.038 263)",
+          "oklch(63% 0.036 263)",
+          "oklch(75% 0.031 263)",
+          "oklch(86% 0.025 263)",
+          "oklch(95% 0.021 263)"
+        ]
+      },
+      "sorting-rail-dark": {
+        "role": "neutral",
+        "displayName": "Sorting Rail (dark)",
+        "canonical": "oklch(17.5% 0.034 263)",
+        "tonalRamp": [
+          "oklch(15% 0.018 263)",
+          "oklch(27% 0.023 263)",
+          "oklch(39% 0.028 263)",
+          "oklch(51% 0.032 263)",
+          "oklch(63% 0.031 263)",
+          "oklch(75% 0.026 263)",
+          "oklch(86% 0.022 263)",
+          "oklch(95% 0.018 263)"
+        ]
+      },
+      "franking-tint-dark": {
+        "role": "neutral",
+        "displayName": "Franking Tint (dark)",
+        "canonical": "oklch(26% 0.04 263)",
+        "tonalRamp": [
+          "oklch(15% 0.021 263)",
+          "oklch(27% 0.027 263)",
+          "oklch(39% 0.032 263)",
+          "oklch(51% 0.038 263)",
+          "oklch(63% 0.036 263)",
+          "oklch(75% 0.031 263)",
+          "oklch(86% 0.025 263)",
+          "oklch(95% 0.021 263)"
+        ]
+      },
+      "hairline-dark": {
+        "role": "neutral",
+        "displayName": "Hairline (dark)",
+        "canonical": "oklch(30.5% 0.042 263)",
+        "tonalRamp": [
+          "oklch(15% 0.022 263)",
+          "oklch(27% 0.028 263)",
+          "oklch(39% 0.034 263)",
+          "oklch(51% 0.04 263)",
+          "oklch(63% 0.038 263)",
+          "oklch(75% 0.032 263)",
+          "oklch(86% 0.027 263)",
+          "oklch(95% 0.022 263)"
+        ]
+      },
+      "field-edge-dark": {
+        "role": "neutral",
+        "displayName": "Field Edge (dark)",
+        "canonical": "oklch(35% 0.045 263)",
+        "tonalRamp": [
+          "oklch(15% 0.024 263)",
+          "oklch(27% 0.03 263)",
+          "oklch(39% 0.036 263)",
+          "oklch(51% 0.043 263)",
+          "oklch(63% 0.041 263)",
+          "oklch(75% 0.034 263)",
+          "oklch(86% 0.029 263)",
+          "oklch(95% 0.024 263)"
+        ]
+      },
+      "faded-ink-dark": {
+        "role": "neutral",
+        "displayName": "Faded Ink (dark)",
+        "canonical": "oklch(73% 0.03 255)",
+        "tonalRamp": [
+          "oklch(15% 0.016 255)",
+          "oklch(27% 0.02 255)",
+          "oklch(39% 0.024 255)",
+          "oklch(51% 0.029 255)",
+          "oklch(63% 0.027 255)",
+          "oklch(75% 0.023 255)",
+          "oklch(86% 0.019 255)",
+          "oklch(95% 0.016 255)"
+        ]
+      },
+      "postal-ink-dark": {
+        "role": "neutral",
+        "displayName": "Postal Ink (dark)",
+        "canonical": "oklch(94% 0.012 250)",
+        "tonalRamp": [
+          "oklch(15% 0.016 250)",
+          "oklch(27% 0.02 250)",
+          "oklch(39% 0.024 250)",
+          "oklch(51% 0.029 250)",
+          "oklch(63% 0.027 250)",
+          "oklch(75% 0.023 250)",
+          "oklch(86% 0.019 250)",
+          "oklch(95% 0.016 250)"
+        ]
+      },
+      "on-airmail-dark": {
+        "role": "neutral",
+        "displayName": "On-Airmail (dark)",
+        "canonical": "oklch(19% 0.04 263)",
+        "tonalRamp": [
+          "oklch(15% 0.021 263)",
+          "oklch(27% 0.027 263)",
+          "oklch(39% 0.032 263)",
+          "oklch(51% 0.038 263)",
+          "oklch(63% 0.036 263)",
+          "oklch(75% 0.031 263)",
+          "oklch(86% 0.025 263)",
+          "oklch(95% 0.021 263)"
+        ]
+      },
+      "cancellation-red-dark": {
+        "role": "secondary",
+        "displayName": "Cancellation Red (dark)",
+        "canonical": "oklch(70% 0.165 25)",
+        "tonalRamp": [
+          "oklch(15% 0.087 25)",
+          "oklch(27% 0.11 25)",
+          "oklch(39% 0.134 25)",
+          "oklch(51% 0.157 25)",
+          "oklch(63% 0.149 25)",
+          "oklch(75% 0.126 25)",
+          "oklch(86% 0.105 25)",
+          "oklch(95% 0.087 25)"
+        ]
+      },
+      "customs-amber-dark": {
+        "role": "secondary",
+        "displayName": "Customs Amber (dark)",
+        "canonical": "oklch(80% 0.125 78)",
+        "tonalRamp": [
+          "oklch(15% 0.066 78)",
+          "oklch(27% 0.084 78)",
+          "oklch(39% 0.101 78)",
+          "oklch(51% 0.119 78)",
+          "oklch(63% 0.113 78)",
+          "oklch(75% 0.095 78)",
+          "oklch(86% 0.079 78)",
+          "oklch(95% 0.066 78)"
+        ]
+      },
+      "cleared-green-dark": {
+        "role": "tertiary",
+        "displayName": "Cleared Green (dark)",
+        "canonical": "oklch(76% 0.11 165)",
+        "tonalRamp": [
+          "oklch(15% 0.058 165)",
+          "oklch(27% 0.074 165)",
+          "oklch(39% 0.089 165)",
+          "oklch(51% 0.105 165)",
+          "oklch(63% 0.1 165)",
+          "oklch(75% 0.084 165)",
+          "oklch(86% 0.07 165)",
+          "oklch(95% 0.058 165)"
+        ]
+      },
+      "tracking-blue-dark": {
+        "role": "tertiary",
+        "displayName": "Tracking Blue (dark)",
+        "canonical": "oklch(76% 0.1 235)",
+        "tonalRamp": [
+          "oklch(15% 0.053 235)",
+          "oklch(27% 0.067 235)",
+          "oklch(39% 0.081 235)",
+          "oklch(51% 0.095 235)",
+          "oklch(63% 0.091 235)",
+          "oklch(75% 0.076 235)",
+          "oklch(86% 0.063 235)",
+          "oklch(95% 0.053 235)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Page title in the content header; 20px on phones, 22px from 640px."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Section headings (Routes, Instance)."
+      },
+      "title-sm": {
+        "displayName": "Title Small",
+        "purpose": "Card titles and the rail wordmark (wordmark adds -0.01em)."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Table cells, descriptions, nav and menu items. Tabular figures on globally."
+      },
+      "control": {
+        "displayName": "Control",
+        "purpose": "Default button labels."
+      },
+      "control-sm": {
+        "displayName": "Control Small",
+        "purpose": "Small buttons, filter inputs, sort selects, segmented tabs."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Column headers, dt labels, route sub-lines, standing group headers."
+      },
+      "micro": {
+        "displayName": "Micro",
+        "purpose": "Badges, theme switcher, dropdown section labels. The 11px floor."
+      },
+      "figure": {
+        "displayName": "Figure",
+        "purpose": "Headline summary number (Average transit), coloured by standing."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Handles, IDs and log lines only."
+      }
+    },
+    "shadows": [
+      {
+        "name": "selected-lift",
+        "value": "0 1px 2px oklch(var(--foreground) / 0.08)",
+        "purpose": "Active rail nav item resting on the rail (segmented-control active segments use / 0.1)."
+      },
+      {
+        "name": "menu-float",
+        "value": "0 8px 24px -6px oklch(var(--foreground) / 0.18), 0 2px 4px oklch(var(--foreground) / 0.06)",
+        "purpose": "Dropdown menus floating over content."
+      },
+      {
+        "name": "login-float",
+        "value": "0 12px 32px -12px oklch(var(--foreground) / 0.18)",
+        "purpose": "The sign-in card, the only card that floats."
+      },
+      {
+        "name": "focus-ring",
+        "value": "outline: 2px solid oklch(var(--ring)); outline-offset: 2px",
+        "purpose": "Global :focus-visible; components use a 2px ring with 2px offset in the ring colour."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state",
+        "value": "150ms ease-out",
+        "purpose": "Colour, border and press (1px translate) transitions on buttons, inputs, nav, rows; chevron rotation."
+      },
+      {
+        "name": "fade-in",
+        "value": "150ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Opacity plus 4px drop for menus, tab panels and dialogs."
+      },
+      {
+        "name": "backdrop",
+        "value": "200ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Scrim fade behind sheets and dialogs."
+      },
+      {
+        "name": "sheet-slide",
+        "value": "300ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Add-account sheet slides up on phones, in from the right from 640px."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "1ms",
+        "purpose": "All animation and transition durations collapse under prefers-reduced-motion: reduce."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "md",
+        "value": "768px"
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      },
+      {
+        "name": "content-max",
+        "value": "1152px"
+      }
+    ],
+    "themes": {
+      "default": "system",
+      "options": [
+        "system",
+        "light",
+        "dark"
+      ],
+      "storageKey": "theme-mode",
+      "mechanism": "index.html resolves the theme pre-paint and adds .dark or .light to <html>; tokens are OKLCH triplets on :root and .dark consumed as oklch(var(--token) / alpha)."
+    }
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary-sm",
+      "description": "The one airmail-blue action per header (Run now). Small size shown, as used in headers.",
+      "html": "<button class=\"ds-btn-primary\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polygon points=\"6 3 20 12 6 21 6 3\"/></svg>Run now</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: oklch(var(--primary, 0.43 0.165 264)); color: oklch(var(--primary-foreground, 0.985 0.005 250)); font: 500 13px/20px 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; cursor: pointer; transition: background-color 150ms ease-out, transform 150ms ease-out; } .ds-btn-primary:hover { background: oklch(var(--primary, 0.43 0.165 264) / 0.9); } .ds-btn-primary:active { transform: translateY(1px); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 2px oklch(var(--background, 0.968 0.011 250)), 0 0 0 4px oklch(var(--ring, 0.52 0.15 264)); }"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "Secondary actions: Add account, Try again, Open account, icon refresh.",
+      "html": "<button class=\"ds-btn-outline\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"><path d=\"M5 12h14\"/><path d=\"M12 5v14\"/></svg>Add account</button>",
+      "css": ".ds-btn-outline { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border: 1px solid oklch(var(--input, 0.86 0.024 252)); border-radius: 6px; background: oklch(var(--card, 0.988 0.005 250)); color: oklch(var(--foreground, 0.25 0.045 262)); font: 500 13px/20px 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; cursor: pointer; transition: background-color 150ms ease-out, border-color 150ms ease-out, transform 150ms ease-out; } .ds-btn-outline:hover { border-color: oklch(var(--foreground, 0.25 0.045 262) / 0.25); background: oklch(var(--muted, 0.935 0.016 252)); } .ds-btn-outline:active { transform: translateY(1px); } .ds-btn-outline:focus-visible { outline: none; box-shadow: 0 0 0 2px oklch(var(--background, 0.968 0.011 250)), 0 0 0 4px oklch(var(--ring, 0.52 0.15 264)); }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Low-emphasis toolbar and close actions.",
+      "html": "<button class=\"ds-btn-ghost\">Clear filters</button>",
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: oklch(var(--muted-foreground, 0.48 0.032 258)); font: 500 13px/20px 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; cursor: pointer; transition: background-color 150ms ease-out, color 150ms ease-out; } .ds-btn-ghost:hover { background: oklch(var(--muted, 0.935 0.016 252)); color: oklch(var(--foreground, 0.25 0.045 262)); } .ds-btn-ghost:focus-visible { outline: none; box-shadow: 0 0 0 2px oklch(var(--background, 0.968 0.011 250)), 0 0 0 4px oklch(var(--ring, 0.52 0.15 264)); }"
+    },
+    {
+      "name": "State Badges",
+      "kind": "chip",
+      "refersTo": "badge-danger",
+      "description": "11px state chips: danger for down/failed, warning for slow, success, outline for paused.",
+      "html": "<span class=\"ds-badges\"><span class=\"ds-badge ds-badge-danger\">down</span><span class=\"ds-badge ds-badge-warning\">slow</span><span class=\"ds-badge ds-badge-success\">posted</span><span class=\"ds-badge ds-badge-outline\">paused</span></span>",
+      "css": ".ds-badges { display: inline-flex; gap: 6px; } .ds-badge { display: inline-flex; align-items: center; padding: 2px 6px; border: 1px solid transparent; border-radius: 4px; font: 500 11px/16px 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; white-space: nowrap; } .ds-badge-danger { color: oklch(var(--late, 0.53 0.19 27)); background: oklch(var(--late, 0.53 0.19 27) / 0.1); border-color: oklch(var(--late, 0.53 0.19 27) / 0.3); } .ds-badge-warning { color: oklch(var(--slow, 0.56 0.13 62)); background: oklch(var(--slow, 0.56 0.13 62) / 0.1); border-color: oklch(var(--slow, 0.56 0.13 62) / 0.3); } .ds-badge-success { color: oklch(var(--ok, 0.5 0.1 165)); background: oklch(var(--ok, 0.5 0.1 165) / 0.1); border-color: oklch(var(--ok, 0.5 0.1 165) / 0.25); } .ds-badge-outline { color: oklch(var(--muted-foreground, 0.48 0.032 258)); border-color: oklch(var(--border, 0.885 0.02 252)); }"
+    },
+    {
+      "name": "Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Sheet-filled field with a field-edge border; ring on focus.",
+      "html": "<input class=\"ds-input\" placeholder=\"Filter by handle\" />",
+      "css": ".ds-input { height: 36px; width: 240px; padding: 8px 12px; border: 1px solid oklch(var(--input, 0.86 0.024 252)); border-radius: 6px; background: oklch(var(--card, 0.988 0.005 250)); color: oklch(var(--foreground, 0.25 0.045 262)); font: 400 14px/20px 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; caret-color: oklch(var(--primary, 0.43 0.165 264)); transition: border-color 150ms ease-out; } .ds-input::placeholder { color: oklch(var(--muted-foreground, 0.48 0.032 258)); } .ds-input:hover { border-color: oklch(var(--foreground, 0.25 0.045 262) / 0.25); } .ds-input:focus-visible { outline: none; box-shadow: 0 0 0 2px oklch(var(--background, 0.968 0.011 250)), 0 0 0 4px oklch(var(--ring, 0.52 0.15 264)); }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Hairline-bordered sheet for forms and settings groups; flat at rest.",
+      "html": "<div class=\"ds-card\"><h3 class=\"ds-card-title\">Mirror settings</h3><p class=\"ds-card-desc\">Applies to every new mapping.</p></div>",
+      "css": ".ds-card { width: 280px; padding: 16px 20px; border: 1px solid oklch(var(--border, 0.885 0.02 252)); border-radius: 8px; background: oklch(var(--card, 0.988 0.005 250)); color: oklch(var(--foreground, 0.25 0.045 262)); font-family: 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; } .ds-card-title { margin: 0; font: 600 15px/1.375 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; } .ds-card-desc { margin: 4px 0 0; font: 400 14px/20px 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: oklch(var(--muted-foreground, 0.48 0.032 258)); }"
+    },
+    {
+      "name": "Rail Navigation",
+      "kind": "nav",
+      "refersTo": "nav-item-active",
+      "description": "Left rail section list; the active item is a lifted sheet tile with an airmail-blue icon.",
+      "html": "<nav class=\"ds-rail\"><div class=\"ds-rail-brand\"><svg class=\"ds-relay\" viewBox=\"1 7 21.6 10\" aria-hidden=\"true\"><rect x=\"2\" y=\"8\" width=\"8\" height=\"8\" rx=\"2.2\" fill=\"currentColor\"/><path d=\"M10.5 12h3\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/><circle cx=\"17.6\" cy=\"12\" r=\"3.7\" fill=\"none\" stroke=\"oklch(0.43 0.165 264)\" stroke-width=\"2.2\"/></svg>tweets-2-bsky</div><button class=\"ds-nav-item ds-nav-active\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><rect x=\"3\" y=\"3\" width=\"7\" height=\"9\"/><rect x=\"14\" y=\"3\" width=\"7\" height=\"5\"/><rect x=\"14\" y=\"12\" width=\"7\" height=\"9\"/><rect x=\"3\" y=\"16\" width=\"7\" height=\"5\"/></svg>Overview</button><button class=\"ds-nav-item\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"9\" cy=\"7\" r=\"4\"/><path d=\"M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2\"/></svg>Accounts</button><button class=\"ds-nav-item\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M22 12h-4l-3 9L9 3l-3 9H2\"/></svg>Activity</button></nav>",
+      "css": ".ds-rail { display: flex; flex-direction: column; gap: 2px; width: 208px; padding: 20px 10px; background: oklch(var(--rail, 0.94 0.017 252)); border-right: 1px solid oklch(var(--border, 0.885 0.02 252)); font-family: 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; } .ds-rail-brand { display: flex; align-items: center; gap: 10px; padding: 0 6px 16px; font: 600 15px/1.375 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; letter-spacing: -0.01em; color: oklch(var(--foreground, 0.25 0.045 262)); } .ds-relay { width: 32px; height: 15px; flex: none; } .ds-nav-item { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; color: oklch(var(--muted-foreground, 0.48 0.032 258)); font: 400 14px/20px 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; text-align: left; cursor: pointer; transition: background-color 150ms, color 150ms; } .ds-nav-item:hover { background: oklch(var(--foreground, 0.25 0.045 262) / 0.05); color: oklch(var(--foreground, 0.25 0.045 262)); } .ds-nav-item:focus-visible { outline: none; box-shadow: 0 0 0 2px oklch(var(--background, 0.968 0.011 250)), 0 0 0 4px oklch(var(--ring, 0.52 0.15 264)); } .ds-nav-active { background: oklch(var(--card, 0.988 0.005 250)); color: oklch(var(--foreground, 0.25 0.045 262)); font-weight: 500; box-shadow: 0 0 0 1px oklch(var(--border, 0.885 0.02 252)), 0 1px 2px oklch(var(--foreground, 0.25 0.045 262) / 0.08); } .ds-nav-active svg { color: oklch(var(--primary, 0.43 0.165 264)); }"
+    },
+    {
+      "name": "Segmented Control",
+      "kind": "nav",
+      "refersTo": "segmented-control",
+      "description": "Rail-toned track with a lifted sheet segment: Activity views and the Auto/Light/Dark theme switcher.",
+      "html": "<div class=\"ds-seg\" role=\"tablist\"><button class=\"ds-seg-item ds-seg-active\" role=\"tab\">Migration outcomes</button><button class=\"ds-seg-item\" role=\"tab\">System log</button><button class=\"ds-seg-item\" role=\"tab\">Failed queue (3)</button></div>",
+      "css": ".ds-seg { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid oklch(var(--border, 0.885 0.02 252)); border-radius: 6px; background: oklch(var(--rail, 0.94 0.017 252)); } .ds-seg-item { height: 28px; padding: 0 12px; border: 0; border-radius: 5px; background: transparent; color: oklch(var(--muted-foreground, 0.48 0.032 258)); font: 400 13px/20px 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; cursor: pointer; transition: color 150ms, background-color 150ms; white-space: nowrap; } .ds-seg-item:hover { color: oklch(var(--foreground, 0.25 0.045 262)); } .ds-seg-item:focus-visible { outline: none; box-shadow: 0 0 0 2px oklch(var(--background, 0.968 0.011 250)), 0 0 0 4px oklch(var(--ring, 0.52 0.15 264)); } .ds-seg-active { background: oklch(var(--card, 0.988 0.005 250)); color: oklch(var(--foreground, 0.25 0.045 262)); font-weight: 500; box-shadow: 0 1px 2px oklch(var(--foreground, 0.25 0.045 262) / 0.1); }"
+    },
+    {
+      "name": "Route Rows with Transit Bar",
+      "kind": "custom",
+      "refersTo": "route-row",
+      "description": "Signature: ruled route rows with volume dot and log-scaled transit bar; late runs long and red, on time is a short ink tick.",
+      "html": "<div class=\"ds-routes\"><div class=\"ds-group ds-late\">Needs attention <span>1</span></div><button class=\"ds-route\"><span class=\"ds-who\"><span class=\"ds-vdot\" style=\"width:9px;height:9px\"></span><b>news.mirror.example</b><small>from @news</small></span><span class=\"ds-bar ds-ink-late\" style=\"--avg:78%;--worst:92%\"><i></i><em></em><s></s><u></u></span><span class=\"ds-fig ds-late\">1h 12m</span></button><div class=\"ds-group ds-slow\">Slow <span>1</span></div><button class=\"ds-route\"><span class=\"ds-who\"><span class=\"ds-vdot\" style=\"width:7px;height:7px\"></span><b>sport.mirror.example</b><small>from @sport</small></span><span class=\"ds-bar ds-ink-slow\" style=\"--avg:48%;--worst:66%\"><i></i><em></em><s></s><u></u></span><span class=\"ds-fig ds-slow\">18m</span></button><div class=\"ds-group\">On time <span>1</span></div><button class=\"ds-route\"><span class=\"ds-who\"><span class=\"ds-vdot\" style=\"width:11px;height:11px\"></span><b>city.mirror.example</b><small>from @city</small></span><span class=\"ds-bar ds-ink-ok\" style=\"--avg:22%;--worst:35%\"><i></i><em></em><s></s><u></u></span><span class=\"ds-fig\">3m</span></button></div>",
+      "css": ".ds-routes { width: 520px; font: 400 14px/20px 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-feature-settings: 'tnum' 1; color: oklch(var(--foreground, 0.25 0.045 262)); } .ds-group { padding: 20px 0 6px; border-bottom: 1px solid oklch(var(--border, 0.885 0.02 252)); font: 600 12px/16px 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; } .ds-group span { margin-left: 6px; font-weight: 400; color: oklch(var(--muted-foreground, 0.48 0.032 258)); } .ds-route { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(0,1.6fr) 4rem; gap: 16px; align-items: center; width: 100%; padding: 10px 0; border: 0; border-bottom: 1px solid oklch(var(--border, 0.885 0.02 252) / 0.7); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background-color 150ms; } .ds-route:hover { background: oklch(var(--foreground, 0.25 0.045 262) / 0.03); } .ds-route:focus-visible { outline: none; background: oklch(var(--foreground, 0.25 0.045 262) / 0.04); } .ds-who { display: grid; grid-template-columns: 12px 1fr; column-gap: 8px; align-items: center; min-width: 0; } .ds-who b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-who small { grid-column: 2; font-size: 12px; line-height: 16px; color: oklch(var(--muted-foreground, 0.48 0.032 258)); } .ds-vdot { justify-self: center; border-radius: 9999px; background: oklch(var(--primary, 0.43 0.165 264) / 0.7); } .ds-bar { position: relative; height: 12px; } .ds-bar i, .ds-bar em, .ds-bar s, .ds-bar u { position: absolute; top: 50%; transform: translateY(-50%); } .ds-bar i { left: 0; right: 0; height: 1px; background: oklch(var(--border, 0.885 0.02 252)); } .ds-bar em { left: var(--avg); width: calc(var(--worst) - var(--avg)); height: 1px; background: var(--ink); opacity: .5; } .ds-bar s { left: 0; width: var(--avg); height: 3px; border-radius: 9999px; background: var(--ink); } .ds-bar s::before { content: ''; position: absolute; left: -4px; top: -2.5px; width: 8px; height: 8px; border-radius: 9999px; background: var(--ink); } .ds-bar u { left: var(--avg); width: 8px; height: 8px; margin-left: -4px; border-radius: 9999px; background: var(--ink); box-shadow: 0 0 0 2px oklch(var(--card, 0.988 0.005 250)); } .ds-ink-ok { --ink: oklch(var(--foreground, 0.25 0.045 262) / 0.35); } .ds-ink-slow { --ink: oklch(var(--slow, 0.56 0.13 62)); } .ds-ink-late { --ink: oklch(var(--late, 0.53 0.19 27)); } .ds-fig { text-align: right; font-weight: 500; } .ds-late { color: oklch(var(--late, 0.53 0.19 27)); } .ds-slow { color: oklch(var(--slow, 0.56 0.13 62)); }"
+    },
+    {
+      "name": "Relay Mark",
+      "kind": "custom",
+      "refersTo": "relay-mark",
+      "description": "The product mark: a solid rounded square (the tweet) joined by a short stroke to an airmail-blue ring (its mirror). Used beside the wordmark and as the favicon.",
+      "html": "<span class=\"ds-brand\"><svg class=\"ds-relay\" viewBox=\"1 7 21.6 10\" aria-hidden=\"true\"><rect x=\"2\" y=\"8\" width=\"8\" height=\"8\" rx=\"2.2\" fill=\"currentColor\"/><path d=\"M10.5 12h3\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/><circle cx=\"17.6\" cy=\"12\" r=\"3.7\" fill=\"none\" stroke=\"oklch(0.43 0.165 264)\" stroke-width=\"2.2\"/></svg>tweets-2-bsky</span>",
+      "css": ".ds-brand { display: inline-flex; align-items: center; gap: 10px; font: 600 15px/1.375 'Onest Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; letter-spacing: -0.01em; color: oklch(var(--foreground, 0.25 0.045 262)); } .ds-relay { width: 32px; height: 15px; flex: none; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Airmail Forwarding",
+    "overview": "Every mirror is a forwarding route, and the dashboard reads transit time first. The ground is aerogramme paper in light mode (a pale, blue-cast sheet) and postal navy in dark mode; both are drawn from one blue-tinted neutral ramp so that rails, rules, muted text and fills all feel like the same stationery. Airmail blue is the only colour that asks to be pressed. Cancellation-ink red is reserved for routes that are late, down or failing; customs amber marks slow. Healthy routes stay quiet: neutral ink, a short dot-to-dot tick, nothing lit.\n\nThe system is dense and operational, built for one admin scanning 60 to 80 routes from a desk or a phone. Structure comes from hairline rules between rows and groups, not from boxed cards; the routes table is a ruled ledger grouped by standing (Needs attention, Slow, On time, No data), sorted slowest first. One system sans family carries every size, with tabular figures on by default, so durations and counts line up in columns without a monospace face. The only ornament is the airmail etiquette stripe, which is the product mark and appears nowhere else.\n\nLight and dark are equal citizens. The theme follows the operating system by default with an Auto / Light / Dark override in the rail foot; the choice is resolved before first paint so a dark reload never flashes paper. The rejected default is the KPI-card-grid admin: stat tiles and a wall of cards.",
+    "keyCharacteristics": [
+      "One blue-tinted neutral ramp in both themes; no grey from outside it.",
+      "Airmail blue is the single action and brand colour; red and amber are state, never decoration.",
+      "Hairline rules over filled boxes; small radii (4 to 8px).",
+      "One system sans at every size, tabular figures everywhere.",
+      "The per-route transit bar is the signature; the airmail stripe is the mark.",
+      "Calm at rest: colour appears only where a route needs a human."
+    ],
+    "rules": [
+      {
+        "name": "The One Stamp Rule",
+        "body": "Airmail blue is the only colour that means \"press this\". Nothing decorative is blue; nothing pressable is red unless it destroys something.",
+        "section": "colors"
+      },
+      {
+        "name": "The Cancellation Ink Rule",
+        "body": "Red appears only when a route is late, down or has failed posts, and amber only when it is slow or its source is erroring. A screen with every route healthy has no red and no amber on it.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Ramp Rule",
+        "body": "Every neutral comes from the blue-tinted ramp (hue 250 to 263). Raw Tailwind palette names are remapped in `tailwind.config.cjs` so `red`/`rose` resolve to the late token, `amber`/`yellow`/`orange` to slow, `emerald`/`green` to ok, `sky`/`cyan` to info and `blue`/`indigo` to primary; stock Tailwind hues never render.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Family Rule",
+        "body": "One sans family at every size. Do not introduce a display face; the page title earns its rank from weight and size alone.",
+        "section": "typography"
+      },
+      {
+        "name": "The Tabular Figures Rule",
+        "body": "Every duration, count and timestamp uses tabular figures; they are on globally, so never turn them off, and add `tabular-nums` explicitly where a number sits in a column.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat Ledger Rule",
+        "body": "Rows, tables, sections and resting cards carry no shadow. If something needs separating, rule it with a hairline.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** use Airmail Blue (`airmail-blue` / `airmail-blue-dark`) for the one primary action per header and for links; keep everything else neutral.",
+      "**Do** colour a route, figure or label red only when it is late (over 30 minutes average), down or has failed posts, and amber only when it is slow (10 to 30 minutes) or its source is erroring.",
+      "**Do** separate rows and sections with 1px hairlines (`hairline`, 70% for row dividers) instead of wrapping them in cards.",
+      "**Do** keep the routes table grouped by standing with Needs attention first, sorted slowest first, and collapse long on-time groups.",
+      "**Do** use the single system sans with tabular figures for every number; set durations in the compact one-unit-pair form (`4m`, `1h 20m`).",
+      "**Do** define every new colour as an OKLCH triplet in both `:root` and `.dark`, drawn from the blue-tinted ramp, and expose it through `tailwind.config.cjs`.",
+      "**Do** keep transitions at 150ms ease-out for state changes and respect `prefers-reduced-motion` (all motion collapses to 1ms).",
+      "**Do** show focus with the 2px Airmail Blue Ring ring and 2px offset on every interactive element."
+    ],
+    "donts": [
+      "**Don't** build KPI stat tiles or a wall of cards; summary numbers sit inline as label-and-value pairs on the header line.",
+      "**Don't** use red, amber or green as decoration, category colour or emphasis on healthy state; on time is plain ink, not green.",
+      "**Don't** use stock Tailwind hues, neutral greys or pure black and white; every neutral comes from the blue-tinted ramp.",
+      "**Don't** reuse the airmail stripe as a pattern, divider or background anywhere; it is the product mark and nothing else.",
+      "**Don't** add a second type family or a display face, and don't set text below 11px.",
+      "**Don't** put shadows on resting rows, sections or cards; shadows mark the single selected item or a surface floating over content.",
+      "**Don't** use uppercase, letter-spaced labels (eyebrows or kickers) above headings.",
+      "**Don't** exceed 8px radius on in-flow surfaces."
+    ]
+  }
+}

@@ -1,3 +1,4 @@
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 // One page per mirrored account: its configuration, health, queue, recent
 // posts and log, plus every action that applies to it. Managing one account
 // previously meant hopping between the account list, the activity tab, the
@@ -20,80 +21,15 @@ import {
   Unlock,
   UserRoundCog,
 } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
+import * as api from '../lib/api';
+import { queryKeys } from '../lib/query-keys';
+import type { AccountDetailResponse } from '../lib/types';
 import { cn } from '../lib/utils';
 import { MirrorPreview } from './MirrorPreview';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
-
-interface QueueItemView {
-  twitter_id: string;
-  twitter_username: string;
-  status: string;
-  attempts: number;
-  tweet_text?: string;
-  last_error?: string;
-  failure_stage?: string;
-  enqueued_at: number;
-  not_before: number;
-  updated_at: number;
-}
-
-interface AccountDetailResponse {
-  mapping: {
-    id: string;
-    bskyIdentifier: string;
-    bskyServiceUrl?: string;
-    twitterUsernames: string[];
-    enabled: boolean;
-    owner?: string;
-    groupName?: string;
-    groupEmoji?: string;
-    hasBotLabel?: boolean;
-    profileSyncSourceUsername?: string;
-    lastProfileSyncAt?: string;
-    lastPinnedTweetId?: string;
-    lastPinSyncAt?: string;
-  };
-  permissions: { canManage: boolean; canQueueBackfills: boolean; canRunNow: boolean; isAdmin: boolean };
-  down: { state: string; reason: string; detectedAt: number; nextRecheckAt: number; checks: number } | null;
-  lag: { samples: number; averageMs: number; medianMs: number; p95Ms: number; worstMs: number } | null;
-  posts: { posted: number; skipped: number; failed: number; lastPostedAt: number | null };
-  queue: {
-    pending: number;
-    ready: number;
-    backoff: number;
-    processing: number;
-    failed: number;
-    nextRetryAt: number | null;
-    oldestEnqueuedAt: number | null;
-    items: QueueItemView[];
-  };
-  sources: {
-    twitterUsername: string;
-    tier: string;
-    dueInMs: number;
-    lastCheckedAt: number | null;
-    lastFoundAt: number | null;
-    emptyStreak: number;
-    lastError: string | null;
-    lastErrorAt: number | null;
-    errorStreak: number;
-    protectedSince: number | null;
-  }[];
-  recentPosts: {
-    twitter_id: string;
-    tweet_text?: string;
-    bsky_uri?: string;
-    status: string;
-    created_at?: string;
-    posted_at?: number;
-    tweet_created_at?: number;
-  }[];
-  // Log rows carry `ts` (epoch ms); reading `timestamp` showed every entry as "never".
-  recentLogs: { id: number; level: string; stage: string; event: string; message: string; ts: number }[];
-}
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return '<1s';
@@ -112,6 +48,7 @@ function formatAgo(timestamp: number | null | undefined): string {
 }
 
 const TIER_LABEL: Record<string, string> = {
+  priority: 'every sweep',
   active: 'every sweep',
   recent: 'every 10m',
   quiet: 'every 30m',
@@ -145,64 +82,34 @@ export function AccountDetail({
   onBack: () => void;
   onNotice?: (type: 'success' | 'error', message: string) => void;
 }) {
-  const [data, setData] = useState<AccountDetailResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [backfillLimit, setBackfillLimit] = useState('50');
 
-  const load = useCallback(async () => {
-    if (!authHeaders) return;
-    try {
-      const response = await axios.get<AccountDetailResponse>(`/api/accounts/${mappingId}`, { headers: authHeaders });
-      setData(response.data);
-      setError(null);
-    } catch (err) {
-      const message = axios.isAxiosError(err)
-        ? ((err.response?.data as { error?: string } | undefined)?.error ?? err.message)
-        : 'Could not load this account.';
-      setError(message);
-    } finally {
-      setLoading(false);
-    }
-  }, [authHeaders, mappingId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
   // The queue and log move while the page is open, so a slow poll keeps it
   // honest without the page needing a manual refresh to be trusted. It pauses
-  // while the tab is hidden: this endpoint aggregates on the server, and a
-  // backgrounded dashboard should not keep asking for work.
-  useEffect(() => {
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    const start = () => {
-      if (timer === null) timer = setInterval(() => void load(), 10000);
-    };
-    const stop = () => {
-      if (timer !== null) {
-        clearInterval(timer);
-        timer = null;
-      }
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        void load();
-        start();
-      } else {
-        stop();
-      }
-    };
-
-    if (document.visibilityState === 'visible') start();
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => {
-      stop();
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [load]);
+  // while the tab is hidden and refreshes as soon as the tab is visible again:
+  // this endpoint aggregates on the server, and a backgrounded dashboard should
+  // not keep asking for work.
+  const detailQuery = useQuery({
+    queryKey: queryKeys.accountDetail(mappingId),
+    queryFn: async () => (await api.getAccountDetail(mappingId, { headers: authHeaders })).data,
+    enabled: Boolean(authHeaders),
+    refetchInterval: 10000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    placeholderData: keepPreviousData,
+  });
+  const data: AccountDetailResponse | null = detailQuery.data ?? null;
+  const loading = detailQuery.isPending;
+  const error = detailQuery.error
+    ? axios.isAxiosError(detailQuery.error)
+      ? ((detailQuery.error.response?.data as { error?: string } | undefined)?.error ?? detailQuery.error.message)
+      : 'Could not load this account.'
+    : null;
+  const { refetch } = detailQuery;
+  const load = useCallback(async () => {
+    await refetch();
+  }, [refetch]);
 
   const act = useCallback(
     async (key: string, run: () => Promise<{ data?: { message?: string } }>, fallbackMessage: string) => {
@@ -267,7 +174,7 @@ export function AccountDetail({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {down ? <Badge className="bg-red-600 text-white">{down.state}</Badge> : null}
+          {down ? <Badge variant="danger">{down.state === 'takendown' ? 'Taken down' : down.state}</Badge> : null}
           <Badge variant={mapping.enabled ? 'default' : 'secondary'}>{mapping.enabled ? 'Active' : 'Paused'}</Badge>
           {mapping.hasBotLabel ? <Badge variant="secondary">Bot-labeled</Badge> : null}
           <a
@@ -300,11 +207,7 @@ export function AccountDetail({
               size="sm"
               disabled={busy !== null}
               onClick={() =>
-                act(
-                  'recheck',
-                  () => axios.post(`/api/mappings/${mapping.id}/recheck-account`, {}, { headers: authHeaders }),
-                  'Recheck queued.',
-                )
+                act('recheck', () => api.recheckAccount(mapping.id, {}, { headers: authHeaders }), 'Recheck queued.')
               }
             >
               <RefreshCw className={cn('mr-2 h-4 w-4', busy === 'recheck' && 'animate-spin')} />
@@ -322,7 +225,7 @@ export function AccountDetail({
       </div>
 
       {canManage ? (
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <h3 className="text-sm font-medium">Actions</h3>
           <p className="mt-1 text-xs text-muted-foreground">
             Checking for tweets does not repost anything: tweets already mirrored are skipped by id.
@@ -339,7 +242,7 @@ export function AccountDetail({
                     // A forced check of just this account's sources: it skips
                     // adaptive-polling intervals and posts new tweets as live
                     // mirrors, where a backfill would re-date them as history.
-                    () => axios.post('/api/run-now', { mappingId: mapping.id }, { headers: authHeaders }),
+                    () => api.runNow({ mappingId: mapping.id }, { headers: authHeaders }),
                     'Checking this account for new tweets.',
                   )
                 }
@@ -368,8 +271,8 @@ export function AccountDetail({
                       act(
                         'backfill',
                         () =>
-                          axios.post(
-                            `/api/backfill/${mapping.id}`,
+                          api.requestBackfill(
+                            mapping.id,
                             { limit: Number(backfillLimit) || 50 },
                             { headers: authHeaders },
                           ),
@@ -390,7 +293,7 @@ export function AccountDetail({
               onClick={() =>
                 act(
                   'unjam',
-                  () => axios.post(`/api/accounts/${mapping.id}/unjam`, {}, { headers: authHeaders }),
+                  () => api.unjamAccount(mapping.id, {}, { headers: authHeaders }),
                   'Checked for stuck queue items.',
                 )
               }
@@ -408,12 +311,7 @@ export function AccountDetail({
                 onClick={() =>
                   act(
                     'retry',
-                    () =>
-                      axios.post(
-                        `/api/accounts/${mapping.id}/unjam`,
-                        { includeFailed: true },
-                        { headers: authHeaders },
-                      ),
+                    () => api.unjamAccount(mapping.id, { includeFailed: true }, { headers: authHeaders }),
                     'Parked failures re-armed.',
                   )
                 }
@@ -430,8 +328,7 @@ export function AccountDetail({
               onClick={() =>
                 act(
                   'toggle',
-                  () =>
-                    axios.put(`/api/mappings/${mapping.id}`, { enabled: !mapping.enabled }, { headers: authHeaders }),
+                  () => api.updateMapping(mapping.id, { enabled: !mapping.enabled }, { headers: authHeaders }),
                   mapping.enabled ? 'Account paused.' : 'Account resumed.',
                 )
               }
@@ -447,8 +344,7 @@ export function AccountDetail({
               onClick={() =>
                 act(
                   'profile',
-                  () =>
-                    axios.post(`/api/mappings/${mapping.id}/sync-profile-from-twitter`, {}, { headers: authHeaders }),
+                  () => api.syncProfileFromTwitter<{ message?: string }>(mapping.id, {}, { headers: authHeaders }),
                   'Profile synced from Twitter.',
                 )
               }
@@ -462,11 +358,7 @@ export function AccountDetail({
               size="sm"
               disabled={busy !== null}
               onClick={() =>
-                act(
-                  'pin',
-                  () => axios.post(`/api/pin-sync/${mapping.id}`, {}, { headers: authHeaders }),
-                  'Pinned tweet sync queued.',
-                )
+                act('pin', () => api.syncPin(mapping.id, {}, { headers: authHeaders }), 'Pinned tweet sync queued.')
               }
             >
               Sync pinned tweet
@@ -480,7 +372,7 @@ export function AccountDetail({
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <h3 className="flex items-center gap-2 text-sm font-medium">
             <Clock className="h-4 w-4" />
             Sources
@@ -524,7 +416,7 @@ export function AccountDetail({
           </div>
         </div>
 
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <h3 className="flex items-center gap-2 text-sm font-medium">
             <Gauge className="h-4 w-4" />
             Queue
@@ -542,7 +434,7 @@ export function AccountDetail({
               <p className="text-muted-foreground text-xs">Posting</p>
               <p className={cn('font-semibold', stuck && 'text-amber-600 dark:text-amber-400')}>{queue.processing}</p>
               {stuck ? (
-                <p className="text-[10px] text-amber-600 dark:text-amber-400">{stuckItems.length} stuck</p>
+                <p className="text-[11px] text-amber-600 dark:text-amber-400">{stuckItems.length} stuck</p>
               ) : null}
             </div>
             <div>
@@ -579,7 +471,7 @@ export function AccountDetail({
       </div>
 
       {canManage && mapping.twitterUsernames[0] ? (
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <MirrorPreview
             twitterUsername={mapping.profileSyncSourceUsername || mapping.twitterUsernames[0]}
             mappingId={mapping.id}
@@ -589,7 +481,7 @@ export function AccountDetail({
       ) : null}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <h3 className="flex items-center gap-2 text-sm font-medium">
             <CheckCircle2 className="h-4 w-4" />
             Recent posts
@@ -617,7 +509,7 @@ export function AccountDetail({
           )}
         </div>
 
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <h3 className="text-sm font-medium">Recent activity</h3>
           {recentLogs.length === 0 ? (
             <p className="mt-3 text-sm text-muted-foreground">No log entries for this account yet.</p>

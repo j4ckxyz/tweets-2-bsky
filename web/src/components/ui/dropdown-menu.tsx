@@ -80,7 +80,7 @@ export function DropdownMenu({
         disabled={disabled}
         onClick={() => setOpen((previous) => !previous)}
         className={cn(
-          'inline-flex h-9 items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 text-sm font-medium text-foreground transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50',
+          'inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-input bg-card px-3 text-[13px] font-medium text-foreground transition-colors hover:border-foreground/25 hover:bg-muted disabled:pointer-events-none disabled:opacity-50',
           triggerClassName,
         )}
       >
@@ -95,7 +95,7 @@ export function DropdownMenu({
               role="menu"
               style={{ top: position?.top ?? -9999, left: position?.left ?? -9999 }}
               className={cn(
-                'fixed z-50 min-w-[13rem] overflow-hidden rounded-lg border border-border bg-card py-1 text-sm shadow-lg shadow-black/10 animate-fade-in',
+                'fixed z-50 min-w-[13rem] overflow-hidden rounded-lg border border-border bg-card py-1 text-sm shadow-[0_8px_24px_-6px_oklch(var(--foreground)/0.18),0_2px_4px_oklch(var(--foreground)/0.06)] animate-fade-in',
                 contentClassName,
               )}
               onClick={(event) => {
@@ -139,9 +139,7 @@ export function DropdownMenuItem({ destructive, icon, className, children, ...pr
 }
 
 export function DropdownMenuLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{children}</p>
-  );
+  return <p className="px-3 py-1.5 text-[11px] font-medium text-muted-foreground">{children}</p>;
 }
 
 export function DropdownMenuSeparator() {

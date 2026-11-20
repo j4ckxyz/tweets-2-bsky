@@ -1,17 +1,16 @@
+import { useQuery } from '@tanstack/react-query';
 // Per-folder Bluesky list + starter pack, so readers can follow a whole set of
 // mirrors in one tap. Lives in the folder manager: a folder is exactly the set
 // a starter pack should hold.
 import axios from 'axios';
 import { ExternalLink, Loader2, Users } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
+import * as api from '../lib/api';
 import { selectClassName } from '../lib/constants';
+import { queryKeys } from '../lib/query-keys';
+import type { DiscoveryState } from '../lib/types';
 import { Button } from './ui/button';
 import { Label } from './ui/label';
-
-interface DiscoveryState {
-  curatorMappingId: string | null;
-  groups: { name: string; listUri: string | null; starterPackUri: string | null; lastDiscoverySyncAt: string | null }[];
-}
 
 interface DiscoveryPanelProps {
   authHeaders: Record<string, string>;
@@ -28,26 +27,30 @@ function starterPackLink(uri: string): string | null {
 }
 
 export function DiscoveryPanel({ authHeaders, isAdmin, folders, accounts, notify }: DiscoveryPanelProps) {
-  const [state, setState] = useState<DiscoveryState | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
+  // A failed load falls back to "nothing configured" rather than an error.
+  const discoveryQuery = useQuery({
+    queryKey: queryKeys.discovery,
+    queryFn: async (): Promise<DiscoveryState> => {
+      try {
+        const response = await api.getDiscovery({ headers: authHeaders });
+        return response.data;
+      } catch {
+        return { curatorMappingId: null, groups: [] };
+      }
+    },
+  });
+  const state = discoveryQuery.data ?? null;
+  const { refetch } = discoveryQuery;
   const load = useCallback(async () => {
-    try {
-      const response = await axios.get<DiscoveryState>('/api/discovery', { headers: authHeaders });
-      setState(response.data);
-    } catch {
-      setState({ curatorMappingId: null, groups: [] });
-    }
-  }, [authHeaders]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+    await refetch();
+  }, [refetch]);
 
   const setCurator = async (curatorMappingId: string) => {
     setBusyKey('curator');
     try {
-      await axios.put('/api/discovery', { curatorMappingId: curatorMappingId || undefined }, { headers: authHeaders });
+      await api.saveDiscovery({ curatorMappingId: curatorMappingId || undefined }, { headers: authHeaders });
       await load();
       notify('success', curatorMappingId ? 'Curator account saved.' : 'Curator account cleared.');
     } catch (error) {
@@ -60,11 +63,7 @@ export function DiscoveryPanel({ authHeaders, isAdmin, folders, accounts, notify
   const sync = async (folderKey: string, folderName: string) => {
     setBusyKey(folderKey);
     try {
-      const response = await axios.post<{ message: string }>(
-        `/api/groups/${encodeURIComponent(folderName)}/discovery-sync`,
-        {},
-        { headers: authHeaders },
-      );
+      const response = await api.syncGroupDiscovery(folderName, {}, { headers: authHeaders });
       notify('success', response.data.message);
       await load();
     } catch (error) {
@@ -83,7 +82,7 @@ export function DiscoveryPanel({ authHeaders, isAdmin, folders, accounts, notify
   return (
     <div className="space-y-3 border-t border-border/70 pt-3">
       <div className="space-y-1">
-        <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
           <Users className="h-3.5 w-3.5" />
           Starter packs
         </p>

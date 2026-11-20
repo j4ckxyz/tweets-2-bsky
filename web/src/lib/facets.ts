@@ -1,7 +1,7 @@
 // Rich-text facets: Bluesky indexes them by UTF-8 byte offset while JavaScript
 // strings are UTF-16, so segments are sliced from encoded bytes rather than
 // from the string directly.
-import type { BskyFacet } from '../types';
+import type { BskyFacet } from './types';
 
 export const textEncoder = new TextEncoder();
 export const textDecoder = new TextDecoder();

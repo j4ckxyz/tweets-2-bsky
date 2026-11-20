@@ -1,7 +1,7 @@
 // Fuzzy matching for the account search box: ordered-subsequence scoring plus
 // a Dice coefficient over bigrams, so "nasa bot" finds nasa-x-bot without an
 // exact substring match.
-import type { AccountMapping } from '../types';
+import type { AccountMapping } from './types';
 
 export function normalizeSearchValue(value: string): string {
   return value

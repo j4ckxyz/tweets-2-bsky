@@ -5,35 +5,10 @@ import axios from 'axios';
 // of enabling it and watching what comes out.
 import { Eye, Image as ImageIcon, Languages, Link2, MessageSquare, Quote, Repeat2, Video } from 'lucide-react';
 import { useCallback, useState } from 'react';
+import * as api from '../lib/api';
+import type { PreviewResult } from '../lib/types';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
-
-interface PreviewChunk {
-  text: string;
-  length: number;
-}
-
-interface PreviewTweet {
-  twitterId: string;
-  originalText: string;
-  createdAt?: string;
-  chunks: PreviewChunk[];
-  images: number;
-  video: boolean;
-  quote: boolean;
-  linkCard: boolean;
-  isReply: boolean;
-  repostOf?: string;
-  langs?: string[];
-  extraMediaPosts?: number;
-  skipped?: { stage: string; reason: string };
-}
-
-interface PreviewResult {
-  twitterUsername: string;
-  fetched: number;
-  tweets: PreviewTweet[];
-}
 
 export function MirrorPreview({
   twitterUsername,
@@ -55,11 +30,7 @@ export function MirrorPreview({
     setLoading(true);
     setError(null);
     try {
-      const response = await axios.post<PreviewResult>(
-        '/api/preview',
-        { twitterUsername, mappingId, limit },
-        { headers: authHeaders },
-      );
+      const response = await api.previewMirror({ twitterUsername, mappingId, limit }, { headers: authHeaders });
       setResult(response.data);
     } catch (err) {
       const message = axios.isAxiosError(err)
