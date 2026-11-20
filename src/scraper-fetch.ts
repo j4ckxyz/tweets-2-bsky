@@ -127,6 +127,8 @@ export function createScraperFetch(): typeof fetch {
  */
 export function isRetryableScraperError(error: unknown): boolean {
   if (error instanceof ScraperTimeoutError) return true;
+  // Retrying a rate limit straight away only hits it again; callers handle it.
+  if (error instanceof TwitterRateLimitedError) return false;
   const message = (error as { message?: unknown } | null)?.message;
   if (typeof message !== 'string') return false;
   return (
@@ -137,3 +139,49 @@ export function isRetryableScraperError(error: unknown): boolean {
     message.includes('401')
   );
 }
+
+// ---------------------------------------------------------------------------
+// Rate limits (HTTP 429)
+//
+// On a 429 the scraper library's default strategy sleeps until X's reset time,
+// up to 15 minutes. The sweep's 180s watchdog gives up long before that, so the
+// check failed with a watchdog error, counted as checked (pushing a quiet
+// account back by its whole 30-60 minute interval), and the abandoned request
+// woke later and spent the next window's requests. Without a reset header the
+// library instead retried in a tight loop. The sweep therefore uses a strategy
+// that throws straight away, carrying the reset time, so it can switch to the
+// backup login or wait out the limit and check the account on a later sweep.
+
+/** Used when X does not say when the limit resets: one standard 15-minute window. */
+export const RATE_LIMIT_FALLBACK_PAUSE_MS = 15 * 60_000;
+/** A reset further away than this is treated as bogus. */
+const RATE_LIMIT_MAX_PAUSE_MS = 60 * 60_000;
+
+export class TwitterRateLimitedError extends Error {
+  /** Epoch ms when X said this login may make requests again. */
+  readonly resetAt: number;
+
+  constructor(resetAt: number, now = Date.now()) {
+    const minutes = Math.max(1, Math.ceil((resetAt - now) / 60_000));
+    super(`Rate limited by X (429); this login can make requests again in about ${minutes} min`);
+    this.name = 'TwitterRateLimitedError';
+    this.resetAt = resetAt;
+  }
+}
+
+/** When the limit lifts, from X's `x-rate-limit-reset` header (epoch seconds). */
+export function rateLimitResetAt(headers: Pick<Headers, 'get'>, now = Date.now()): number {
+  const resetSeconds = Number(headers.get('x-rate-limit-reset'));
+  const resetAt = resetSeconds * 1000;
+  if (!Number.isFinite(resetAt) || resetAt <= now || resetAt - now > RATE_LIMIT_MAX_PAUSE_MS) {
+    return now + RATE_LIMIT_FALLBACK_PAUSE_MS;
+  }
+  return resetAt;
+}
+
+/** `rateLimitStrategy` for `new Scraper(...)`: fail immediately instead of sleeping. */
+export const throwOnRateLimit = {
+  async onRateLimit({ response }: { response: Pick<Response, 'headers'> }): Promise<void> {
+    throw new TwitterRateLimitedError(rateLimitResetAt(response.headers));
+  },
+};
