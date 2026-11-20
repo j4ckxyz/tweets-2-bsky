@@ -267,7 +267,7 @@ export function AccountDetail({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {down ? <Badge className="bg-red-600 text-white">{down.state}</Badge> : null}
+          {down ? <Badge variant="danger">{down.state === 'takendown' ? 'Taken down' : down.state}</Badge> : null}
           <Badge variant={mapping.enabled ? 'default' : 'secondary'}>{mapping.enabled ? 'Active' : 'Paused'}</Badge>
           {mapping.hasBotLabel ? <Badge variant="secondary">Bot-labeled</Badge> : null}
           <a
@@ -542,7 +542,7 @@ export function AccountDetail({
               <p className="text-muted-foreground text-xs">Posting</p>
               <p className={cn('font-semibold', stuck && 'text-amber-600 dark:text-amber-400')}>{queue.processing}</p>
               {stuck ? (
-                <p className="text-[10px] text-amber-600 dark:text-amber-400">{stuckItems.length} stuck</p>
+                <p className="text-[11px] text-amber-600 dark:text-amber-400">{stuckItems.length} stuck</p>
               ) : null}
             </div>
             <div>

@@ -65,6 +65,13 @@ export function MirrorSettingsFields({ idPrefix, value, onChange }: MirrorSettin
   return (
     <div className="space-y-3">
       <Toggle
+        id={`${idPrefix}-priority`}
+        checked={value.priority === true}
+        onChange={(checked) => set('priority', checked)}
+        title="Priority — check every sweep"
+        hint="Checked on every sweep and first to use the X login's request budget. Other mirrors are checked every 30–60 minutes."
+      />
+      <Toggle
         id={`${idPrefix}-retweets`}
         checked={value.mirrorRetweets}
         onChange={(checked) => set('mirrorRetweets', checked)}
@@ -163,5 +170,6 @@ export function pickMirrorSettings(value: MirrorSettings): MirrorSettings {
     imageLayout: value.imageLayout,
     botDisplayNameSuffix: value.botDisplayNameSuffix,
     syncDeletes: value.syncDeletes,
+    priority: value.priority,
   };
 }

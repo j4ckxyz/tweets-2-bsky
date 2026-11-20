@@ -29,11 +29,13 @@ export function NavList<T extends string>({ items, activeId, onSelect, className
             aria-selected={isActive}
             onClick={() => onSelect(item.id)}
             className={cn(
-              'flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors',
-              isActive ? 'bg-foreground text-background' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+              'flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors duration-150',
+              isActive
+                ? 'bg-card font-medium text-foreground shadow-[0_1px_2px_oklch(var(--foreground)/0.08)] ring-1 ring-border'
+                : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground',
             )}
           >
-            {Icon ? <Icon className="h-4 w-4 shrink-0" /> : null}
+            {Icon ? <Icon className={cn('h-4 w-4 shrink-0', isActive && 'text-primary')} /> : null}
             <span className="min-w-0 flex-1 truncate">{item.label}</span>
             {item.badge}
           </button>

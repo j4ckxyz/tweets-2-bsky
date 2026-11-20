@@ -44,6 +44,8 @@ export interface AccountMapping {
   imageLayout?: ImageLayout;
   botDisplayNameSuffix?: boolean;
   syncDeletes?: boolean;
+  /** Checked every sweep and first in line for the scraper budget. */
+  priority?: boolean;
   createdByUser?: {
     id: string;
     username?: string;
@@ -65,6 +67,8 @@ export interface MirrorSettings {
   imageLayout: ImageLayout;
   botDisplayNameSuffix: boolean;
   syncDeletes: boolean;
+  /** Optional so forms built before the flag existed still type-check; absent means unchanged on save. */
+  priority?: boolean;
 }
 
 export interface AccountGroup {
@@ -236,8 +240,8 @@ export const JOB_KIND_DOT: Record<string, string> = {
   checking: 'bg-sky-500',
   mirroring: 'bg-emerald-500',
   backfilling: 'bg-amber-500',
-  'profile-sync': 'bg-violet-500',
-  'pin-sync': 'bg-pink-500',
+  'profile-sync': 'bg-primary',
+  'pin-sync': 'bg-primary',
 };
 
 export interface QueueMappingCounts {

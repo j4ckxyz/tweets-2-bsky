@@ -51,7 +51,7 @@ import { NavList } from './components/ui/nav-list';
 import { cn } from './lib/utils';
 
 import { AccountDetail } from './components/AccountDetail';
-import { AccountHealth } from './components/AccountHealth';
+import { AccountHealth, type RouteSummary, formatTransit } from './components/AccountHealth';
 import { DiscoveryPanel } from './components/DiscoveryPanel';
 import { MirrorPreview } from './components/MirrorPreview';
 import { MirrorSettingsFields, pickMirrorSettings } from './components/MirrorSettingsFields';
@@ -138,6 +138,23 @@ import type {
 } from './types';
 import { JOB_KIND_DOT, JOB_KIND_LABEL } from './types';
 
+// The default folder "emoji" is a stand-in for an icon; draw the icon instead.
+// A folder emoji the user picked is content and stays as typed.
+function isDefaultFolderEmoji(emoji?: string): boolean {
+  return !emoji || emoji === DEFAULT_GROUP_EMOJI;
+}
+
+function folderText(emoji: string | undefined, name: string): string {
+  return isDefaultFolderEmoji(emoji) ? name : `${emoji} ${name}`;
+}
+
+function FolderGlyph({ emoji, className }: { emoji?: string; className?: string }) {
+  if (isDefaultFolderEmoji(emoji)) {
+    return <Folder className={cn('h-3.5 w-3.5 shrink-0 text-muted-foreground', className)} aria-hidden="true" />;
+  }
+  return <span className={className}>{emoji}</span>;
+}
+
 function App() {
   useEffect(() => {
     console.log(
@@ -151,6 +168,8 @@ function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem('token'));
   const [authView, setAuthView] = useState<AuthView>('login');
   const [bootstrapOpen, setBootstrapOpen] = useState(false);
+  const [jobsExpanded, setJobsExpanded] = useState(false);
+  const [routeSummary, setRouteSummary] = useState<RouteSummary | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     const saved = localStorage.getItem('theme-mode');
     if (saved === 'light' || saved === 'dark' || saved === 'system') {
@@ -1044,13 +1063,13 @@ function App() {
         id: 'overview' as DashboardTab,
         label: 'Overview',
         icon: LayoutDashboard,
-        description: 'Status, recent activity, and top performers.',
+        description: 'How every mirror is keeping up, and what is running now.',
       },
       {
         id: 'accounts' as DashboardTab,
         label: 'Accounts',
         icon: Users,
-        description: 'Manage Twitter-to-Bluesky mappings and folders.',
+        description: 'Every X account mapped to a Bluesky mirror, by folder.',
       },
       {
         id: 'posts' as DashboardTab,
@@ -1422,6 +1441,9 @@ function App() {
     });
   }, [manageableMappingIdsForView]);
   const twitterConfigured = Boolean(twitterConfig.authToken && twitterConfig.ct0);
+  // Owner/creator columns only earn their width when more than one person
+  // manages mappings on this instance.
+  const showOwnerColumns = isAdmin && managedUsers.length > 1;
   const aiConfigured = Boolean(aiConfig.apiKey);
   const settingsNavItems = useMemo(
     () => [
@@ -1435,7 +1457,7 @@ function App() {
               label: 'Twitter',
               icon: Bot,
               badge: (
-                <Badge variant={twitterConfigured ? 'success' : 'outline'} className="ml-auto">
+                <Badge variant="outline" className={cn('ml-auto', twitterConfigured && 'text-foreground')}>
                   {twitterConfigured ? 'On' : 'Off'}
                 </Badge>
               ),
@@ -1445,7 +1467,7 @@ function App() {
               label: 'AI',
               icon: SunMoon,
               badge: (
-                <Badge variant={aiConfigured ? 'success' : 'outline'} className="ml-auto">
+                <Badge variant="outline" className={cn('ml-auto', aiConfigured && 'text-foreground')}>
                   {aiConfigured ? 'On' : 'Off'}
                 </Badge>
               ),
@@ -1563,24 +1585,35 @@ function App() {
     return Math.max(0, Math.min(100, Math.round((processed / currentStatus.totalCount) * 100)));
   }, [currentStatus]);
 
-  const cycleThemeMode = () => {
-    setThemeMode((prev) => {
-      if (prev === 'system') return 'light';
-      if (prev === 'light') return 'dark';
-      return 'system';
-    });
-  };
-
-  const themeIcon =
-    themeMode === 'system' ? (
-      <SunMoon className="h-4 w-4" />
-    ) : themeMode === 'light' ? (
-      <Sun className="h-4 w-4" />
-    ) : (
-      <Moon className="h-4 w-4" />
-    );
-
   const themeLabel = themeMode === 'system' ? `Theme: system (${resolvedTheme})` : `Theme: ${themeMode}`;
+  const themeSwitcher = (
+    <fieldset className="grid grid-cols-3 rounded-md border border-border bg-background/60 p-0.5" title={themeLabel}>
+      <legend className="sr-only">Theme</legend>
+      {(
+        [
+          { mode: 'system', label: 'Auto', Icon: SunMoon },
+          { mode: 'light', label: 'Light', Icon: Sun },
+          { mode: 'dark', label: 'Dark', Icon: Moon },
+        ] as const
+      ).map(({ mode, label, Icon }) => (
+        <button
+          key={mode}
+          type="button"
+          aria-pressed={themeMode === mode}
+          onClick={() => setThemeMode(mode)}
+          className={cn(
+            'flex h-6 items-center justify-center gap-1 rounded-[4px] text-[11px] transition-colors duration-150',
+            themeMode === mode
+              ? 'bg-card font-medium text-foreground shadow-[0_1px_2px_oklch(var(--foreground)/0.1)]'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          <Icon className="h-3 w-3" />
+          {label}
+        </button>
+      ))}
+    </fieldset>
+  );
   const runtimeVersionLabel = runtimeVersion
     ? `v${runtimeVersion.version}${runtimeVersion.commit ? ` (${runtimeVersion.commit})` : ''}`
     : 'v--';
@@ -2533,94 +2566,61 @@ function App() {
           return (
             <div
               key={`mobile-mapping-${mapping.id}`}
-              className="rounded-lg border border-border bg-card p-4 space-y-3 shadow-sm transition-colors duration-200"
+              className="space-y-3 border-b border-border py-3 transition-colors duration-150"
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {canManageThisMapping ? (
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 rounded border-border"
-                      checked={isSelectedForBulk}
-                      disabled={isAnyBulkAccountsActionBusy}
-                      onChange={(event) => toggleAccountMappingSelection(mapping.id, event.target.checked)}
-                      aria-label={`Select ${mapping.bskyIdentifier}`}
-                    />
+              <div className="flex items-start gap-3">
+                {canManageThisMapping ? (
+                  <input
+                    type="checkbox"
+                    className="mt-1.5 h-4 w-4 rounded border-border"
+                    checked={isSelectedForBulk}
+                    disabled={isAnyBulkAccountsActionBusy}
+                    onChange={(event) => toggleAccountMappingSelection(mapping.id, event.target.checked)}
+                    aria-label={`Select ${mapping.bskyIdentifier}`}
+                  />
+                ) : null}
+                {showAccountAvatars && profile?.avatar ? (
+                  <img
+                    className="h-8 w-8 shrink-0 rounded-full object-cover"
+                    src={profile.avatar}
+                    alt=""
+                    loading="lazy"
+                  />
+                ) : null}
+                <div className="min-w-0 flex-1">
+                  <button
+                    type="button"
+                    className="block max-w-full truncate text-left text-sm font-medium hover:underline"
+                    onClick={() => setAccountDetailId(mapping.id)}
+                    title={`Open ${profileName}`}
+                  >
+                    {profileName}
+                  </button>
+                  {profileName !== profileHandle ? (
+                    <a
+                      className="inline-flex max-w-full items-center truncate text-xs text-muted-foreground hover:text-foreground hover:underline"
+                      href={profileUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`Open @${profileHandle} on Bluesky`}
+                    >
+                      {profileHandle}
+                      <ArrowUpRight className="ml-0.5 h-3 w-3 shrink-0" />
+                    </a>
                   ) : null}
-                  <div className="flex items-center gap-1 text-xs font-semibold">
-                    <UserRound className="h-3.5 w-3.5 text-muted-foreground" />
-                    <span>{mapping.owner || 'System'}</span>
-                  </div>
+                  <p className="truncate text-xs text-muted-foreground">
+                    from {mapping.twitterUsernames.map((username) => `@${username}`).join(', ')}
+                  </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-1.5">
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
                   {active ? (
                     <Badge variant="warning">Backfilling</Badge>
                   ) : queued ? (
                     <Badge variant="warning">Queued {queuePosition ? `#${queuePosition}` : ''}</Badge>
-                  ) : (
-                    <Badge variant="success">Active</Badge>
+                  ) : mapping.enabled ? null : (
+                    <Badge variant="outline">Paused</Badge>
                   )}
-                  {isFediverseBridged ? (
-                    <Badge variant="success">
-                      <Link2 className="h-3 w-3" />
-                      Bridged
-                    </Badge>
-                  ) : null}
-                  {mapping.hasBotLabel ? <Badge variant="outline">Bot</Badge> : null}
-                </div>
-              </div>
-
-              <div className="grid gap-3 border-t border-b border-border/50 py-3 sm:grid-cols-2">
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
-                    Twitter Sources
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {mapping.twitterUsernames.map((username) => (
-                      <Badge key={username} variant="secondary">
-                        @{username}
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
-                    Bluesky Target
-                  </p>
-                  <div className="flex items-center gap-2">
-                    {showAccountAvatars && profile?.avatar ? (
-                      <img
-                        className="h-8 w-8 rounded-full border border-border/70 object-cover"
-                        src={profile.avatar}
-                        alt={profileName}
-                        loading="lazy"
-                      />
-                    ) : (
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
-                        <UserRound className="h-4 w-4" />
-                      </div>
-                    )}
-                    <div className="min-w-0">
-                      <button
-                        type="button"
-                        className="mb-0.5 block max-w-full truncate text-left text-sm font-medium leading-none hover:underline"
-                        onClick={() => setAccountDetailId(mapping.id)}
-                        title={`Open ${profileName}`}
-                      >
-                        {profileName}
-                      </button>
-                      <a
-                        className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-                        href={profileUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        title={`Open @${profileHandle} on Bluesky`}
-                      >
-                        {profileHandle}
-                        <ArrowUpRight className="ml-0.5 h-3 w-3 shrink-0" />
-                      </a>
-                    </div>
-                  </div>
+                  {mapping.hasBotLabel === false ? <Badge variant="warning">No bot label</Badge> : null}
                 </div>
               </div>
 
@@ -2644,14 +2644,12 @@ function App() {
                         void handleAssignMappingGroup(mapping, event.target.value);
                       }}
                     >
-                      <option value={DEFAULT_GROUP_KEY}>
-                        {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
-                      </option>
+                      <option value={DEFAULT_GROUP_KEY}>{DEFAULT_GROUP_NAME}</option>
                       {groupOptions
                         .filter((option) => option.key !== DEFAULT_GROUP_KEY)
                         .map((option) => (
                           <option key={`group-move-mobile-${mapping.id}-${option.key}`} value={option.key}>
-                            {option.emoji} {option.name}
+                            {folderText(option.emoji, option.name)}
                           </option>
                         ))}
                     </select>
@@ -2675,9 +2673,7 @@ function App() {
                     >
                       {mapping.twitterUsernames.length > 1 ? (
                         <div className="space-y-1 px-3 py-2" data-keep-open="true">
-                          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                            Profile sync source
-                          </p>
+                          <p className="text-[11px] font-medium text-muted-foreground">Profile sync source</p>
                           <select
                             className={cn(selectClassName, 'h-8 text-xs')}
                             value={mapping.profileSyncSourceUsername || ''}
@@ -4040,9 +4036,15 @@ function App() {
   if (!token) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
-        <Card className="w-full max-w-md border-border/80 bg-card animate-fade-in">
-          <CardHeader className="space-y-1">
-            <CardTitle className="text-2xl">Tweets-2-Bsky</CardTitle>
+        <Card className="w-full max-w-sm animate-fade-in shadow-[0_12px_32px_-12px_oklch(var(--foreground)/0.18)]">
+          <CardHeader className="gap-3">
+            <div className="flex items-center gap-2.5">
+              <span
+                className="airmail-mark h-6 w-6 shrink-0 rounded-md ring-1 ring-inset ring-foreground/10"
+                aria-hidden="true"
+              />
+              <CardTitle className="text-lg">tweets-2-bsky</CardTitle>
+            </div>
             <CardDescription>
               {authView === 'login'
                 ? 'Sign in to manage mappings, status, and account settings.'
@@ -4113,56 +4115,67 @@ function App() {
 
   return (
     <div className="flex min-h-screen">
-      <aside className="hidden w-56 shrink-0 flex-col border-r border-border bg-card/40 lg:flex">
-        <div className="flex items-center gap-2 px-4 py-4">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-foreground text-xs font-bold text-background">
-            T2B
-          </div>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold leading-tight">Tweets-2-Bsky</p>
-            <p className="truncate text-xs text-muted-foreground">Control panel</p>
-          </div>
+      <aside className="sticky top-0 hidden h-screen w-52 shrink-0 flex-col border-r border-border bg-rail lg:flex">
+        <div className="flex items-center gap-2.5 px-4 pb-5 pt-5">
+          <span
+            className="airmail-mark h-5 w-5 shrink-0 rounded-[5px] ring-1 ring-inset ring-foreground/10"
+            aria-hidden="true"
+          />
+          <p className="truncate text-[15px] font-semibold tracking-[-0.01em]">tweets-2-bsky</p>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-3 py-2">
-          <NavList items={dashboardTabs} activeId={activeTab} onSelect={setActiveTab} />
+        <div className="flex-1 overflow-y-auto px-2.5">
+          <NavList
+            items={dashboardTabs}
+            activeId={activeTab}
+            onSelect={(id) => {
+              setAccountDetailId(null);
+              setActiveTab(id);
+            }}
+            ariaLabel="Dashboard sections"
+          />
         </div>
 
-        <div className="space-y-3 border-t border-border p-3">
-          <div className="space-y-1 px-1 text-xs text-muted-foreground">
-            <p className="flex items-center gap-1.5">
-              <Clock3 className="h-3.5 w-3.5 shrink-0" />
-              Next run <span className="font-mono text-foreground">{countdown}</span>
-            </p>
-            <p
-              className="truncate"
+        <div className="space-y-3 border-t border-border px-4 py-4">
+          <dl className="space-y-1 text-xs text-muted-foreground">
+            <div className="flex items-center justify-between gap-2">
+              <dt className="flex items-center gap-1.5">
+                <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                Next run
+              </dt>
+              <dd className="tabular-nums text-foreground">{countdown}</dd>
+            </div>
+            <div
+              className="flex items-center justify-between gap-2"
               title={`${runtimeVersionLabel}${runtimeBranchLabel ? ` ${runtimeBranchLabel}` : ''}`}
             >
-              <span className="font-mono text-foreground">{runtimeVersionLabel}</span>
-              {runtimeBranchLabel ? <span className="ml-1.5">{runtimeBranchLabel}</span> : null}
-            </p>
-          </div>
-          <Button variant="outline" size="sm" className="w-full justify-start" onClick={cycleThemeMode}>
-            {themeIcon}
-            <span className="ml-2 truncate">{themeLabel}</span>
-          </Button>
-          <Button variant="ghost" size="sm" className="w-full justify-start" onClick={handleLogout}>
-            <LogOut className="mr-2 h-4 w-4" />
-            Logout
-          </Button>
+              <dt>Version</dt>
+              <dd className="truncate tabular-nums text-foreground">{runtimeVersionLabel}</dd>
+            </div>
+          </dl>
+          {themeSwitcher}
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-md py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            onClick={handleLogout}
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            Sign out
+          </button>
         </div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="border-b border-border bg-card/60 px-3 py-2 lg:hidden">
-          <div className="mb-2 flex items-center gap-2">
-            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-foreground text-[10px] font-bold text-background">
-              T2B
-            </div>
-            <p className="text-sm font-semibold">Tweets-2-Bsky</p>
+        <div className="sticky top-0 z-30 border-b border-border bg-rail/95 px-3 pb-2 pt-3 backdrop-blur lg:hidden">
+          <div className="mb-2 flex items-center gap-2 px-1">
+            <span
+              className="airmail-mark h-4 w-4 shrink-0 rounded ring-1 ring-inset ring-foreground/10"
+              aria-hidden="true"
+            />
+            <p className="text-sm font-semibold">tweets-2-bsky</p>
           </div>
-          <div className="overflow-x-auto pb-0.5">
-            <div className="inline-flex min-w-full gap-1.5 sm:min-w-0">
+          <div>
+            <div className="grid grid-cols-5 gap-1">
               {dashboardTabs.map((tab) => {
                 const Icon = tab.icon;
                 const isActive = activeTab === tab.id;
@@ -4170,18 +4183,19 @@ function App() {
                   <button
                     key={tab.id}
                     className={cn(
-                      'inline-flex h-10 touch-manipulation items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-4 text-sm font-medium sm:h-9 sm:px-3',
+                      'flex h-12 touch-manipulation flex-col items-center justify-center gap-0.5 rounded-md text-[11px] sm:h-9 sm:flex-row sm:gap-1.5 sm:text-sm',
                       isActive
-                        ? 'bg-foreground text-background'
-                        : 'bg-background text-muted-foreground hover:bg-muted hover:text-foreground',
+                        ? 'bg-card font-medium text-foreground ring-1 ring-border'
+                        : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground',
                     )}
                     onClick={() => {
                       setAccountDetailId(null);
                       setActiveTab(tab.id);
                     }}
                     type="button"
+                    aria-current={isActive ? 'page' : undefined}
                   >
-                    <Icon className="h-4 w-4" />
+                    <Icon className={cn('h-4 w-4', isActive && 'text-primary')} />
                     {tab.label}
                   </button>
                 );
@@ -4191,11 +4205,27 @@ function App() {
         </div>
 
         <main className="flex-1">
-          <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-            <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h1 className="text-xl font-semibold sm:text-2xl">{activeTabMeta?.label ?? 'Dashboard'}</h1>
-                <p className="text-sm text-muted-foreground">{activeTabMeta?.description}</p>
+          <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+              <div className="min-w-0">
+                <h1 className="text-xl font-semibold tracking-[-0.015em] sm:text-[22px]">
+                  {activeTabMeta?.label ?? 'Dashboard'}
+                </h1>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  {activeTab === 'overview' && routeSummary ? (
+                    <>
+                      {routeSummary.routes} routes ·{' '}
+                      <span className={routeSummary.attention > 0 ? 'font-medium text-late' : undefined}>
+                        {routeSummary.attention} need attention
+                      </span>
+                      {routeSummary.typicalLagMs !== null
+                        ? ` · typical transit ${formatTransit(routeSummary.typicalLagMs)}`
+                        : ''}
+                    </>
+                  ) : (
+                    activeTabMeta?.description
+                  )}
+                </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 {canCreateMappings ? (
@@ -4209,7 +4239,7 @@ function App() {
                   Run now
                 </Button>
                 {isAdmin && pendingBackfills.length > 0 ? (
-                  <Button size="sm" variant="destructive" onClick={clearAllBackfills}>
+                  <Button size="sm" variant="outline" className="text-late" onClick={clearAllBackfills}>
                     <Trash2 className="mr-2 h-4 w-4" />
                     Clear queue
                   </Button>
@@ -4220,7 +4250,7 @@ function App() {
             {notice ? (
               <div
                 className={cn(
-                  'mb-5 rounded-md border px-4 py-2 text-sm',
+                  'mb-5 rounded-md border px-3 py-2 text-sm',
                   notice.tone === 'success' &&
                     'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:border-emerald-500/30 dark:text-emerald-300',
                   notice.tone === 'error' &&
@@ -4232,10 +4262,38 @@ function App() {
               </div>
             ) : null}
 
-            {accountAlerts.length > 0 ? (
-              <Card className="mb-6 border-red-500/40">
-                <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2.5">
-                  <p className="text-sm font-semibold text-red-700 dark:text-red-300">
+            {activeTab !== 'overview' &&
+            (accountAlerts.length > 0 || activeJobs.length > 0 || (postQueue?.failed ?? 0) > 0) ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setAccountDetailId(null);
+                  setActiveTab('overview');
+                }}
+                className="mb-6 flex w-full flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-border bg-card px-3 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:border-foreground/25"
+              >
+                {accountAlerts.length > 0 ? (
+                  <span className="font-medium text-late">
+                    {accountAlerts.length} account{accountAlerts.length === 1 ? '' : 's'} unavailable
+                  </span>
+                ) : null}
+                {(postQueue?.failed ?? 0) > 0 ? (
+                  <span className="text-late">{postQueue?.failed} failed to post</span>
+                ) : null}
+                {activeJobs.length > 0 ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
+                    {activeJobs.length} job{activeJobs.length === 1 ? '' : 's'} running
+                  </span>
+                ) : null}
+                <span className="ml-auto">View on Overview</span>
+              </button>
+            ) : null}
+
+            {activeTab === 'overview' && accountAlerts.length > 0 ? (
+              <Card className="mb-6 overflow-hidden border-late/40">
+                <div className="border-b border-late/25 bg-late/[0.07] px-4 py-2.5">
+                  <p className="text-sm font-semibold text-late">
                     {accountAlerts.length === 1
                       ? '1 Bluesky account is unavailable'
                       : `${accountAlerts.length} Bluesky accounts are unavailable`}
@@ -4273,13 +4331,24 @@ function App() {
               </Card>
             ) : null}
 
-            {activeJobs.length > 0 ||
-            queuedPostCount > 0 ||
-            (postQueue?.failed ?? 0) > 0 ||
-            (currentStatus && currentStatus.state !== 'idle') ? (
-              <Card className="mb-6">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
-                  <p className="text-sm font-semibold">
+            {activeTab === 'overview' &&
+            (activeJobs.length > 0 ||
+              queuedPostCount > 0 ||
+              (postQueue?.failed ?? 0) > 0 ||
+              (currentStatus && currentStatus.state !== 'idle')) ? (
+              <div className="mb-8 rounded-md border border-border bg-card">
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 px-3 py-1.5">
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm font-medium disabled:cursor-default"
+                    onClick={() => setJobsExpanded((previous) => !previous)}
+                    disabled={activeJobs.length === 0}
+                    aria-expanded={activeJobs.length > 0 ? jobsExpanded : undefined}
+                  >
+                    <span className="relative flex h-2 w-2" aria-hidden="true">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/40 motion-reduce:animate-none" />
+                      <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
+                    </span>
                     {activeJobs.length > 0
                       ? `${activeJobs.length} job${activeJobs.length === 1 ? '' : 's'} running`
                       : queuedPostCount > 0
@@ -4287,7 +4356,20 @@ function App() {
                         : (postQueue?.failed ?? 0) > 0
                           ? `${postQueue?.failed} tweet${postQueue?.failed === 1 ? '' : 's'} failed to post`
                           : `${formatState(currentStatus?.state || 'processing')} in progress`}
-                  </p>
+                    {activeJobs.length > 0 ? (
+                      <span className="min-w-0 truncate font-normal text-muted-foreground">
+                        · {activeJobs.map((job) => (job.account ? `@${job.account}` : job.kind)).join(', ')}
+                      </span>
+                    ) : null}
+                    {activeJobs.length > 0 ? (
+                      <ChevronDown
+                        className={cn(
+                          'h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-150',
+                          jobsExpanded && 'rotate-180',
+                        )}
+                      />
+                    ) : null}
+                  </button>
                   <div className="flex flex-wrap items-center gap-3">
                     {activeJobs.length > 0 && queuedPostCount > 0 ? (
                       <p className="text-xs text-muted-foreground">
@@ -4318,10 +4400,10 @@ function App() {
                     ) : null}
                     {isAdmin && (postQueue?.failed ?? 0) > 0 ? (
                       <span className="flex items-center gap-1">
-                        <Button size="sm" variant="outline" onClick={retryFailedQueue}>
+                        <Button size="sm" variant="ghost" className="h-7" onClick={retryFailedQueue}>
                           Retry failed
                         </Button>
-                        <Button size="sm" variant="outline" onClick={clearFailedQueue}>
+                        <Button size="sm" variant="ghost" className="h-7" onClick={clearFailedQueue}>
                           Clear failed
                         </Button>
                       </span>
@@ -4329,29 +4411,34 @@ function App() {
                   </div>
                 </div>
                 {activeJobs.length > 0 ? (
-                  <ul className="divide-y divide-border">
-                    {activeJobs.map((job) => (
-                      <li key={job.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-4 py-2 text-sm">
-                        <span
-                          className={cn(
-                            'inline-block h-2 w-2 shrink-0 self-center rounded-full',
-                            JOB_KIND_DOT[job.kind] || 'bg-muted-foreground',
-                          )}
-                        />
-                        <span className="font-medium">{JOB_KIND_LABEL[job.kind] || job.kind}</span>
-                        {job.account ? <span className="font-mono text-xs">@{job.account}</span> : null}
-                        {job.target ? <span className="text-xs text-muted-foreground">→ {job.target}</span> : null}
-                        <span className="min-w-0 flex-1 truncate text-muted-foreground">{job.message}</span>
-                        {typeof job.totalCount === 'number' && job.totalCount > 0 ? (
-                          <span className="font-mono text-xs text-muted-foreground">
-                            {job.processedCount ?? 0}/{job.totalCount}
-                          </span>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
+                  jobsExpanded ? (
+                    <ul className="divide-y divide-border border-t border-border">
+                      {activeJobs.map((job) => (
+                        <li
+                          key={job.id}
+                          className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-4 py-1.5 text-[13px]"
+                        >
+                          <span
+                            className={cn(
+                              'inline-block h-2 w-2 shrink-0 self-center rounded-full',
+                              JOB_KIND_DOT[job.kind] || 'bg-muted-foreground',
+                            )}
+                          />
+                          <span className="font-medium">{JOB_KIND_LABEL[job.kind] || job.kind}</span>
+                          {job.account ? <span className="text-foreground">@{job.account}</span> : null}
+                          {job.target ? <span className="text-xs text-muted-foreground">→ {job.target}</span> : null}
+                          <span className="min-w-0 flex-1 truncate text-muted-foreground">{job.message}</span>
+                          {typeof job.totalCount === 'number' && job.totalCount > 0 ? (
+                            <span className="font-mono text-xs text-muted-foreground">
+                              {job.processedCount ?? 0}/{job.totalCount}
+                            </span>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null
                 ) : currentStatus ? (
-                  <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-3 py-2">
                     <p className="text-sm text-muted-foreground">
                       {currentStatus.currentAccount ? `@${currentStatus.currentAccount} • ` : ''}
                       {currentStatus.message || 'Working through account queue.'}
@@ -4364,117 +4451,99 @@ function App() {
                     ) : null}
                   </div>
                 ) : null}
-              </Card>
+              </div>
             ) : null}
 
             {activeTab === 'overview' ? (
-              <section className="space-y-6 animate-fade-in">
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-                  <Card className="">
-                    <CardContent className="p-4">
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Mapped Accounts</p>
-                      <p className="mt-2 text-2xl font-semibold">{mappings.length}</p>
-                    </CardContent>
-                  </Card>
-                  <Card className="">
-                    <CardContent className="p-4">
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Bot-Labeled</p>
-                      <p className="mt-2 text-2xl font-semibold">
-                        {mappings.filter((mapping) => mapping.hasBotLabel === true).length}
-                      </p>
-                    </CardContent>
-                  </Card>
-                  <Card className="">
-                    <CardContent className="p-4">
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Queued Posts</p>
-                      <p className="mt-2 text-2xl font-semibold">{queuedPostCount}</p>
-                      {pendingBackfills.length > 0 ? (
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          +{pendingBackfills.length} backfill fetch{pendingBackfills.length === 1 ? '' : 'es'} pending
-                        </p>
-                      ) : null}
-                    </CardContent>
-                  </Card>
-                  <Card className="">
-                    <CardContent className="p-4">
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Current State</p>
-                      <p className="mt-2 text-2xl font-semibold">{formatState(currentStatus?.state || 'idle')}</p>
-                    </CardContent>
-                  </Card>
-                  <Card className="">
-                    <CardContent className="p-4">
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Latest Activity</p>
-                      <p className="mt-2 text-sm font-medium text-foreground">
+              <section className="space-y-8 animate-fade-in">
+                <section aria-labelledby="routes-heading">
+                  <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+                    <h2 id="routes-heading" className="text-base font-semibold">
+                      Routes
+                    </h2>
+                    <p className="text-xs text-muted-foreground">
+                      Time from a tweet appearing on X to its post on Bluesky. Click a route for detail.
+                    </p>
+                  </div>
+                  <AccountHealth
+                    authHeaders={authHeaders}
+                    onAuthFailure={handleLogout}
+                    onOpenAccount={(mappingId) => {
+                      setActiveTab('accounts');
+                      setAccountDetailId(mappingId);
+                    }}
+                    onSummary={setRouteSummary}
+                  />
+                </section>
+
+                <section aria-labelledby="instance-heading" className="border-t border-border pt-6">
+                  <h2 id="instance-heading" className="mb-3 text-base font-semibold">
+                    Instance
+                  </h2>
+                  <dl className="grid grid-cols-2 gap-x-6 gap-y-4 text-sm sm:grid-cols-3 lg:grid-cols-6">
+                    <div>
+                      <dt className="text-xs text-muted-foreground">Mirrors</dt>
+                      <dd className="mt-0.5 font-semibold tabular-nums">
+                        {mappings.length}
+                        <span className="ml-1.5 font-normal text-muted-foreground">
+                          {mappings.filter((mapping) => mapping.hasBotLabel === true).length} bot-labelled
+                        </span>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-muted-foreground">Next run</dt>
+                      <dd className="mt-0.5 font-semibold tabular-nums">{countdown}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-muted-foreground">State</dt>
+                      <dd className="mt-0.5 font-semibold">{formatState(currentStatus?.state || 'idle')}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-muted-foreground">Queued posts</dt>
+                      <dd className="mt-0.5 font-semibold tabular-nums">
+                        {queuedPostCount}
+                        {pendingBackfills.length > 0 ? (
+                          <span className="ml-1.5 font-normal text-muted-foreground">
+                            +{pendingBackfills.length} backfill{pendingBackfills.length === 1 ? '' : 's'}
+                          </span>
+                        ) : null}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-muted-foreground">Last activity</dt>
+                      <dd className="mt-0.5 font-semibold">
                         {latestActivity?.created_at
-                          ? new Date(latestActivity.created_at).toLocaleString()
-                          : 'No activity yet'}
-                      </p>
-                    </CardContent>
-                  </Card>
-                  <Card className="">
-                    <CardContent className="p-4">
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground">Top Account (Engagement)</p>
-                      {topAccount ? (
-                        <div className="mt-2 flex items-center gap-3">
-                          {topAccountProfile?.avatar ? (
-                            <img
-                              className="h-9 w-9 rounded-full border border-border/70 object-cover"
-                              src={topAccountProfile.avatar}
-                              alt={topAccountProfile.handle || topAccount.identifier}
-                              loading="lazy"
-                            />
-                          ) : (
-                            <div className="flex h-9 w-9 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
-                              <UserRound className="h-4 w-4" />
-                            </div>
-                          )}
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold">
+                          ? formatRelativeTime(new Date(latestActivity.created_at).getTime())
+                          : 'None yet'}
+                      </dd>
+                    </div>
+                    <div className="min-w-0">
+                      <dt className="text-xs text-muted-foreground">Most engagement</dt>
+                      <dd className="mt-0.5 flex min-w-0 items-center gap-2">
+                        {topAccount ? (
+                          <>
+                            {topAccountProfile?.avatar ? (
+                              <img
+                                className="h-5 w-5 shrink-0 rounded-full object-cover"
+                                src={topAccountProfile.avatar}
+                                alt=""
+                                loading="lazy"
+                              />
+                            ) : null}
+                            <span className="truncate font-semibold">
                               @{topAccountProfile?.handle || topAccount.identifier}
-                            </p>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {formatCompactNumber(topAccount.score)} interactions • {topAccount.posts} posts
-                            </p>
-                          </div>
-                        </div>
-                      ) : (
-                        <p className="mt-2 text-sm text-muted-foreground">No engagement data yet.</p>
-                      )}
-                    </CardContent>
-                  </Card>
-                </div>
-
-                <Card className="">
-                  <CardHeader>
-                    <CardTitle>Account health</CardTitle>
-                    <CardDescription>
-                      How quickly each mirror is keeping up, and which ones need attention.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <AccountHealth authHeaders={authHeaders} onAuthFailure={handleLogout} />
-                  </CardContent>
-                </Card>
-
-                <Card className="">
-                  <CardHeader>
-                    <CardTitle>Quick Navigation</CardTitle>
-                    <CardDescription>Use tabs to focus one workflow at a time, especially on mobile.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="flex flex-wrap gap-2 pt-0">
-                    {dashboardTabs
-                      .filter((tab) => tab.id !== 'overview')
-                      .map((tab) => {
-                        const Icon = tab.icon;
-                        return (
-                          <Button key={`overview-${tab.id}`} variant="outline" onClick={() => setActiveTab(tab.id)}>
-                            <Icon className="mr-2 h-4 w-4" />
-                            Open {tab.label}
-                          </Button>
-                        );
-                      })}
-                  </CardContent>
-                </Card>
+                            </span>
+                            <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                              {formatCompactNumber(topAccount.score)}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground">No data yet</span>
+                        )}
+                      </dd>
+                    </div>
+                  </dl>
+                </section>
               </section>
             ) : null}
 
@@ -4488,49 +4557,55 @@ function App() {
             ) : null}
 
             {activeTab === 'accounts' && !accountDetailId ? (
-              <section className="grid gap-6 lg:grid-cols-[240px_1fr] animate-fade-in">
-                <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
-                  <Card>
-                    <CardContent className="space-y-0.5 p-2">
+              <section className="grid gap-6 lg:grid-cols-[200px_1fr] animate-fade-in">
+                <div className="min-w-0 space-y-4 lg:sticky lg:top-6 lg:self-start">
+                  <nav aria-label="Folders">
+                    <p className="mb-1.5 hidden px-2.5 text-xs font-medium text-muted-foreground lg:block">Folders</p>
+                    <div className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-1 lg:mx-0 lg:block lg:space-y-0.5 lg:overflow-visible lg:px-0 lg:pb-0">
                       <button
                         type="button"
                         onClick={() => setSelectedFolderKey('__all__')}
+                        aria-current={selectedFolderKey === '__all__' ? 'true' : undefined}
                         className={cn(
-                          'flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors',
+                          'flex shrink-0 items-center whitespace-nowrap lg:w-full gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors duration-150',
                           selectedFolderKey === '__all__'
-                            ? 'bg-foreground text-background'
-                            : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                            ? 'bg-card font-medium text-foreground ring-1 ring-border'
+                            : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground',
                         )}
                       >
                         <Folder className="h-4 w-4 shrink-0" />
                         <span className="min-w-0 flex-1 truncate">All accounts</span>
-                        <span className="text-xs opacity-70">{accountMappingsForView.length}</span>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {accountMappingsForView.length}
+                        </span>
                       </button>
                       {groupedMappings.map((group) => (
                         <button
                           key={group.key}
                           type="button"
                           onClick={() => setSelectedFolderKey(group.key)}
+                          aria-current={selectedFolderKey === group.key ? 'true' : undefined}
                           className={cn(
-                            'flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors',
+                            'flex shrink-0 items-center whitespace-nowrap lg:w-full gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors duration-150',
                             selectedFolderKey === group.key
-                              ? 'bg-foreground text-background'
-                              : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                              ? 'bg-card font-medium text-foreground ring-1 ring-border'
+                              : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground',
                           )}
                         >
-                          <span className="shrink-0">{group.emoji}</span>
+                          <FolderGlyph emoji={group.emoji} className="w-4 shrink-0 text-center" />
                           <span className="min-w-0 flex-1 truncate">{group.name}</span>
-                          <span className="text-xs opacity-70">{group.mappings.length}</span>
+                          <span className="text-xs tabular-nums text-muted-foreground">{group.mappings.length}</span>
                         </button>
                       ))}
-                    </CardContent>
-                  </Card>
+                    </div>
+                  </nav>
 
                   {canManageGroupsPermission ? (
                     <Card>
                       <details>
-                        <summary className="cursor-pointer list-none px-3 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground">
+                        <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2 text-sm text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
                           Manage folders
+                          <ChevronDown className="h-3.5 w-3.5" />
                         </summary>
                         <div className="space-y-3 border-t border-border/70 p-3">
                           <form
@@ -4539,9 +4614,7 @@ function App() {
                               void handleCreateGroup(event);
                             }}
                           >
-                            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                              New folder
-                            </p>
+                            <p className="text-xs font-medium text-muted-foreground">New folder</p>
                             <div className="flex items-end gap-2">
                               <div className="w-16 space-y-1">
                                 <Label htmlFor="accounts-group-emoji">Emoji</Label>
@@ -4650,196 +4723,188 @@ function App() {
                 </div>
 
                 <div className="min-w-0 space-y-4">
-                  <Card>
-                    <CardContent className="space-y-3 p-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <DebouncedInput
-                          className="max-w-xs"
-                          value={accountsSearchQuery}
-                          onChange={setAccountsSearchQuery}
-                          placeholder="Search @username, owner, handle..."
-                        />
-                        {isAdmin ? (
-                          <select
-                            className={cn(selectClassName, 'h-10 w-44 text-sm')}
-                            value={accountsCreatorFilter}
-                            onChange={(event) => setAccountsCreatorFilter(event.target.value)}
-                            aria-label="Created by user"
-                          >
-                            <option value="all">All users</option>
-                            {managedUsers.map((user) => (
-                              <option key={`creator-filter-${user.id}`} value={user.id}>
-                                {user.username || user.email || user.id}
-                              </option>
-                            ))}
-                          </select>
-                        ) : null}
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <DebouncedInput
+                        className="h-8 min-w-0 flex-1 text-[13px] sm:max-w-xs"
+                        value={accountsSearchQuery}
+                        onChange={setAccountsSearchQuery}
+                        placeholder="Search @username, owner, handle..."
+                      />
+                      {isAdmin && managedUsers.length > 1 ? (
+                        <select
+                          className={cn(selectClassName, 'h-8 w-40 text-[13px]')}
+                          value={accountsCreatorFilter}
+                          onChange={(event) => setAccountsCreatorFilter(event.target.value)}
+                          aria-label="Created by user"
+                        >
+                          <option value="all">All users</option>
+                          {managedUsers.map((user) => (
+                            <option key={`creator-filter-${user.id}`} value={user.id}>
+                              {user.username || user.email || user.id}
+                            </option>
+                          ))}
+                        </select>
+                      ) : null}
 
-                        <div className="ml-auto flex flex-wrap items-center gap-2">
-                          {canCreateMappings ? (
-                            <Button size="sm" variant="outline" onClick={openAddAccountSheet}>
-                              <Plus className="mr-2 h-4 w-4" />
-                              Add account
-                            </Button>
-                          ) : null}
-                          <DropdownMenu
-                            align="end"
-                            trigger={
+                      <div className="ml-auto flex flex-wrap items-center gap-2">
+                        <DropdownMenu
+                          align="end"
+                          trigger={
+                            <>
+                              View
+                              <ChevronDown className="h-3.5 w-3.5" />
+                            </>
+                          }
+                        >
+                          <DropdownMenuItem
+                            data-keep-open="true"
+                            onClick={() => setShowAccountAvatars((previous) => !previous)}
+                          >
+                            {showAccountAvatars ? 'Hide avatars' : 'Show avatars'}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            data-keep-open="true"
+                            onClick={() => setShowAccountBios((previous) => !previous)}
+                          >
+                            {showAccountBios ? 'Hide bios' : 'Show bios'}
+                          </DropdownMenuItem>
+                        </DropdownMenu>
+                        <DropdownMenu
+                          align="end"
+                          disabled={isAnyBulkAccountsActionBusy}
+                          trigger={
+                            isAnyBulkAccountsActionBusy ? (
                               <>
-                                View
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                Working...
+                              </>
+                            ) : (
+                              <>
+                                Bulk actions
                                 <ChevronDown className="h-3.5 w-3.5" />
                               </>
-                            }
+                            )
+                          }
+                        >
+                          <DropdownMenuLabel>
+                            {selectedManageableMappingsCount > 0
+                              ? `Apply to ${selectedManageableMappingsCount} selected`
+                              : 'Apply to all manageable'}
+                          </DropdownMenuLabel>
+                          <DropdownMenuItem
+                            icon={<RefreshCw className="h-4 w-4" />}
+                            onClick={() => void handleApplyAllAccountsAction('sync_profiles')}
                           >
-                            <DropdownMenuItem
-                              data-keep-open="true"
-                              onClick={() => setShowAccountAvatars((previous) => !previous)}
-                            >
-                              {showAccountAvatars ? 'Hide avatars' : 'Show avatars'}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              data-keep-open="true"
-                              onClick={() => setShowAccountBios((previous) => !previous)}
-                            >
-                              {showAccountBios ? 'Hide bios' : 'Show bios'}
-                            </DropdownMenuItem>
-                          </DropdownMenu>
-                          <DropdownMenu
-                            align="end"
-                            disabled={isAnyBulkAccountsActionBusy}
-                            trigger={
-                              isAnyBulkAccountsActionBusy ? (
-                                <>
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                  Working...
-                                </>
-                              ) : (
-                                <>
-                                  Bulk actions
-                                  <ChevronDown className="h-3.5 w-3.5" />
-                                </>
-                              )
-                            }
+                            Sync profiles from Twitter
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            icon={<Download className="h-4 w-4" />}
+                            onClick={() => void handleApplyAllAccountsAction('pull_twitter_bio')}
                           >
-                            <DropdownMenuLabel>
-                              {selectedManageableMappingsCount > 0
-                                ? `Apply to ${selectedManageableMappingsCount} selected`
-                                : 'Apply to all manageable'}
-                            </DropdownMenuLabel>
-                            <DropdownMenuItem
-                              icon={<RefreshCw className="h-4 w-4" />}
-                              onClick={() => void handleApplyAllAccountsAction('sync_profiles')}
-                            >
-                              Sync profiles from Twitter
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              icon={<Download className="h-4 w-4" />}
-                              onClick={() => void handleApplyAllAccountsAction('pull_twitter_bio')}
-                            >
-                              Pull Twitter bio
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              icon={<Link2 className="h-4 w-4" />}
-                              onClick={() => void handleApplyAllAccountsAction('bridge_all')}
-                            >
-                              Bridge to fediverse
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              icon={<Pin className="h-4 w-4" />}
-                              onClick={() => void handleApplyAllAccountsAction('sync_pins')}
-                            >
-                              Sync pinned tweets
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              icon={<Bot className="h-4 w-4" />}
-                              onClick={() => void handleApplyAllAccountsAction('apply_bot_label')}
-                            >
-                              Apply bot label
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              icon={<Bot className="h-4 w-4" />}
-                              onClick={() => void handleApplyAllAccountsAction('append_bot_name')}
-                            >
-                              Append {'{bot}'} to display name
-                            </DropdownMenuItem>
-                          </DropdownMenu>
-                        </div>
+                            Pull Twitter bio
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            icon={<Link2 className="h-4 w-4" />}
+                            onClick={() => void handleApplyAllAccountsAction('bridge_all')}
+                          >
+                            Bridge to fediverse
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            icon={<Pin className="h-4 w-4" />}
+                            onClick={() => void handleApplyAllAccountsAction('sync_pins')}
+                          >
+                            Sync pinned tweets
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            icon={<Bot className="h-4 w-4" />}
+                            onClick={() => void handleApplyAllAccountsAction('apply_bot_label')}
+                          >
+                            Apply bot label
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            icon={<Bot className="h-4 w-4" />}
+                            onClick={() => void handleApplyAllAccountsAction('append_bot_name')}
+                          >
+                            Append {'{bot}'} to display name
+                          </DropdownMenuItem>
+                        </DropdownMenu>
                       </div>
+                    </div>
 
-                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                        <div className="flex flex-wrap items-center gap-3">
-                          <span>
-                            Showing {currentAccountsPageStart}-{currentAccountsPageEnd} of {accountMatchesCount} account
-                            {accountMatchesCount === 1 ? '' : 's'}
-                          </span>
-                          {botLabeledMappingsForView.length > 0 ? (
-                            <span>{botLabeledMappingsForView.length} bot-labeled</span>
-                          ) : null}
-                          {selectedManageableMappingsCount > 0 ? (
-                            <button
-                              type="button"
-                              className="text-foreground underline-offset-2 hover:underline"
-                              onClick={clearSelectedAccountMappings}
-                              title="Clear selection"
-                            >
-                              {selectedManageableMappingsCount} selected ×
-                            </button>
-                          ) : null}
-                          {isBridgeAllBusy && bridgeAllProgress ? (
-                            <Badge variant="outline" className="max-w-[240px] truncate">
-                              {bridgeAllProgress.currentHandle
-                                ? `Bridging ${bridgeAllProgress.currentHandle}`
-                                : 'Preparing bridge-all...'}
-                            </Badge>
-                          ) : null}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <select
-                            className={cn(selectClassName, 'h-10 w-20 px-2 py-1 text-xs sm:h-8')}
-                            value={accountsPageSize}
-                            onChange={(event) =>
-                              setAccountsPageSize(Number(event.target.value) || ACCOUNT_PAGE_SIZE_DEFAULT)
-                            }
-                            aria-label="Accounts per page"
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <span>
+                          Showing {currentAccountsPageStart}-{currentAccountsPageEnd} of {accountMatchesCount} account
+                          {accountMatchesCount === 1 ? '' : 's'}
+                        </span>
+                        {botLabeledMappingsForView.length > 0 ? (
+                          <span>{botLabeledMappingsForView.length} bot-labeled</span>
+                        ) : null}
+                        {selectedManageableMappingsCount > 0 ? (
+                          <button
+                            type="button"
+                            className="text-foreground underline-offset-2 hover:underline"
+                            onClick={clearSelectedAccountMappings}
+                            title="Clear selection"
                           >
-                            <option value={25}>25</option>
-                            <option value={50}>50</option>
-                            <option value={100}>100</option>
-                            <option value={200}>200</option>
-                          </select>
-                          <Button
-                            className="h-10 w-10 sm:h-8 sm:w-8"
-                            size="icon"
-                            variant="outline"
-                            disabled={accountsPage <= 1}
-                            onClick={() => setAccountsPage((previous) => Math.max(1, previous - 1))}
-                            aria-label="Previous page of accounts"
-                          >
-                            <ChevronLeft className="h-4 w-4" />
-                          </Button>
-                          <span className="w-16 text-center">
-                            {accountsPage}/{accountsPageCount}
-                          </span>
-                          <Button
-                            className="h-10 w-10 sm:h-8 sm:w-8"
-                            size="icon"
-                            variant="outline"
-                            disabled={accountsPage >= accountsPageCount}
-                            onClick={() => setAccountsPage((previous) => Math.min(accountsPageCount, previous + 1))}
-                            aria-label="Next page of accounts"
-                          >
-                            <ChevronRight className="h-4 w-4" />
-                          </Button>
-                        </div>
+                            {selectedManageableMappingsCount} selected ×
+                          </button>
+                        ) : null}
+                        {isBridgeAllBusy && bridgeAllProgress ? (
+                          <Badge variant="outline" className="max-w-[240px] truncate">
+                            {bridgeAllProgress.currentHandle
+                              ? `Bridging ${bridgeAllProgress.currentHandle}`
+                              : 'Preparing bridge-all...'}
+                          </Badge>
+                        ) : null}
                       </div>
-                    </CardContent>
-                  </Card>
+                      <div className="flex items-center gap-2">
+                        <select
+                          className={cn(selectClassName, 'h-8 w-20 px-2 py-1 text-xs')}
+                          value={accountsPageSize}
+                          onChange={(event) =>
+                            setAccountsPageSize(Number(event.target.value) || ACCOUNT_PAGE_SIZE_DEFAULT)
+                          }
+                          aria-label="Accounts per page"
+                        >
+                          <option value={25}>25</option>
+                          <option value={50}>50</option>
+                          <option value={100}>100</option>
+                          <option value={200}>200</option>
+                        </select>
+                        <Button
+                          className="h-8 w-8"
+                          size="icon"
+                          variant="outline"
+                          disabled={accountsPage <= 1}
+                          onClick={() => setAccountsPage((previous) => Math.max(1, previous - 1))}
+                          aria-label="Previous page of accounts"
+                        >
+                          <ChevronLeft className="h-4 w-4" />
+                        </Button>
+                        <span className="w-16 text-center">
+                          {accountsPage}/{accountsPageCount}
+                        </span>
+                        <Button
+                          className="h-8 w-8"
+                          size="icon"
+                          variant="outline"
+                          disabled={accountsPage >= accountsPageCount}
+                          onClick={() => setAccountsPage((previous) => Math.min(accountsPageCount, previous + 1))}
+                          aria-label="Next page of accounts"
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
 
                   {bridgedMappingsForView.length > 0 || bridgeEligibleUnbridgedMappings.length > 0 ? (
                     <details className="rounded-lg border border-border/70 bg-muted/20 text-sm">
                       <summary className="cursor-pointer list-none px-3 py-2.5 text-xs text-muted-foreground">
-                        <span className="font-medium uppercase tracking-wide">Fediverse Bridge</span> —{' '}
-                        {bridgedMappingsForView.length} bridged, {bridgeEligibleUnbridgedMappings.length} eligible now
+                        <span className="font-medium">Fediverse Bridge</span> — {bridgedMappingsForView.length} bridged,{' '}
+                        {bridgeEligibleUnbridgedMappings.length} eligible now
                       </summary>
                       <div className="flex flex-wrap gap-1.5 border-t border-border/60 p-3 pt-2.5">
                         {bridgedMappingsForView.slice(0, 24).map((mapping) => {
@@ -4877,10 +4942,10 @@ function App() {
                   ) : (
                     <>
                       {/* Desktop Table View */}
-                      <Card className="cv-auto overflow-hidden hidden md:block">
+                      <div className="cv-auto hidden md:block">
                         <div className="overflow-x-auto">
                           <table className="min-w-full text-left text-sm">
-                            <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+                            <thead className="border-b border-border text-xs text-muted-foreground">
                               <tr>
                                 <th className="w-9 px-2 py-3">
                                   <input
@@ -4892,12 +4957,13 @@ function App() {
                                     aria-label="Select all accounts on this page"
                                   />
                                 </th>
-                                <th className="px-2 py-3">Owner</th>
-                                {isAdmin ? <th className="px-2 py-3">Created By</th> : null}
-                                <th className="px-2 py-3">Twitter Sources</th>
-                                <th className="px-2 py-3">Bluesky Target</th>
-                                <th className="px-2 py-3">Status</th>
-                                <th className="px-2 py-3 text-right">Actions</th>
+                                <th className="px-2 py-2 font-medium">Mirror</th>
+                                <th className="px-2 py-2 font-medium">X sources</th>
+                                <th className="px-2 py-2 font-medium">Status</th>
+                                {showOwnerColumns ? <th className="px-2 py-2 font-medium">Owner</th> : null}
+                                <th className="px-2 py-2 text-right font-medium">
+                                  <span className="sr-only">Actions</span>
+                                </th>
                               </tr>
                             </thead>
                             <tbody>
@@ -4921,11 +4987,8 @@ function App() {
                                 const isSelectedForBulk = selectedAccountMappingIdSet.has(mapping.id);
 
                                 return (
-                                  <tr
-                                    key={mapping.id}
-                                    className="interactive-row border-b border-border/60 last:border-0"
-                                  >
-                                    <td className="px-2 py-3 align-top">
+                                  <tr key={mapping.id} className="interactive-row border-b border-border/70">
+                                    <td className="px-2 py-2.5 align-middle">
                                       {canManageThisMapping ? (
                                         <input
                                           type="checkbox"
@@ -4939,34 +5002,11 @@ function App() {
                                         />
                                       ) : null}
                                     </td>
-                                    <td className="px-2 py-3 align-top">
-                                      <div className="flex items-center gap-2 font-medium">
-                                        <UserRound className="h-4 w-4 text-muted-foreground" />
-                                        {mapping.owner || 'System'}
-                                      </div>
-                                    </td>
-                                    {isAdmin ? (
-                                      <td className="px-2 py-3 align-top text-xs text-muted-foreground">
-                                        {mapping.createdByLabel ||
-                                          mapping.createdByUser?.username ||
-                                          mapping.createdByUser?.email ||
-                                          '--'}
-                                      </td>
-                                    ) : null}
-                                    <td className="px-2 py-3 align-top">
-                                      <div className="flex flex-wrap gap-2">
-                                        {mapping.twitterUsernames.map((username) => (
-                                          <Badge key={username} variant="secondary">
-                                            @{username}
-                                          </Badge>
-                                        ))}
-                                      </div>
-                                    </td>
-                                    <td className="px-2 py-3 align-top">
+                                    <td className="px-2 py-2.5 align-middle">
                                       <div className="flex items-center gap-2">
                                         {showAccountAvatars && profile?.avatar ? (
                                           <img
-                                            className="h-8 w-8 rounded-full border border-border/70 object-cover"
+                                            className="h-7 w-7 shrink-0 rounded-full object-cover"
                                             src={profile.avatar}
                                             alt={profileName}
                                             loading="lazy"
@@ -4974,7 +5014,7 @@ function App() {
                                             fetchPriority="low"
                                           />
                                         ) : (
-                                          <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
+                                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
                                             <UserRound className="h-4 w-4" />
                                           </div>
                                         )}
@@ -4988,7 +5028,10 @@ function App() {
                                             {profileName}
                                           </button>
                                           <a
-                                            className="inline-flex max-w-full items-center truncate font-mono text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                                            className={cn(
+                                              'inline-flex max-w-full items-center truncate text-xs text-muted-foreground hover:text-foreground hover:underline',
+                                              profileName === profileHandle && 'sr-only',
+                                            )}
                                             href={profileUrl}
                                             target="_blank"
                                             rel="noreferrer"
@@ -5013,36 +5056,57 @@ function App() {
                                         </div>
                                       </div>
                                     </td>
-                                    <td className="px-2 py-3 align-top">
-                                      <div className="flex flex-wrap items-center gap-1.5">
+                                    <td className="max-w-[16rem] px-2 py-2.5 align-middle text-[13px] text-muted-foreground">
+                                      <span className="line-clamp-2">
+                                        {mapping.twitterUsernames.map((username) => `@${username}`).join(', ')}
+                                      </span>
+                                    </td>
+                                    <td className="px-2 py-2.5 align-middle">
+                                      <div className="flex flex-wrap items-center gap-1">
                                         {active ? (
                                           <Badge variant="warning">Backfilling</Badge>
                                         ) : queued ? (
                                           <Badge variant="warning">
                                             Queued {queuePosition ? `#${queuePosition}` : ''}
                                           </Badge>
-                                        ) : (
-                                          <Badge variant="success">Active</Badge>
+                                        ) : mapping.enabled ? null : (
+                                          <Badge variant="outline">Paused</Badge>
                                         )}
                                         {isFediverseBridged ? (
-                                          <Badge variant="success">
+                                          <span
+                                            className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+                                            title="Bridged to the fediverse"
+                                          >
                                             <Link2 className="h-3 w-3" />
                                             Bridged
-                                          </Badge>
+                                          </span>
                                         ) : null}
-                                        {mapping.hasBotLabel ? (
-                                          <Badge variant="outline">
-                                            <Bot className="h-3 w-3" />
-                                            Bot
-                                          </Badge>
+                                        {mapping.hasBotLabel === false ? (
+                                          <Badge variant="warning">No bot label</Badge>
                                         ) : null}
                                       </div>
                                     </td>
-                                    <td className="px-2 py-3 align-top">
-                                      <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                    {showOwnerColumns ? (
+                                      <td className="px-2 py-2.5 align-middle text-xs text-muted-foreground">
+                                        {mapping.owner || 'System'}
+                                        {mapping.createdByLabel ||
+                                        mapping.createdByUser?.username ||
+                                        mapping.createdByUser?.email ? (
+                                          <span className="block">
+                                            by{' '}
+                                            {mapping.createdByLabel ||
+                                              mapping.createdByUser?.username ||
+                                              mapping.createdByUser?.email}
+                                          </span>
+                                        ) : null}
+                                      </td>
+                                    ) : null}
+                                    <td className="px-2 py-2.5 align-middle">
+                                      <div className="flex items-center justify-end gap-1.5">
                                         {canManageThisMapping && canManageGroupsPermission ? (
                                           <select
                                             className={cn(selectClassName, 'h-8 w-28 px-1.5 py-1 text-xs')}
+                                            aria-label="Folder"
                                             value={mappingGroup.key}
                                             disabled={
                                               isBridgeAllBusy ||
@@ -5055,9 +5119,7 @@ function App() {
                                               void handleAssignMappingGroup(mapping, event.target.value);
                                             }}
                                           >
-                                            <option value={DEFAULT_GROUP_KEY}>
-                                              {DEFAULT_GROUP_EMOJI} {DEFAULT_GROUP_NAME}
-                                            </option>
+                                            <option value={DEFAULT_GROUP_KEY}>{DEFAULT_GROUP_NAME}</option>
                                             {groupOptions
                                               .filter((option) => option.key !== DEFAULT_GROUP_KEY)
                                               .map((option) => (
@@ -5065,7 +5127,7 @@ function App() {
                                                   key={`group-move-${mapping.id}-${option.key}`}
                                                   value={option.key}
                                                 >
-                                                  {option.emoji} {option.name}
+                                                  {folderText(option.emoji, option.name)}
                                                 </option>
                                               ))}
                                           </select>
@@ -5087,12 +5149,13 @@ function App() {
                                         {canManageThisMapping ? (
                                           <DropdownMenu
                                             align="end"
-                                            triggerClassName="h-9 w-9 px-0"
+                                            triggerClassName="h-8 w-8 px-0"
+                                            ariaLabel={`More actions for ${mapping.bskyIdentifier}`}
                                             trigger={<MoreHorizontal className="h-4 w-4" />}
                                           >
                                             {mapping.twitterUsernames.length > 1 ? (
                                               <div className="space-y-1 px-3 py-2" data-keep-open="true">
-                                                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                                <p className="text-[11px] font-medium text-muted-foreground">
                                                   Profile sync source
                                                 </p>
                                                 <select
@@ -5298,7 +5361,7 @@ function App() {
                             </tbody>
                           </table>
                         </div>
-                      </Card>
+                      </div>
 
                       {/* Mobile Card List View */}
                       {renderMobileCardList()}
@@ -5345,7 +5408,7 @@ function App() {
                             <option value="all">All folders</option>
                             {groupOptions.map((group) => (
                               <option key={`posts-filter-${group.key}`} value={group.key}>
-                                {group.emoji} {group.name}
+                                {folderText(group.emoji, group.name)}
                               </option>
                             ))}
                           </select>
@@ -5391,7 +5454,8 @@ function App() {
                                   </div>
                                   <div className="flex items-center gap-2">
                                     <Badge variant="outline">
-                                      {groupMeta.emoji} {groupMeta.name}
+                                      <FolderGlyph emoji={groupMeta.emoji} />
+                                      {groupMeta.name}
                                     </Badge>
                                     <Badge variant="secondary">Relevance {Math.round(post.score)}</Badge>
                                   </div>
@@ -5494,7 +5558,8 @@ function App() {
                                 </div>
                                 <div className="flex items-center gap-2">
                                   <Badge variant="outline">
-                                    {groupMeta.emoji} {groupMeta.name}
+                                    <FolderGlyph emoji={groupMeta.emoji} />
+                                    {groupMeta.name}
                                   </Badge>
                                   <Badge variant="success">Posted</Badge>
                                 </div>
@@ -5682,7 +5747,11 @@ function App() {
 
             {activeTab === 'activity' ? (
               <section className="space-y-6 animate-fade-in">
-                <div className="flex flex-wrap items-center gap-2">
+                <div
+                  className="inline-flex max-w-full gap-0.5 overflow-x-auto rounded-md border border-border bg-rail p-0.5"
+                  role="tablist"
+                  aria-label="Activity views"
+                >
                   {[
                     { id: 'outcomes' as const, label: 'Migration outcomes' },
                     { id: 'logs' as const, label: 'System log' },
@@ -5691,14 +5760,21 @@ function App() {
                       label: `Failed queue${(postQueue?.failed ?? 0) > 0 ? ` (${postQueue?.failed})` : ''}`,
                     },
                   ].map((view) => (
-                    <Button
+                    <button
                       key={`activity-view-${view.id}`}
-                      size="sm"
-                      variant={activityView === view.id ? 'default' : 'outline'}
+                      type="button"
+                      role="tab"
+                      aria-selected={activityView === view.id}
                       onClick={() => setActivityView(view.id)}
+                      className={cn(
+                        'h-7 whitespace-nowrap rounded-[5px] px-3 text-[13px] transition-colors duration-150',
+                        activityView === view.id
+                          ? 'bg-card font-medium text-foreground shadow-[0_1px_2px_oklch(var(--foreground)/0.1)]'
+                          : 'text-muted-foreground hover:text-foreground',
+                      )}
                     >
                       {view.label}
-                    </Button>
+                    </button>
                   ))}
                 </div>
 
@@ -5841,7 +5917,7 @@ function App() {
 
                       <div className="overflow-x-auto rounded-md border border-border">
                         <table className="min-w-full text-left text-xs">
-                          <thead className="border-b border-border bg-muted/40 uppercase tracking-wide text-muted-foreground">
+                          <thead className="border-b border-border bg-muted/40 font-medium text-muted-foreground">
                             <tr>
                               <th className="px-2 py-2">Time</th>
                               <th className="px-2 py-2">Level</th>
@@ -5907,7 +5983,7 @@ function App() {
                                         )}
                                         <span className="min-w-0">
                                           <span className="block break-words">{entry.message}</span>
-                                          <span className="mt-0.5 block font-mono text-[10px] text-muted-foreground">
+                                          <span className="mt-0.5 block font-mono text-[11px] text-muted-foreground">
                                             {entry.event}
                                             {entry.twitterId ? ` · tweet ${entry.twitterId}` : ''}
                                             {typeof entry.attempt === 'number' ? ` · attempt ${entry.attempt}` : ''}
@@ -5922,9 +5998,7 @@ function App() {
                                       <td colSpan={5} className="bg-muted/30 px-4 py-3">
                                         {entry.error ? (
                                           <div className="mb-2">
-                                            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                                              Error
-                                            </p>
+                                            <p className="text-[11px] font-medium text-muted-foreground">Error</p>
                                             <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px]">
                                               {[
                                                 entry.error.name,
@@ -5941,9 +6015,7 @@ function App() {
                                         ) : null}
                                         {entry.detail && Object.keys(entry.detail).length > 0 ? (
                                           <div>
-                                            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                                              Detail
-                                            </p>
+                                            <p className="text-[11px] font-medium text-muted-foreground">Detail</p>
                                             <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px]">
                                               {JSON.stringify(entry.detail, null, 2)}
                                             </pre>
@@ -6013,7 +6085,7 @@ function App() {
                     <CardContent className="space-y-4 pt-0">
                       {queueFailures.summary.length > 0 ? (
                         <div className="space-y-2">
-                          <p className="text-xs uppercase tracking-wide text-muted-foreground">Grouped by reason</p>
+                          <p className="text-xs font-medium text-muted-foreground">Grouped by reason</p>
                           <ul className="space-y-2">
                             {queueFailures.summary.map((group, index) => (
                               <li
@@ -6030,7 +6102,7 @@ function App() {
                                   </span>
                                 </div>
                                 <p className="mt-1 break-words text-sm text-muted-foreground">{group.reason}</p>
-                                <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+                                <p className="mt-1 font-mono text-[11px] text-muted-foreground">
                                   e.g. @{group.sampleTwitterUsername} tweet {group.sampleTwitterId} →{' '}
                                   {group.sampleBskyIdentifier}
                                 </p>
@@ -6042,7 +6114,7 @@ function App() {
 
                       <div className="overflow-x-auto rounded-md border border-border">
                         <table className="min-w-full text-left text-xs">
-                          <thead className="border-b border-border bg-muted/40 uppercase tracking-wide text-muted-foreground">
+                          <thead className="border-b border-border bg-muted/40 font-medium text-muted-foreground">
                             <tr>
                               <th className="px-2 py-2">Failed</th>
                               <th className="px-2 py-2">Account</th>
@@ -6062,7 +6134,7 @@ function App() {
                                 </td>
                                 <td className="whitespace-nowrap px-2 py-2 font-mono">
                                   @{item.twitter_username}
-                                  <span className="block text-[10px] text-muted-foreground">
+                                  <span className="block text-[11px] text-muted-foreground">
                                     → {item.bsky_identifier}
                                   </span>
                                 </td>
@@ -6084,7 +6156,7 @@ function App() {
                                 <td className="whitespace-nowrap px-2 py-2">
                                   {item.attempts}
                                   {item.failure_stage ? (
-                                    <span className="block text-[10px] text-muted-foreground">
+                                    <span className="block text-[11px] text-muted-foreground">
                                       at {item.failure_stage}
                                     </span>
                                   ) : null}
@@ -6092,7 +6164,7 @@ function App() {
                                 <td className="px-2 py-2">
                                   <span className="break-words">{item.last_error || 'No reason recorded.'}</span>
                                   {item.posted_uri ? (
-                                    <span className="mt-1 block text-[10px] text-amber-600 dark:text-amber-400">
+                                    <span className="mt-1 block text-[11px] text-amber-600 dark:text-amber-400">
                                       This tweet is already live on Bluesky; it will be reconciled, not re-posted.
                                     </span>
                                   ) : null}
@@ -6135,7 +6207,7 @@ function App() {
                             <option value="all">All folders</option>
                             {groupOptions.map((group) => (
                               <option key={`activity-filter-${group.key}`} value={group.key}>
-                                {group.emoji} {group.name}
+                                {folderText(group.emoji, group.name)}
                               </option>
                             ))}
                           </select>
@@ -6145,7 +6217,7 @@ function App() {
                     <CardContent className="pt-0">
                       <div className="overflow-x-auto">
                         <table className="min-w-full text-left text-sm">
-                          <thead className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+                          <thead className="border-b border-border text-xs font-medium text-muted-foreground">
                             <tr>
                               <th className="px-2 py-3">Time</th>
                               <th className="px-2 py-3">Twitter User</th>
@@ -6178,7 +6250,8 @@ function App() {
                                   <td className="px-2 py-3 align-top font-medium">@{activity.twitter_username}</td>
                                   <td className="px-2 py-3 align-top">
                                     <Badge variant="outline">
-                                      {groupMeta.emoji} {groupMeta.name}
+                                      <FolderGlyph emoji={groupMeta.emoji} />
+                                      {groupMeta.name}
                                     </Badge>
                                   </td>
                                   <td className="px-2 py-3 align-top">
@@ -6243,29 +6316,29 @@ function App() {
             ) : null}
 
             {activeTab === 'settings' ? (
-              <section className="grid gap-6 lg:grid-cols-[200px_1fr] animate-fade-in">
-                <Card className="h-fit lg:sticky lg:top-6">
-                  <CardContent className="p-2">
-                    <NavList
-                      items={settingsNavItems}
-                      activeId={settingsActiveSection}
-                      onSelect={setSettingsActiveSection}
-                    />
-                  </CardContent>
-                </Card>
+              <section className="grid gap-6 lg:grid-cols-[180px_1fr] animate-fade-in">
+                <div className="h-fit lg:sticky lg:top-6">
+                  <NavList
+                    items={settingsNavItems}
+                    activeId={settingsActiveSection}
+                    onSelect={setSettingsActiveSection}
+                    ariaLabel="Settings sections"
+                    className="flex-row overflow-x-auto lg:flex-col"
+                  />
+                </div>
 
                 <div className="min-w-0 space-y-6">
                   {settingsActiveSection === 'account' ? (
-                    <Card className="">
-                      <CardHeader>
-                        <CardTitle>Account Security</CardTitle>
+                    <Card className="rounded-none border-0 border-t bg-transparent">
+                      <CardHeader className="px-0 pb-3 pt-6 sm:px-0">
+                        <CardTitle>Account security</CardTitle>
                         <CardDescription>Update your own email/password with verification.</CardDescription>
                       </CardHeader>
-                      <CardContent className="grid gap-4 border-t border-border/70 pt-4 lg:grid-cols-2">
+                      <CardContent className="grid gap-4 pt-1 lg:grid-cols-2 px-0 sm:px-0">
                         <form className="space-y-3" onSubmit={handleChangeOwnEmail}>
-                          <p className="text-sm font-semibold">Change Email</p>
+                          <p className="pt-2 text-sm font-semibold">Change email</p>
                           <div className="space-y-2">
-                            <Label htmlFor="account-current-email">Current Email</Label>
+                            <Label htmlFor="account-current-email">Current email</Label>
                             <Input
                               id="account-current-email"
                               type="email"
@@ -6279,7 +6352,7 @@ function App() {
                             />
                           </div>
                           <div className="space-y-2">
-                            <Label htmlFor="account-new-email">New Email</Label>
+                            <Label htmlFor="account-new-email">New email</Label>
                             <Input
                               id="account-new-email"
                               type="email"
@@ -6291,7 +6364,7 @@ function App() {
                             />
                           </div>
                           <div className="space-y-2">
-                            <Label htmlFor="account-email-password">Current Password</Label>
+                            <Label htmlFor="account-email-password">Current password</Label>
                             <Input
                               id="account-email-password"
                               type="password"
@@ -6304,14 +6377,14 @@ function App() {
                           </div>
                           <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
                             <Save className="mr-2 h-4 w-4" />
-                            Save Email
+                            Save email
                           </Button>
                         </form>
 
                         <form className="space-y-3" onSubmit={handleChangeOwnPassword}>
-                          <p className="text-sm font-semibold">Change Password</p>
+                          <p className="pt-2 text-sm font-semibold">Change password</p>
                           <div className="space-y-2">
-                            <Label htmlFor="account-current-password">Current Password</Label>
+                            <Label htmlFor="account-current-password">Current password</Label>
                             <Input
                               id="account-current-password"
                               type="password"
@@ -6323,7 +6396,7 @@ function App() {
                             />
                           </div>
                           <div className="space-y-2">
-                            <Label htmlFor="account-new-password">New Password</Label>
+                            <Label htmlFor="account-new-password">New password</Label>
                             <Input
                               id="account-new-password"
                               type="password"
@@ -6335,7 +6408,7 @@ function App() {
                             />
                           </div>
                           <div className="space-y-2">
-                            <Label htmlFor="account-confirm-password">Confirm New Password</Label>
+                            <Label htmlFor="account-confirm-password">Confirm new password</Label>
                             <Input
                               id="account-confirm-password"
                               type="password"
@@ -6348,7 +6421,7 @@ function App() {
                           </div>
                           <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
                             <Save className="mr-2 h-4 w-4" />
-                            Save Password
+                            Save password
                           </Button>
                         </form>
                       </CardContent>
@@ -6356,12 +6429,12 @@ function App() {
                   ) : null}
 
                   {settingsActiveSection === 'account' && !isAdmin ? (
-                    <Card className="">
-                      <CardHeader>
-                        <CardTitle>Access Scope</CardTitle>
+                    <Card className="rounded-none border-0 border-t bg-transparent">
+                      <CardHeader className="px-0 pb-3 pt-6 sm:px-0">
+                        <CardTitle>Access scope</CardTitle>
                         <CardDescription>Your current account permissions.</CardDescription>
                       </CardHeader>
-                      <CardContent className="flex flex-wrap gap-2 pt-0">
+                      <CardContent className="flex flex-wrap gap-2 pt-0 px-0 sm:px-0">
                         {PERMISSION_OPTIONS.filter((permission) => effectivePermissions[permission.key]).map(
                           (permission) => (
                             <Badge key={`self-perm-${permission.key}`} variant="outline">
@@ -6374,15 +6447,15 @@ function App() {
                   ) : null}
 
                   {settingsActiveSection === 'system' && isAdmin ? (
-                    <Card className="">
-                      <CardHeader>
+                    <Card className="rounded-none border-0 border-t bg-transparent">
+                      <CardHeader className="px-0 pb-3 pt-6 sm:px-0">
                         <CardTitle className="flex items-center gap-2">
                           <Settings2 className="h-4 w-4" />
                           Admin Settings
                         </CardTitle>
                         <CardDescription>Running version, updates, and quick account creation.</CardDescription>
                       </CardHeader>
-                      <CardContent className="space-y-4 pt-0">
+                      <CardContent className="space-y-4 pt-0 px-0 sm:px-0">
                         <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
                           <div className="flex flex-wrap items-start justify-between gap-3">
                             <div className="space-y-1">
@@ -6432,12 +6505,12 @@ function App() {
                   ) : null}
 
                   {settingsActiveSection === 'users' && isAdmin ? (
-                    <Card className="">
-                      <CardHeader>
-                        <CardTitle>User Access Manager</CardTitle>
+                    <Card className="rounded-none border-0 border-t bg-transparent">
+                      <CardHeader className="px-0 pb-3 pt-6 sm:px-0">
+                        <CardTitle>Users</CardTitle>
                         <CardDescription>Create users and control what they can see/manage.</CardDescription>
                       </CardHeader>
-                      <CardContent className="space-y-4 border-t border-border/70 pt-4">
+                      <CardContent className="space-y-4 pt-1 px-0 sm:px-0">
                         <form
                           className="space-y-3 rounded-lg border border-border/70 bg-muted/20 p-3"
                           onSubmit={handleCreateUser}
@@ -6722,11 +6795,11 @@ function App() {
                   ) : null}
 
                   {settingsActiveSection === 'twitter' && isAdmin ? (
-                    <Card className="">
-                      <CardHeader>
+                    <Card className="rounded-none border-0 border-t bg-transparent">
+                      <CardHeader className="px-0 pb-3 pt-6 sm:px-0">
                         <div className="flex items-center justify-between gap-2">
                           <div>
-                            <CardTitle>Twitter Credentials</CardTitle>
+                            <CardTitle>X credentials</CardTitle>
                             <CardDescription>Primary and backup cookie values.</CardDescription>
                           </div>
                           <Badge variant={twitterConfigured ? 'success' : 'outline'}>
@@ -6734,7 +6807,7 @@ function App() {
                           </Badge>
                         </div>
                       </CardHeader>
-                      <CardContent className="space-y-3 border-t border-border/70 pt-4">
+                      <CardContent className="space-y-3 pt-1 px-0 sm:px-0">
                         <form className="space-y-3" onSubmit={handleSaveTwitterConfig}>
                           <div className="space-y-2">
                             <Label htmlFor="authToken">Primary Auth Token</Label>
@@ -6784,7 +6857,7 @@ function App() {
 
                           <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
                             <Save className="mr-2 h-4 w-4" />
-                            Save Twitter Credentials
+                            Save X credentials
                           </Button>
                         </form>
                       </CardContent>
@@ -6792,11 +6865,11 @@ function App() {
                   ) : null}
 
                   {settingsActiveSection === 'ai' && isAdmin ? (
-                    <Card className="">
-                      <CardHeader>
+                    <Card className="rounded-none border-0 border-t bg-transparent">
+                      <CardHeader className="px-0 pb-3 pt-6 sm:px-0">
                         <div className="flex items-center justify-between gap-2">
                           <div>
-                            <CardTitle>AI Settings</CardTitle>
+                            <CardTitle>AI</CardTitle>
                             <CardDescription>Optional enrichment and rewrite provider config.</CardDescription>
                           </div>
                           <Badge variant={aiConfigured ? 'success' : 'outline'}>
@@ -6804,7 +6877,7 @@ function App() {
                           </Badge>
                         </div>
                       </CardHeader>
-                      <CardContent className="space-y-3 border-t border-border/70 pt-4">
+                      <CardContent className="space-y-3 pt-1 px-0 sm:px-0">
                         <form className="space-y-3" onSubmit={handleSaveAiConfig}>
                           <div className="space-y-2">
                             <Label htmlFor="provider">Provider</Label>
@@ -6865,7 +6938,7 @@ function App() {
 
                           <Button className="w-full sm:w-auto" size="sm" type="submit" disabled={isBusy}>
                             <Bot className="mr-2 h-4 w-4" />
-                            Save AI Settings
+                            Save AI settings
                           </Button>
                         </form>
                       </CardContent>
@@ -6873,12 +6946,12 @@ function App() {
                   ) : null}
 
                   {settingsActiveSection === 'data' && isAdmin ? (
-                    <Card className="">
-                      <CardHeader>
-                        <CardTitle>Data Management</CardTitle>
+                    <Card className="rounded-none border-0 border-t bg-transparent">
+                      <CardHeader className="px-0 pb-3 pt-6 sm:px-0">
+                        <CardTitle>Data</CardTitle>
                         <CardDescription>Export/import mappings and provider settings.</CardDescription>
                       </CardHeader>
-                      <CardContent className="space-y-3 border-t border-border/70 pt-4">
+                      <CardContent className="space-y-3 pt-1 px-0 sm:px-0">
                         <Button className="w-full sm:w-auto" variant="outline" onClick={handleExportConfig}>
                           <Download className="mr-2 h-4 w-4" />
                           Export configuration
@@ -6915,18 +6988,18 @@ function App() {
             {isAddAccountSheetOpen ? (
               // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click-to-dismiss; keyboard users close via the sheet's Close button
               <div
-                className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 sm:items-stretch sm:justify-end animate-backdrop-fade"
+                className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/30 p-0 sm:items-stretch sm:justify-end animate-backdrop-fade"
                 onClick={closeAddAccountSheet}
               >
                 {/* biome-ignore lint/a11y/useKeyWithClickEvents: click handler only stops backdrop propagation, it is not an interaction */}
                 <aside
-                  className="flex h-[95vh] w-full max-w-xl flex-col rounded-t-2xl border border-border/80 bg-card shadow-2xl sm:h-full sm:rounded-none sm:rounded-l-2xl animate-slide-up sm:animate-slide-in-right"
+                  className="flex h-[95vh] w-full max-w-xl flex-col rounded-t-xl border border-border bg-card shadow-[0_16px_48px_-12px_oklch(var(--foreground)/0.3)] sm:h-full sm:rounded-none sm:rounded-l-xl animate-slide-up sm:animate-slide-in-right"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <div className="flex items-start justify-between border-b border-border/70 px-5 py-4">
                     <div>
-                      <p className="text-xs uppercase tracking-[0.15em] text-muted-foreground">Add Account</p>
-                      <h2 className="text-lg font-semibold">Create Crosspost Mapping</h2>
+                      <h2 className="text-lg font-semibold">Add account</h2>
+                      <p className="text-sm text-muted-foreground">Map X accounts to a Bluesky mirror.</p>
                     </div>
                     <Button
                       variant="ghost"
@@ -7239,7 +7312,7 @@ function App() {
                                     onClick={() => applyGroupPresetToNewMapping(group.key)}
                                     type="button"
                                   >
-                                    <span>{group.emoji}</span>
+                                    <FolderGlyph emoji={group.emoji} />
                                     <span>{group.name}</span>
                                   </button>
                                 );
@@ -7377,10 +7450,10 @@ function App() {
             ) : null}
 
             {editingMapping ? (
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 animate-backdrop-fade">
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-4 animate-backdrop-fade">
                 <Card className="w-full max-w-xl border-border/90 bg-card animate-fade-in">
                   <CardHeader>
-                    <CardTitle>Edit Mapping</CardTitle>
+                    <CardTitle>Edit account</CardTitle>
                     <CardDescription>Update ownership, handles, and target credentials.</CardDescription>
                   </CardHeader>
                   <CardContent>

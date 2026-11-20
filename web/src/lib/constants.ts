@@ -63,7 +63,7 @@ export const TAB_PATHS: Record<DashboardTab, string> = {
 export const ADD_ACCOUNT_STEPS = ['Sources', 'Create', 'Bluesky', 'Verify & Create'] as const;
 export const ADD_ACCOUNT_STEP_COUNT = ADD_ACCOUNT_STEPS.length;
 export const ACCOUNT_SEARCH_MIN_SCORE = 22;
-export const ACCOUNT_PAGE_SIZE_DEFAULT = 50;
+export const ACCOUNT_PAGE_SIZE_DEFAULT = 100;
 export const DEFAULT_BACKFILL_LIMIT = 15;
 export const FEDIVERSE_BRIDGE_MIN_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const DEFAULT_USER_PERMISSIONS: UserPermissions = {
@@ -88,7 +88,7 @@ export const PERMISSION_OPTIONS: Array<{
 ];
 
 export const selectClassName =
-  'flex h-10 w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
+  'flex h-9 w-full rounded-md border border-input bg-card px-3 py-1.5 text-sm text-foreground transition-colors hover:border-foreground/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
 export const LOG_LEVEL_BADGE: Record<LogLevel, string> = {
   debug: 'text-muted-foreground',
   info: 'text-sky-600 dark:text-sky-400',

@@ -83,7 +83,7 @@ export function DiscoveryPanel({ authHeaders, isAdmin, folders, accounts, notify
   return (
     <div className="space-y-3 border-t border-border/70 pt-3">
       <div className="space-y-1">
-        <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
           <Users className="h-3.5 w-3.5" />
           Starter packs
         </p>
