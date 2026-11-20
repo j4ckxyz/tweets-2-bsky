@@ -35,49 +35,48 @@ colors:
   tracking-blue-dark: "oklch(76% 0.1 235)"
 typography:
   headline:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+    fontFamily: "Onest Variable, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
     fontSize: "1.375rem"
     fontWeight: 600
     lineHeight: "1.75rem"
     letterSpacing: "-0.015em"
   title:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+    fontFamily: "Onest Variable, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
     fontSize: "1rem"
     fontWeight: 600
     lineHeight: "1.5rem"
   title-sm:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+    fontFamily: "Onest Variable, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
     fontSize: "0.9375rem"
     fontWeight: 600
     lineHeight: 1.375
   body:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+    fontFamily: "Onest Variable, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
     fontSize: "0.875rem"
     fontWeight: 400
     lineHeight: "1.25rem"
-    fontFeature: "\"tnum\" 1, \"cv11\" 1"
   control:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+    fontFamily: "Onest Variable, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
     fontSize: "0.875rem"
     fontWeight: 500
     lineHeight: "1.25rem"
   control-sm:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+    fontFamily: "Onest Variable, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
     fontSize: "0.8125rem"
     fontWeight: 500
     lineHeight: "1.25rem"
   label:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+    fontFamily: "Onest Variable, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
     fontSize: "0.75rem"
     fontWeight: 400
     lineHeight: "1rem"
   micro:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+    fontFamily: "Onest Variable, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
     fontSize: "0.6875rem"
     fontWeight: 500
     lineHeight: "1rem"
   figure:
-    fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+    fontFamily: "Onest Variable, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
     fontSize: "1rem"
     fontWeight: 600
     lineHeight: "1.5rem"
@@ -223,9 +222,9 @@ components:
   transit-bar:
     rounded: "{rounded.full}"
     height: "12px"
-  airmail-mark:
-    rounded: "5px"
-    size: "20px"
+  relay-mark:
+    height: "15px"
+    width: "32px"
 ---
 
 # Design System: tweets-2-bsky
@@ -236,7 +235,7 @@ components:
 
 Every mirror is a forwarding route, and the dashboard reads transit time first. The ground is aerogramme paper in light mode (a pale, blue-cast sheet) and postal navy in dark mode; both are drawn from one blue-tinted neutral ramp so that rails, rules, muted text and fills all feel like the same stationery. Airmail blue is the only colour that asks to be pressed. Cancellation-ink red is reserved for routes that are late, down or failing; customs amber marks slow. Healthy routes stay quiet: neutral ink, a short dot-to-dot tick, nothing lit.
 
-The system is dense and operational, built for one admin scanning 60 to 80 routes from a desk or a phone. Structure comes from hairline rules between rows and groups, not from boxed cards; the routes table is a ruled ledger grouped by standing (Needs attention, Slow, On time, No data), sorted slowest first. One system sans family carries every size, with tabular figures on by default, so durations and counts line up in columns without a monospace face. The only ornament is the airmail etiquette stripe, which is the product mark and appears nowhere else.
+The system is dense and operational, built for one admin scanning 60 to 80 routes from a desk or a phone. Structure comes from hairline rules between rows and groups, not from boxed cards; the routes table is a ruled ledger grouped by standing (Needs attention, Slow, On time, No data), sorted slowest first. One sans family, Onest, carries every size, with tabular figures where numbers stack in columns, so counts line up without a monospace face. There is no ornament; the Relay mark (a square handed on to a ring) is the logo.
 
 Light and dark are equal citizens. The theme follows the operating system by default with an Auto / Light / Dark override in the rail foot; the choice is resolved before first paint so a dark reload never flashes paper. The rejected default is the KPI-card-grid admin: stat tiles and a wall of cards.
 
@@ -244,8 +243,8 @@ Light and dark are equal citizens. The theme follows the operating system by def
 - One blue-tinted neutral ramp in both themes; no grey from outside it.
 - Airmail blue is the single action and brand colour; red and amber are state, never decoration.
 - Hairline rules over filled boxes; small radii (4 to 8px).
-- One system sans at every size, tabular figures everywhere.
-- The per-route transit bar is the signature; the airmail stripe is the mark.
+- One sans, Onest, at every size; tabular figures where numbers stack in columns.
+- The per-route transit bar is the signature; the Relay mark (a post handed on to its mirror) is the logo.
 - Calm at rest: colour appears only where a route needs a human.
 
 ## Colors
@@ -283,10 +282,10 @@ A cool, low-chroma postal palette: blue-cast paper and ink, one saturated airmai
 ## Typography
 
 **Display Font:** none (the system has no display face)
-**Body Font:** system-ui (with -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif)
+**Body Font:** Onest (variable, bundled from `@fontsource-variable/onest`; falls back to system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif)
 **Label/Mono Font:** ui-monospace (with SFMono-Regular, Menlo, Consolas, monospace) for handles, IDs and log lines only
 
-**Character:** One quiet operating-system sans at every size, with tabular figures (`"tnum" 1, "cv11" 1`) set on `body` so every number in the app aligns. Hierarchy comes from weight (400 / 500 / 600) and a tight size ladder, not from a second family.
+**Character:** One rounded, friendly grotesque at every size, bundled with the app so it renders the same on every OS. Hierarchy comes from weight (400 / 500 / 600) and a tight size ladder, not from a second family.
 
 ### Hierarchy
 - **Headline** (600, 20px on phones, 22px from 640px up, 28px line, -0.015em): the page title in the content header, one per view.
@@ -301,7 +300,7 @@ A cool, low-chroma postal palette: blue-cast paper and ink, one saturated airmai
 ### Named Rules
 **The One Family Rule.** One sans family at every size. Do not introduce a display face; the page title earns its rank from weight and size alone.
 
-**The Tabular Figures Rule.** Every duration, count and timestamp uses tabular figures; they are on globally, so never turn them off, and add `tabular-nums` explicitly where a number sits in a column.
+**The Tabular Figures Rule.** Numbers that stack in a column or sit in a summary figure use `tabular-nums` so they align. Onest's tabular "1" is wide, so short right-aligned durations in table rows ("1d 11h ago") keep proportional figures, and tabular figures are not set globally.
 
 ## Layout
 
@@ -373,8 +372,8 @@ The routes table is the heart of the system. Each row is a full-width button div
 
 Standing groups open with a 12px header on a hairline: the standing name in semibold (red for Needs attention, amber for Slow, ink otherwise), the count in Faded Ink, and a one-line threshold hint from 640px.
 
-### Airmail Mark
-The product mark: a small rounded square filled with a 135-degree repeating stripe of cancellation red (4px), sheet (3px), airmail blue (4px), sheet (3px), with a 10% inset ink ring. It sits beside the wordmark in the rail, the mobile bar and the login card.
+### Relay Mark
+The product mark (`components/Logo.tsx`, `web/public/favicon.svg`): a solid rounded square (the tweet) joined by a short stroke to a ring (its mirror on Bluesky). Square and stroke take the current text colour; the ring is airmail blue. The SVG is cropped to its content (about 2.2:1) and sized by height: 15px in the rail, 13px in the mobile bar, 17px on the login card. The favicon is the same drawing on a 24px square with light and dark colours.
 
 ## Do's and Don'ts
 
@@ -383,7 +382,7 @@ The product mark: a small rounded square filled with a 135-degree repeating stri
 - **Do** colour a route, figure or label red only when it is late (over 30 minutes average), down or has failed posts, and amber only when it is slow (10 to 30 minutes) or its source is erroring.
 - **Do** separate rows and sections with 1px hairlines (`hairline`, 70% for row dividers) instead of wrapping them in cards.
 - **Do** keep the routes table grouped by standing with Needs attention first, sorted slowest first, and collapse long on-time groups.
-- **Do** use the single system sans with tabular figures for every number; set durations in the compact one-unit-pair form (`4m`, `1h 20m`).
+- **Do** use Onest for everything, with tabular figures for numbers that stack in columns; set durations in the compact one-unit-pair form (`4m`, `1h 20m`).
 - **Do** define every new colour as an OKLCH triplet in both `:root` and `.dark`, drawn from the blue-tinted ramp, and expose it through `tailwind.config.cjs`.
 - **Do** keep transitions at 150ms ease-out for state changes and respect `prefers-reduced-motion` (all motion collapses to 1ms).
 - **Do** show focus with the 2px Airmail Blue Ring ring and 2px offset on every interactive element.
@@ -392,7 +391,7 @@ The product mark: a small rounded square filled with a 135-degree repeating stri
 - **Don't** build KPI stat tiles or a wall of cards; summary numbers sit inline as label-and-value pairs on the header line.
 - **Don't** use red, amber or green as decoration, category colour or emphasis on healthy state; on time is plain ink, not green.
 - **Don't** use stock Tailwind hues, neutral greys or pure black and white; every neutral comes from the blue-tinted ramp.
-- **Don't** reuse the airmail stripe as a pattern, divider or background anywhere; it is the product mark and nothing else.
+- **Don't** decorate the Relay mark (no tile, stripe or gradient behind it), recolour the square blue, or use X or Bluesky brand shapes alongside it.
 - **Don't** add a second type family or a display face, and don't set text below 11px.
 - **Don't** put shadows on resting rows, sections or cards; shadows mark the single selected item or a surface floating over content.
 - **Don't** use uppercase, letter-spaced labels (eyebrows or kickers) above headings.

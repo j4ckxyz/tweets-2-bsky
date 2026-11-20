@@ -1,6 +1,7 @@
 import { Clock3, LogOut } from 'lucide-react';
 import { useDashboard } from '../../lib/dashboard-context';
 import { Countdown } from '../Countdown';
+import { LogoMark } from '../Logo';
 import { ThemeSwitcher } from '../ThemeSwitcher';
 import { NavList } from '../ui/nav-list';
 
@@ -10,10 +11,7 @@ export function Sidebar() {
   return (
     <aside className="sticky top-0 hidden h-screen w-52 shrink-0 flex-col border-r border-border bg-rail lg:flex">
       <div className="flex items-center gap-2.5 px-4 pb-5 pt-5">
-        <span
-          className="airmail-mark h-5 w-5 shrink-0 rounded-[5px] ring-1 ring-inset ring-foreground/10"
-          aria-hidden="true"
-        />
+        <LogoMark className="h-[15px] w-8 text-foreground" />
         <p className="truncate text-[15px] font-semibold tracking-[-0.01em]">tweets-2-bsky</p>
       </div>
 

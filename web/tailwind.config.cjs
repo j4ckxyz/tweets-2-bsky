@@ -63,6 +63,7 @@ module.exports = {
       },
       fontFamily: {
         sans: [
+          '"Onest Variable"',
           'system-ui',
           '-apple-system',
           'BlinkMacSystemFont',

@@ -164,7 +164,7 @@ function VolumeDot({ posted }: { posted: number }) {
 }
 
 const GRID =
-  'grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1.5 md:grid-cols-[minmax(0,1.5fr)_minmax(0,1.6fr)_4.5rem_5.5rem_6rem_1rem] md:items-center';
+  'grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1.5 md:grid-cols-[minmax(0,1.5fr)_minmax(0,1.6fr)_4.5rem_6.75rem_5.5rem_1rem] md:items-center';
 
 export interface RouteSummary {
   routes: number;
@@ -467,9 +467,7 @@ export function AccountHealth({
                             <div className="min-w-0 flex-1">
                               <TransitBar typicalMs={account.lag.medianMs} tailMs={account.lag.p95Ms} />
                             </div>
-                            <span
-                              className={cn('w-16 shrink-0 text-right font-medium tabular-nums', LAG_TEXT[rowStanding])}
-                            >
+                            <span className={cn('w-16 shrink-0 text-right font-medium', LAG_TEXT[rowStanding])}>
                               {formatShort(account.lag.medianMs)}
                             </span>
                           </>
@@ -478,10 +476,10 @@ export function AccountHealth({
                         )}
                       </div>
 
-                      <div className="hidden text-right tabular-nums text-muted-foreground md:block">
+                      <div className="hidden text-right text-muted-foreground md:block">
                         {account.lag ? formatShort(account.lag.p95Ms) : '—'}
                       </div>
-                      <div className="hidden text-right tabular-nums text-muted-foreground md:block">
+                      <div className="hidden text-right text-muted-foreground md:block">
                         {formatAgo(account.posts.lastPostedAt)}
                       </div>
                       <div className="hidden truncate text-xs text-muted-foreground md:block">
@@ -510,7 +508,7 @@ export function AccountHealth({
                           ].map(([label, value]) => (
                             <div key={label}>
                               <dt className="text-muted-foreground">{label}</dt>
-                              <dd className="font-medium tabular-nums">{value}</dd>
+                              <dd className="font-medium">{value}</dd>
                             </div>
                           ))}
                         </dl>

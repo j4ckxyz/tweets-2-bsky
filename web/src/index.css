@@ -62,9 +62,8 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif,
-      "Apple Color Emoji", "Segoe UI Emoji";
-    font-feature-settings: "tnum" 1, "cv11" 1;
+    font-family: "Onest Variable", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+      Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
     -webkit-tap-highlight-color: transparent;
   }
 
@@ -124,17 +123,6 @@
 
   .interactive-row {
     @apply hover:bg-muted/60 transition-colors duration-150 ease-out;
-  }
-
-  /* Airmail etiquette stripe: the product mark and nothing else. */
-  .airmail-mark {
-    background: repeating-linear-gradient(
-      135deg,
-      oklch(var(--late)) 0 4px,
-      oklch(var(--card)) 4px 7px,
-      oklch(var(--primary)) 7px 11px,
-      oklch(var(--card)) 11px 14px
-    );
   }
 
   /* Skip layout/paint for offscreen rows in long lists (accounts, posts). */

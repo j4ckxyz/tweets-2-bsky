@@ -1,5 +1,6 @@
 import { useDashboard } from '../../lib/dashboard-context';
 import { cn } from '../../lib/utils';
+import { LogoMark } from '../Logo';
 
 // Sticky top bar with the five-tab grid on small screens.
 export function MobileNav() {
@@ -7,10 +8,7 @@ export function MobileNav() {
   return (
     <div className="sticky top-0 z-30 border-b border-border bg-rail/95 px-3 pb-2 pt-3 backdrop-blur lg:hidden">
       <div className="mb-2 flex items-center gap-2 px-1">
-        <span
-          className="airmail-mark h-4 w-4 shrink-0 rounded ring-1 ring-inset ring-foreground/10"
-          aria-hidden="true"
-        />
+        <LogoMark className="h-[13px] w-7 text-foreground" />
         <p className="text-sm font-semibold">tweets-2-bsky</p>
       </div>
       <div>

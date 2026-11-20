@@ -1,4 +1,5 @@
 import { Loader2 } from 'lucide-react';
+import { LogoMark } from '../components/Logo';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Input } from '../components/ui/input';
@@ -14,10 +15,7 @@ export function LoginPage() {
       <Card className="w-full max-w-sm animate-fade-in shadow-[0_12px_32px_-12px_oklch(var(--foreground)/0.18)]">
         <CardHeader className="gap-3">
           <div className="flex items-center gap-2.5">
-            <span
-              className="airmail-mark h-6 w-6 shrink-0 rounded-md ring-1 ring-inset ring-foreground/10"
-              aria-hidden="true"
-            />
+            <LogoMark className="h-[17px] w-9 text-foreground" />
             <CardTitle className="text-lg">tweets-2-bsky</CardTitle>
           </div>
           <CardDescription>
