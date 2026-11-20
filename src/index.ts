@@ -43,9 +43,11 @@ import { applyProfileMirrorSyncState, syncBlueskyProfileFromTwitter } from './pr
 import {
   SCRAPER_JITTER_MS,
   SCRAPER_MIN_GAP_MS,
+  TwitterRateLimitedError,
   acquireScraperSlot,
   createScraperFetch,
   isRetryableScraperError,
+  throwOnRateLimit,
 } from './scraper-fetch.js';
 import { BSKY_POST_LIMIT, graphemeLength, splitText } from './text-split.js';
 import {
@@ -360,7 +362,12 @@ async function getTwitterScraper(sessionKey = 'default', forceReset = false): Pr
   const existingCookies = sessionCookies.get(sessionKey);
   if (!existingScraper || forceReset || existingCookies?.authToken !== authToken || existingCookies?.ct0 !== ct0) {
     console.log(`🔄 Initializing Twitter scraper with ${useBackupCredentials ? 'BACKUP' : 'PRIMARY'} credentials...`);
-    const scraper = new Scraper({ fetch: scraperFetch });
+    // Sweep checks fail fast on a rate limit (see throwOnRateLimit); other
+    // callers (backfills, pin sync, previews) keep the library's waiting default.
+    const scraper = new Scraper({
+      fetch: scraperFetch,
+      ...(sessionKey.startsWith('sweep-') ? { rateLimitStrategy: throwOnRateLimit } : {}),
+    });
     await scraper.setCookies([`auth_token=${authToken}`, `ct0=${ct0}`]);
     scraperSessions.set(sessionKey, scraper);
     sessionCookies.set(sessionKey, {
@@ -391,6 +398,39 @@ async function switchCredentials(failedOnBackup: boolean = useBackupCredentials)
   }
   console.log('⚠️ No backup credentials available to switch to.');
   return false;
+}
+
+// When each login's X rate limit lifts (epoch ms; 0 or past = usable).
+const rateLimitedUntil = { primary: 0, backup: 0 };
+const credentialSetName = (backup: boolean) => (backup ? 'backup' : 'primary');
+
+function hasBackupTwitterCredentials(): boolean {
+  const twitter = getConfig().twitter;
+  return Boolean(twitter.backupAuthToken && twitter.backupCt0);
+}
+
+function noteTwitterRateLimit(onBackup: boolean, resetAt: number): void {
+  const key = credentialSetName(onBackup);
+  rateLimitedUntil[key] = Math.max(rateLimitedUntil[key], resetAt);
+}
+
+/**
+ * Make sure the next timeline check runs on a login that is not rate limited,
+ * switching to the other one when it has requests left. Returns 0 when a check
+ * can go ahead, otherwise when the soonest limit lifts.
+ */
+async function prepareCredentialsForCheck(now = Date.now()): Promise<number> {
+  const current = rateLimitedUntil[credentialSetName(useBackupCredentials)];
+  if (current <= now) return 0;
+  if (hasBackupTwitterCredentials()) {
+    const other = rateLimitedUntil[credentialSetName(!useBackupCredentials)];
+    if (other <= now) {
+      await switchCredentials(useBackupCredentials);
+      return 0;
+    }
+    return Math.min(current, other);
+  }
+  return current;
 }
 
 // Public web bearer token (stable since 2018), used by every browser session.
@@ -1233,6 +1273,20 @@ async function fetchUserTweets(
     } catch (e: any) {
       lastError = e;
       retries--;
+
+      // Rate limited: retrying on the same login only hits the limit again.
+      // Try the other login if it has requests left; otherwise give up on this
+      // check until the limit lifts.
+      if (e instanceof TwitterRateLimitedError) {
+        noteTwitterRateLimit(usedBackup, e.resetAt);
+        console.warn(`⚠️ ${e.message} (while fetching @${username}).`);
+        if (retries > 0 && (await prepareCredentialsForCheck()) === 0 && useBackupCredentials !== usedBackup) {
+          console.log('🔄 Retrying with the other Twitter credentials...');
+          continue;
+        }
+        if (options.throwOnError) throw e;
+        return [];
+      }
       // Shared with the fetch timeout that produces one of these, so a timed-out
       // request actually takes the retry/credential-switch path rather than
       // failing fast and reporting the account as having no new tweets.
@@ -3252,6 +3306,7 @@ async function runFetchSweep(mappings: AccountMapping[], options: SweepOptions =
 
   let cursor = 0;
   let enqueuedTotal = 0;
+  let rateLimitDeferred = 0;
   const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, dueAccounts.length) }, async (_, slot) => {
     const sessionKey = `sweep-${slot + 1}`;
     while (true) {
@@ -3261,6 +3316,12 @@ async function runFetchSweep(mappings: AccountMapping[], options: SweepOptions =
       const ref = dueAccounts[index];
       if (!ref) continue;
       const { mapping, twitterUsername } = ref;
+      // Every login is rate limited: leave the rest of this sweep's checks
+      // untouched so they are still due, and pick them up once it lifts.
+      if ((await prepareCredentialsForCheck()) > 0) {
+        rateLimitDeferred += 1;
+        continue;
+      }
       const checkJobId = `check:${mapping.id}:${twitterUsername.toLowerCase()}`;
       const accountStartedAt = Date.now();
       const accountScope = {
@@ -3306,25 +3367,58 @@ async function runFetchSweep(mappings: AccountMapping[], options: SweepOptions =
           ...accountScope,
         });
       } catch (err) {
-        const detail = toErrorDetail(err);
-        // Kept on the source row so the dashboard shows a renamed, suspended
-        // or protected account as failing, not as one that went quiet.
-        sourceActivityService.recordError(twitterUsername, describeErrorDetail(detail));
-        logEvent({
-          level: 'error',
-          stage: 'sweep',
-          event: 'account.check.failed',
-          message: `Could not check @${twitterUsername} for ${mapping.bskyIdentifier}: ${describeErrorDetail(detail)}`,
-          durationMs: Date.now() - accountStartedAt,
-          error: detail,
-          ...accountScope,
-        });
+        if (err instanceof TwitterRateLimitedError) {
+          // Not the account's fault, and not a completed check: it stays due
+          // so the next sweep after the limit lifts checks it.
+          rateLimitDeferred += 1;
+          logEvent({
+            level: 'warn',
+            stage: 'sweep',
+            event: 'account.check.rate-limited',
+            message: `Did not check @${twitterUsername} for ${mapping.bskyIdentifier}: ${err.message}. It will be checked on a later sweep.`,
+            durationMs: Date.now() - accountStartedAt,
+            ...accountScope,
+          });
+        } else {
+          const detail = toErrorDetail(err);
+          // Kept on the source row so the dashboard shows a renamed, suspended
+          // or protected account as failing, not as one that went quiet.
+          sourceActivityService.recordError(twitterUsername, describeErrorDetail(detail));
+          logEvent({
+            level: 'error',
+            stage: 'sweep',
+            event: 'account.check.failed',
+            message: `Could not check @${twitterUsername} for ${mapping.bskyIdentifier}: ${describeErrorDetail(detail)}`,
+            durationMs: Date.now() - accountStartedAt,
+            error: detail,
+            ...accountScope,
+          });
+        }
       } finally {
         updateJob(checkJobId, null);
       }
     }
   });
   await Promise.all(workers);
+
+  if (rateLimitDeferred > 0) {
+    // When every login is limited, say when checks can resume; otherwise the
+    // other login is already in use and the next sweep picks these up.
+    const now = Date.now();
+    const limits = hasBackupTwitterCredentials()
+      ? [rateLimitedUntil.primary, rateLimitedUntil.backup]
+      : [rateLimitedUntil.primary];
+    const resumesAt = limits.every((until) => until > now) ? Math.min(...limits) : null;
+    logEvent({
+      level: 'warn',
+      stage: 'sweep',
+      event: 'sweep.rate-limited',
+      message: `X rate limit: ${rateLimitDeferred} account check(s) moved to a later sweep.${
+        resumesAt ? ` Requests can resume around ${new Date(resumesAt).toLocaleTimeString()}.` : ''
+      }`,
+      detail: { deferred: rateLimitDeferred, resumesAt },
+    });
+  }
 
   // Daily housekeeping self-gates on 24h timestamps, so this is a cheap no-op
   // on almost every sweep.
