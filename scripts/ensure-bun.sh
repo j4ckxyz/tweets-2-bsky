@@ -47,9 +47,17 @@ if [[ -z "$BUN_BIN" || ! -x "$BUN_BIN" ]]; then
 fi
 
 if ! "$BUN_BIN" upgrade >/dev/null 2>&1; then
-  echo "⚠️  Bun auto-upgrade failed. Reinstalling latest Bun..."
-  install_latest_bun
-  BUN_BIN="$(resolve_bun_bin || true)"
+  # The upgrade downloads from GitHub, which can fail transiently (rate limits
+  # on shared CI runners). Reinstall when we can; otherwise keep the Bun we
+  # have, which the version check below still validates. Docker's slim Bun
+  # image has neither curl nor wget, and used to fail the whole build here.
+  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+    echo "⚠️  Bun auto-upgrade failed. Reinstalling latest Bun..."
+    install_latest_bun
+    BUN_BIN="$(resolve_bun_bin || true)"
+  else
+    echo "⚠️  Bun auto-upgrade failed and curl/wget are unavailable; continuing with Bun $("$BUN_BIN" --version 2>/dev/null || echo '?')."
+  fi
 fi
 
 if [[ -z "$BUN_BIN" || ! -x "$BUN_BIN" ]]; then
