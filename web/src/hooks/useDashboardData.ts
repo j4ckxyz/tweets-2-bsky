@@ -1,100 +1,73 @@
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
+import type { SetStateAction } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RouteSummary } from '../components/AccountHealth';
-import { normalizePermissions, normalizeTwitterUsername } from '../lib/format';
+import * as api from '../lib/api';
+import { normalizeTwitterUsername } from '../lib/format';
+import { queryKeys } from '../lib/query-keys';
 import type {
   AIConfig,
   AccountGroup,
   AccountMapping,
-  ActivityLog,
-  AuthUser,
   BskyProfileView,
-  EnrichedPost,
   FediverseBridgeStatusView,
-  ManagedUser,
-  RuntimeVersionInfo,
   StatusResponse,
   TwitterConfig,
-  UpdateStatusInfo,
 } from '../lib/types';
 import type { useAuthSession } from './useAuthSession';
 import type { useDashboardState } from './useDashboardState';
+import type { useNotice } from './useNotice';
 import type { useRouting } from './useRouting';
+import type { useTheme } from './useTheme';
 
-// Server data shared across pages, its loaders and the polling that keeps it fresh.
+// Status polls faster everywhere except the accounts list, where a long table
+// re-renders on every update.
+const STATUS_POLL_MS = 3000;
+const STATUS_POLL_ACCOUNTS_MS = 7000;
+const ACTIVITY_POLL_MS = 7000;
+const POSTS_POLL_MS = 12000;
+const VERSION_POLL_MS = 15000;
+
+// Server data shared across pages. TanStack Query owns fetching, caching and
+// polling; the fetchX / setX functions keep the shape the action hooks use:
+// fetchX refetches, setX writes the cache (an optimistic update).
 export function useDashboardData(
   deps: Pick<
-    ReturnType<typeof useDashboardState> & ReturnType<typeof useAuthSession> & ReturnType<typeof useRouting>,
+    ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
+      ReturnType<typeof useNotice> &
+      ReturnType<typeof useAuthSession> &
+      ReturnType<typeof useRouting>,
     | 'activeTab'
     | 'authHeaders'
-    | 'enrichedPosts'
     | 'fediverseBridgeStatusByMappingId'
     | 'fetchBootstrapStatus'
     | 'handleAuthFailure'
     | 'handleLogout'
     | 'isAdmin'
-    | 'mappings'
-    | 'profilesByActor'
-    | 'recentActivity'
-    | 'runtimeVersion'
-    | 'setEmailForm'
-    | 'setEnrichedPosts'
     | 'setFediverseBridgeStatusByMappingId'
-    | 'setGroups'
-    | 'setManagedUsers'
-    | 'setMappings'
-    | 'setMe'
-    | 'setProfilesByActor'
-    | 'setRecentActivity'
-    | 'setRuntimeVersion'
-    | 'setStatus'
-    | 'setUpdateStatus'
-    | 'status'
     | 'token'
-    | 'updateStatus'
   >,
 ) {
   const {
     activeTab,
     authHeaders,
-    enrichedPosts,
     fediverseBridgeStatusByMappingId,
     fetchBootstrapStatus,
     handleAuthFailure,
     handleLogout,
     isAdmin,
-    mappings,
-    profilesByActor,
-    recentActivity,
-    runtimeVersion,
-    setEmailForm,
-    setEnrichedPosts,
     setFediverseBridgeStatusByMappingId,
-    setGroups,
-    setManagedUsers,
-    setMappings,
-    setMe,
-    setProfilesByActor,
-    setRecentActivity,
-    setRuntimeVersion,
-    setStatus,
-    setUpdateStatus,
-    status,
     token,
-    updateStatus,
   } = deps;
+  const queryClient = useQueryClient();
+  const signedIn = Boolean(authHeaders);
 
-  const [jobsExpanded, setJobsExpanded] = useState(false);
   const [routeSummary, setRouteSummary] = useState<RouteSummary | null>(null);
   const [twitterConfig, setTwitterConfig] = useState<TwitterConfig>({ authToken: '', ct0: '' });
   const [aiConfig, setAiConfig] = useState<AIConfig>({ provider: 'gemini', apiKey: '', model: '', baseUrl: '' });
-  const [countdown, setCountdown] = useState('--');
-  const [showAccountAvatars, setShowAccountAvatars] = useState(false);
-  const [showAccountBios, setShowAccountBios] = useState(false);
-  const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
-  const statusRequestRef = useRef(0);
-  const statusMutationRef = useRef(0);
   const fediverseBridgeStatusByMappingIdRef = useRef<Record<string, FediverseBridgeStatusView>>({});
   const bridgeStatusFetchRef = useRef<Promise<Record<string, FediverseBridgeStatusView> | null> | null>(null);
 
@@ -102,134 +75,215 @@ export function useDashboardData(
     fediverseBridgeStatusByMappingIdRef.current = fediverseBridgeStatusByMappingId;
   }, [fediverseBridgeStatusByMappingId]);
 
-  const fetchStatus = useCallback(async () => {
-    if (!authHeaders) {
-      return;
-    }
+  // ---- queries -------------------------------------------------------------
 
-    const requestToken = ++statusRequestRef.current;
-    const mutationTokenAtStart = statusMutationRef.current;
+  const mappingsQuery = useQuery({
+    queryKey: queryKeys.mappings,
+    queryFn: async () => {
+      const response = await api.getMappings({ headers: authHeaders });
+      return Array.isArray(response.data) ? response.data : [];
+    },
+    enabled: signedIn,
+    meta: { errorMessage: 'Failed to load dashboard data.' },
+  });
+  const mappings = useMemo(() => mappingsQuery.data ?? [], [mappingsQuery.data]);
 
-    try {
-      const response = await axios.get<StatusResponse>('/api/status', { headers: authHeaders });
-      if (requestToken !== statusRequestRef.current) {
+  const groupsQuery = useQuery({
+    queryKey: queryKeys.groups,
+    queryFn: async () => {
+      const response = await api.getGroups({ headers: authHeaders });
+      return Array.isArray(response.data) ? response.data : [];
+    },
+    enabled: signedIn,
+    meta: { errorMessage: 'Failed to fetch account groups.' },
+  });
+  const groups = useMemo(() => groupsQuery.data ?? [], [groupsQuery.data]);
+
+  const statusQuery = useQuery({
+    queryKey: queryKeys.status,
+    queryFn: async () => (await api.getStatus({ headers: authHeaders })).data,
+    enabled: signedIn,
+    refetchInterval: activeTab === 'accounts' ? STATUS_POLL_ACCOUNTS_MS : STATUS_POLL_MS,
+    meta: { errorMessage: 'Failed to fetch status.' },
+  });
+  const status = statusQuery.data ?? null;
+
+  const recentActivityQuery = useQuery({
+    queryKey: queryKeys.recentActivity,
+    queryFn: async () => (await api.getRecentActivity({ headers: authHeaders })).data,
+    enabled: signedIn,
+    refetchInterval: activeTab === 'overview' || activeTab === 'activity' ? ACTIVITY_POLL_MS : false,
+    meta: { errorMessage: 'Failed to fetch activity.' },
+  });
+  const recentActivity = useMemo(() => recentActivityQuery.data ?? [], [recentActivityQuery.data]);
+
+  const enrichedPostsQuery = useQuery({
+    queryKey: queryKeys.enrichedPosts,
+    queryFn: async () => (await api.getEnrichedPosts({ headers: authHeaders })).data,
+    enabled: signedIn,
+    refetchInterval: activeTab === 'overview' || activeTab === 'posts' ? POSTS_POLL_MS : false,
+    meta: { errorMessage: 'Failed to fetch Bluesky posts.' },
+  });
+  const enrichedPosts = useMemo(() => enrichedPostsQuery.data ?? [], [enrichedPostsQuery.data]);
+
+  const versionQuery = useQuery({
+    queryKey: queryKeys.version,
+    queryFn: async () => (await api.getVersion({ headers: authHeaders })).data,
+    enabled: signedIn,
+    refetchInterval: VERSION_POLL_MS,
+    meta: { errorMessage: 'Failed to fetch app version.' },
+  });
+  const runtimeVersion = versionQuery.data ?? null;
+
+  const updateStatusQuery = useQuery({
+    queryKey: queryKeys.updateStatus,
+    queryFn: async () => (await api.getUpdateStatus({ headers: authHeaders })).data,
+    enabled: signedIn && isAdmin,
+    refetchInterval: VERSION_POLL_MS,
+    meta: { errorMessage: 'Failed to fetch update status.' },
+  });
+  const updateStatus = isAdmin ? (updateStatusQuery.data ?? null) : null;
+
+  const usersQuery = useQuery({
+    queryKey: queryKeys.users,
+    queryFn: async () => {
+      const response = await api.getUsers({ headers: authHeaders });
+      return Array.isArray(response.data) ? response.data : [];
+    },
+    enabled: signedIn && isAdmin,
+    meta: { errorMessage: 'Failed to fetch dashboard users.' },
+  });
+  const managedUsers = useMemo(() => (isAdmin ? (usersQuery.data ?? []) : []), [isAdmin, usersQuery.data]);
+
+  // The X and AI settings forms are seeded from the server, and every reload
+  // overwrites them with what is saved.
+  const twitterConfigQuery = useQuery({
+    queryKey: queryKeys.twitterConfig,
+    queryFn: async () => (await api.getTwitterConfig({ headers: authHeaders })).data,
+    enabled: signedIn && isAdmin,
+    meta: { errorMessage: 'Failed to load dashboard data.' },
+  });
+  const twitterConfigData = twitterConfigQuery.data;
+  const twitterConfigUpdatedAt = twitterConfigQuery.dataUpdatedAt;
+  useEffect(() => {
+    if (!twitterConfigData || twitterConfigUpdatedAt === 0) return;
+    setTwitterConfig({
+      authToken: twitterConfigData.authToken || '',
+      ct0: twitterConfigData.ct0 || '',
+      backupAuthToken: twitterConfigData.backupAuthToken || '',
+      backupCt0: twitterConfigData.backupCt0 || '',
+    });
+  }, [twitterConfigData, twitterConfigUpdatedAt]);
+
+  const aiConfigQuery = useQuery({
+    queryKey: queryKeys.aiConfig,
+    queryFn: async () => (await api.getAiConfig({ headers: authHeaders })).data,
+    enabled: signedIn && isAdmin,
+    meta: { errorMessage: 'Failed to load dashboard data.' },
+  });
+  const aiConfigData = aiConfigQuery.data;
+  const aiConfigUpdatedAt = aiConfigQuery.dataUpdatedAt;
+  useEffect(() => {
+    if (!aiConfigData || aiConfigUpdatedAt === 0) return;
+    setAiConfig({
+      provider: aiConfigData.provider || 'gemini',
+      apiKey: aiConfigData.apiKey || '',
+      model: aiConfigData.model || '',
+      baseUrl: aiConfigData.baseUrl || '',
+    });
+  }, [aiConfigData, aiConfigUpdatedAt]);
+
+  const loadProfiles = useCallback(
+    async (actors: string[]): Promise<Record<string, BskyProfileView>> => {
+      const normalizedActors = [...new Set(actors.map(normalizeTwitterUsername).filter((actor) => actor.length > 0))];
+      if (normalizedActors.length === 0) {
+        return {};
+      }
+      const response = await api.getBskyProfiles({ actors: normalizedActors }, { headers: authHeaders });
+      return response.data || {};
+    },
+    [authHeaders],
+  );
+
+  // Avatars and bios for every mapped Bluesky account, refreshed whenever the
+  // dashboard reloads its mappings.
+  const profilesQuery = useQuery({
+    queryKey: queryKeys.bskyProfiles,
+    queryFn: () =>
+      loadProfiles(
+        (queryClient.getQueryData<AccountMapping[]>(queryKeys.mappings) ?? []).map((mapping) => mapping.bskyIdentifier),
+      ),
+    enabled: signedIn && mappingsQuery.isSuccess,
+    meta: { errorMessage: 'Failed to resolve Bluesky profiles.' },
+  });
+  const profilesByActor = useMemo(() => profilesQuery.data ?? {}, [profilesQuery.data]);
+
+  // ---- cache writers (optimistic updates from the action hooks) -------------
+
+  const setMappings = useCallback(
+    (update: SetStateAction<AccountMapping[]>) =>
+      queryClient.setQueryData<AccountMapping[]>(queryKeys.mappings, (previous) =>
+        typeof update === 'function' ? update(previous ?? []) : update,
+      ),
+    [queryClient],
+  );
+
+  const setGroups = useCallback(
+    (update: SetStateAction<AccountGroup[]>) =>
+      queryClient.setQueryData<AccountGroup[]>(queryKeys.groups, (previous) =>
+        typeof update === 'function' ? update(previous ?? []) : update,
+      ),
+    [queryClient],
+  );
+
+  // An optimistic status update must not be overwritten by a poll that started
+  // before it, so any in-flight status request is cancelled first.
+  const setStatus = useCallback(
+    (update: SetStateAction<StatusResponse | null>) => {
+      void queryClient.cancelQueries({ queryKey: queryKeys.status });
+      queryClient.setQueryData<StatusResponse | null>(queryKeys.status, (previous) =>
+        typeof update === 'function' ? update(previous ?? null) : update,
+      );
+    },
+    [queryClient],
+  );
+
+  // ---- refetchers ------------------------------------------------------------
+
+  const refetch = useCallback(
+    async (queryKey: readonly unknown[]) => {
+      if (!authHeaders) {
         return;
       }
-      if (mutationTokenAtStart !== statusMutationRef.current) {
-        return;
-      }
-      setStatus(response.data);
-    } catch (error) {
-      handleAuthFailure(error, 'Failed to fetch status.');
-    }
-  }, [authHeaders, handleAuthFailure, setStatus]);
+      await queryClient.refetchQueries({ queryKey });
+    },
+    [authHeaders, queryClient],
+  );
+  const fetchStatus = useCallback(() => refetch(queryKeys.status), [refetch]);
+  const fetchRecentActivity = useCallback(() => refetch(queryKeys.recentActivity), [refetch]);
+  const fetchEnrichedPosts = useCallback(() => refetch(queryKeys.enrichedPosts), [refetch]);
+  const fetchGroups = useCallback(() => refetch(queryKeys.groups), [refetch]);
+  const fetchRuntimeVersion = useCallback(() => refetch(queryKeys.version), [refetch]);
+  const fetchUpdateStatus = useCallback(() => refetch(queryKeys.updateStatus), [refetch]);
+  const fetchManagedUsers = useCallback(() => refetch(queryKeys.users), [refetch]);
 
-  const fetchRecentActivity = useCallback(async () => {
-    if (!authHeaders) {
-      return;
-    }
-
-    try {
-      const response = await axios.get<ActivityLog[]>('/api/recent-activity?limit=20', { headers: authHeaders });
-      setRecentActivity(response.data);
-    } catch (error) {
-      handleAuthFailure(error, 'Failed to fetch activity.');
-    }
-  }, [authHeaders, handleAuthFailure, setRecentActivity]);
-
-  const fetchEnrichedPosts = useCallback(async () => {
-    if (!authHeaders) {
-      return;
-    }
-
-    try {
-      const response = await axios.get<EnrichedPost[]>('/api/posts/enriched?limit=36', { headers: authHeaders });
-      setEnrichedPosts(response.data);
-    } catch (error) {
-      handleAuthFailure(error, 'Failed to fetch Bluesky posts.');
-    }
-  }, [authHeaders, handleAuthFailure, setEnrichedPosts]);
-
-  const fetchGroups = useCallback(async () => {
-    if (!authHeaders) {
-      return;
-    }
-
-    try {
-      const response = await axios.get<AccountGroup[]>('/api/groups', { headers: authHeaders });
-      setGroups(Array.isArray(response.data) ? response.data : []);
-    } catch (error) {
-      handleAuthFailure(error, 'Failed to fetch account groups.');
-    }
-  }, [authHeaders, handleAuthFailure, setGroups]);
-
-  const fetchRuntimeVersion = useCallback(async () => {
-    if (!authHeaders) {
-      return;
-    }
-
-    try {
-      const response = await axios.get<RuntimeVersionInfo>('/api/version', { headers: authHeaders });
-      setRuntimeVersion(response.data);
-    } catch (error) {
-      handleAuthFailure(error, 'Failed to fetch app version.');
-    }
-  }, [authHeaders, handleAuthFailure, setRuntimeVersion]);
-
-  const fetchUpdateStatus = useCallback(async () => {
-    if (!authHeaders || !isAdmin) {
-      return;
-    }
-
-    try {
-      const response = await axios.get<UpdateStatusInfo>('/api/update-status', { headers: authHeaders });
-      setUpdateStatus(response.data);
-    } catch (error) {
-      handleAuthFailure(error, 'Failed to fetch update status.');
-    }
-  }, [authHeaders, handleAuthFailure, isAdmin, setUpdateStatus]);
-
-  const fetchManagedUsers = useCallback(async () => {
-    if (!authHeaders || !isAdmin) {
-      setManagedUsers([]);
-      return;
-    }
-
-    try {
-      const response = await axios.get<ManagedUser[]>('/api/admin/users', { headers: authHeaders });
-      setManagedUsers(Array.isArray(response.data) ? response.data : []);
-    } catch (error) {
-      handleAuthFailure(error, 'Failed to fetch dashboard users.');
-    }
-  }, [authHeaders, handleAuthFailure, isAdmin, setManagedUsers]);
-
+  // Profiles for a chosen set of accounts (after a bulk profile sync). The
+  // result replaces the cached map, as it always has.
   const fetchProfiles = useCallback(
     async (actors: string[]): Promise<Record<string, BskyProfileView> | null> => {
       if (!authHeaders) {
         return null;
       }
-
-      const normalizedActors = [...new Set(actors.map(normalizeTwitterUsername).filter((actor) => actor.length > 0))];
-      if (normalizedActors.length === 0) {
-        setProfilesByActor({});
-        return {};
-      }
-
       try {
-        const response = await axios.post<Record<string, BskyProfileView>>(
-          '/api/bsky/profiles',
-          { actors: normalizedActors },
-          { headers: authHeaders },
-        );
-        const nextProfiles = response.data || {};
-        setProfilesByActor(nextProfiles);
+        const nextProfiles = await loadProfiles(actors);
+        queryClient.setQueryData(queryKeys.bskyProfiles, nextProfiles);
         return nextProfiles;
       } catch (error) {
         handleAuthFailure(error, 'Failed to resolve Bluesky profiles.');
         return null;
       }
     },
-    [authHeaders, handleAuthFailure, setProfilesByActor],
+    [authHeaders, handleAuthFailure, loadProfiles, queryClient],
   );
 
   const fetchFediverseBridgeStatuses = useCallback(
@@ -255,11 +309,7 @@ export function useDashboardData(
 
       const request = (async () => {
         try {
-          const response = await axios.post<Record<string, FediverseBridgeStatusView>>(
-            '/api/mappings/fediverse-bridge-status',
-            { mappingIds },
-            { headers: authHeaders },
-          );
+          const response = await api.getFediverseBridgeStatuses({ mappingIds }, { headers: authHeaders });
           const nextStatuses = response.data || {};
           setFediverseBridgeStatusByMappingId((previous) => {
             const next = { ...previous };
@@ -290,110 +340,56 @@ export function useDashboardData(
     [authHeaders, handleLogout, setFediverseBridgeStatusByMappingId],
   );
 
+  // Reload everything after an action: the account data first, then the live
+  // status, activity and posts, then profiles in the background.
   const fetchData = useCallback(
     async (options?: { refreshBridgeStatuses?: boolean }) => {
       if (!authHeaders) {
         return;
       }
 
-      try {
-        const [meResponse, mappingsResponse, groupsResponse] = await Promise.all([
-          axios.get<AuthUser>('/api/me', { headers: authHeaders }),
-          axios.get<AccountMapping[]>('/api/mappings', { headers: authHeaders }),
-          axios.get<AccountGroup[]>('/api/groups', { headers: authHeaders }),
-        ]);
+      await Promise.all(
+        [
+          queryKeys.me,
+          queryKeys.mappings,
+          queryKeys.groups,
+          queryKeys.version,
+          queryKeys.twitterConfig,
+          queryKeys.aiConfig,
+          queryKeys.updateStatus,
+          queryKeys.users,
+        ].map((queryKey) => queryClient.refetchQueries({ queryKey })),
+      );
 
-        const profile = meResponse.data;
-        const mappingData = Array.isArray(mappingsResponse.data) ? mappingsResponse.data : [];
-        const groupData = Array.isArray(groupsResponse.data) ? groupsResponse.data : [];
-        setMe({
-          ...profile,
-          permissions: normalizePermissions(profile.permissions),
-        });
-        setMappings(mappingData);
-        setGroups(groupData);
-        setEmailForm((previous) => ({
-          ...previous,
-          currentEmail: profile.email || '',
-        }));
-        const versionResponse = await axios.get<RuntimeVersionInfo>('/api/version', { headers: authHeaders });
-        setRuntimeVersion(versionResponse.data);
+      const mappingData = queryClient.getQueryData<AccountMapping[]>(queryKeys.mappings) ?? [];
+      const mappingIds = new Set(mappingData.map((mapping) => mapping.id));
+      setFediverseBridgeStatusByMappingId((previous) => {
+        const next = Object.fromEntries(
+          Object.entries(previous).filter(([mappingId]) => mappingIds.has(mappingId)),
+        ) as Record<string, FediverseBridgeStatusView>;
+        return next;
+      });
 
-        if (profile.isAdmin) {
-          const [twitterResponse, aiResponse, updateStatusResponse, usersResponse] = await Promise.all([
-            axios.get<TwitterConfig>('/api/twitter-config', { headers: authHeaders }),
-            axios.get<AIConfig>('/api/ai-config', { headers: authHeaders }),
-            axios.get<UpdateStatusInfo>('/api/update-status', { headers: authHeaders }),
-            axios.get<ManagedUser[]>('/api/admin/users', { headers: authHeaders }),
-          ]);
+      await Promise.all(
+        [queryKeys.status, queryKeys.recentActivity, queryKeys.enrichedPosts].map((queryKey) =>
+          queryClient.refetchQueries({ queryKey }),
+        ),
+      );
 
-          setTwitterConfig({
-            authToken: twitterResponse.data.authToken || '',
-            ct0: twitterResponse.data.ct0 || '',
-            backupAuthToken: twitterResponse.data.backupAuthToken || '',
-            backupCt0: twitterResponse.data.backupCt0 || '',
-          });
+      void queryClient.refetchQueries({ queryKey: queryKeys.bskyProfiles });
 
-          setAiConfig({
-            provider: aiResponse.data.provider || 'gemini',
-            apiKey: aiResponse.data.apiKey || '',
-            model: aiResponse.data.model || '',
-            baseUrl: aiResponse.data.baseUrl || '',
-          });
-          setUpdateStatus(updateStatusResponse.data);
-          setManagedUsers(Array.isArray(usersResponse.data) ? usersResponse.data : []);
-        } else {
-          setUpdateStatus(null);
-          setManagedUsers([]);
-        }
-
-        const mappingIds = new Set(mappingData.map((mapping) => mapping.id));
-        setFediverseBridgeStatusByMappingId((previous) => {
-          const next = Object.fromEntries(
-            Object.entries(previous).filter(([mappingId]) => mappingIds.has(mappingId)),
-          ) as Record<string, FediverseBridgeStatusView>;
-          return next;
-        });
-
-        await Promise.all([fetchStatus(), fetchRecentActivity(), fetchEnrichedPosts()]);
-
-        void fetchProfiles(mappingData.map((mapping) => mapping.bskyIdentifier));
-
-        const shouldRefreshBridgeStatuses = options?.refreshBridgeStatuses === true;
-        if (shouldRefreshBridgeStatuses) {
-          void fetchFediverseBridgeStatuses(mappingData, { force: options?.refreshBridgeStatuses === true });
-        }
-      } catch (error) {
-        handleAuthFailure(error, 'Failed to load dashboard data.');
+      if (options?.refreshBridgeStatuses === true) {
+        void fetchFediverseBridgeStatuses(mappingData, { force: true });
       }
     },
-    [
-      authHeaders,
-      fetchEnrichedPosts,
-      fetchFediverseBridgeStatuses,
-      fetchProfiles,
-      fetchRecentActivity,
-      fetchStatus,
-      handleAuthFailure,
-      setEmailForm,
-      setFediverseBridgeStatusByMappingId,
-      setGroups,
-      setManagedUsers,
-      setMappings,
-      setMe,
-      setRuntimeVersion,
-      setUpdateStatus,
-    ],
+    [authHeaders, fetchFediverseBridgeStatuses, queryClient, setFediverseBridgeStatusByMappingId],
   );
 
   useEffect(() => {
     if (!token) {
       void fetchBootstrapStatus();
-      return;
     }
-
-    void fetchData();
-  }, [token, fetchBootstrapStatus, fetchData]);
+  }, [token, fetchBootstrapStatus]);
 
   useEffect(() => {
     if (!token || activeTab !== 'accounts' || mappings.length === 0) {
@@ -416,84 +412,7 @@ export function useDashboardData(
     };
   }, [activeTab, fetchFediverseBridgeStatuses, mappings, token]);
 
-  useEffect(() => {
-    if (!token) {
-      return;
-    }
-
-    const statusPollIntervalMs = activeTab === 'accounts' ? 7000 : 3000;
-    const shouldPollActivity = activeTab === 'overview' || activeTab === 'activity';
-    const shouldPollPosts = activeTab === 'overview' || activeTab === 'posts';
-
-    const statusInterval = window.setInterval(() => {
-      void fetchStatus();
-    }, statusPollIntervalMs);
-
-    const activityInterval = shouldPollActivity
-      ? window.setInterval(() => {
-          void fetchRecentActivity();
-        }, 7000)
-      : null;
-
-    const postsInterval = shouldPollPosts
-      ? window.setInterval(() => {
-          void fetchEnrichedPosts();
-        }, 12000)
-      : null;
-
-    return () => {
-      window.clearInterval(statusInterval);
-      if (activityInterval !== null) {
-        window.clearInterval(activityInterval);
-      }
-      if (postsInterval !== null) {
-        window.clearInterval(postsInterval);
-      }
-    };
-  }, [activeTab, token, fetchEnrichedPosts, fetchRecentActivity, fetchStatus]);
-
-  useEffect(() => {
-    if (!token) {
-      return;
-    }
-
-    const versionInterval = window.setInterval(() => {
-      void fetchRuntimeVersion();
-      if (isAdmin) {
-        void fetchUpdateStatus();
-      }
-    }, 15000);
-
-    return () => {
-      window.clearInterval(versionInterval);
-    };
-  }, [token, isAdmin, fetchRuntimeVersion, fetchUpdateStatus]);
-
-  useEffect(() => {
-    if (activeTab !== 'overview' || !status?.nextCheckTime) {
-      setCountdown('--');
-      return;
-    }
-
-    const updateCountdown = () => {
-      const ms = status.nextCheckTime - Date.now();
-      if (ms <= 0) {
-        setCountdown('Checking...');
-        return;
-      }
-
-      const minutes = Math.floor(ms / 60000);
-      const seconds = Math.floor((ms % 60000) / 1000);
-      setCountdown(`${minutes}m ${String(seconds).padStart(2, '0')}s`);
-    };
-
-    updateCountdown();
-    const timer = window.setInterval(updateCountdown, 1000);
-
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [activeTab, status?.nextCheckTime]);
+  // ---- derived values --------------------------------------------------------
 
   const pendingBackfills = status?.pendingBackfills ?? [];
   const activeJobs = status?.activeJobs ?? [];
@@ -561,25 +480,25 @@ export function useDashboardData(
       : 'No update run recorded';
 
   return {
-    jobsExpanded,
-    setJobsExpanded,
+    mappings,
+    setMappings,
+    groups,
+    setGroups,
+    status,
+    setStatus,
+    recentActivity,
+    enrichedPosts,
+    profilesByActor,
+    runtimeVersion,
+    updateStatus,
+    managedUsers,
     routeSummary,
     setRouteSummary,
     twitterConfig,
     setTwitterConfig,
     aiConfig,
     setAiConfig,
-    countdown,
-    setCountdown,
-    showAccountAvatars,
-    setShowAccountAvatars,
-    showAccountBios,
-    setShowAccountBios,
-    expandedLogId,
-    setExpandedLogId,
     importInputRef,
-    statusRequestRef,
-    statusMutationRef,
     fediverseBridgeStatusByMappingIdRef,
     bridgeStatusFetchRef,
     fetchStatus,

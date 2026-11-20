@@ -1,14 +1,22 @@
-import axios from 'axios';
 import { useState } from 'react';
+import * as api from '../lib/api';
 import { getApiErrorMessage } from '../lib/format';
 import type { useAuthSession } from './useAuthSession';
+import type { useDashboardData } from './useDashboardData';
 import type { useDashboardState } from './useDashboardState';
 import type { useNotice } from './useNotice';
+import type { useRouting } from './useRouting';
+import type { useTheme } from './useTheme';
 
 // Login and first-user registration submit handlers.
 export function useAuthForms(
   deps: Pick<
-    ReturnType<typeof useDashboardState> & ReturnType<typeof useNotice> & ReturnType<typeof useAuthSession>,
+    ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
+      ReturnType<typeof useNotice> &
+      ReturnType<typeof useAuthSession> &
+      ReturnType<typeof useRouting> &
+      ReturnType<typeof useDashboardData>,
     'fetchBootstrapStatus' | 'setAuthView' | 'setToken' | 'showNotice'
   >,
 ) {
@@ -27,7 +35,7 @@ export function useAuthForms(
     const password = String(data.get('password') || '');
 
     try {
-      const response = await axios.post<{ token: string }>('/api/login', { identifier, password });
+      const response = await api.login({ identifier, password });
       localStorage.setItem('token', response.data.token);
       setToken(response.data.token);
       showNotice('success', 'Logged in.');
@@ -49,7 +57,7 @@ export function useAuthForms(
     const password = String(data.get('password') || '');
 
     try {
-      await axios.post('/api/register', { username, email, password });
+      await api.register({ username, email, password });
       setAuthView('login');
       showNotice('success', 'Registration successful. Please log in.');
       await fetchBootstrapStatus();

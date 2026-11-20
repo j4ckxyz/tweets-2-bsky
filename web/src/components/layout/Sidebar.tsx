@@ -1,12 +1,12 @@
 import { Clock3, LogOut } from 'lucide-react';
 import { useDashboard } from '../../lib/dashboard-context';
+import { Countdown } from '../Countdown';
 import { ThemeSwitcher } from '../ThemeSwitcher';
 import { NavList } from '../ui/nav-list';
 
 // Desktop navigation rail.
 export function Sidebar() {
-  const { activeTab, countdown, dashboardTabs, handleLogout, openTab, runtimeBranchLabel, runtimeVersionLabel } =
-    useDashboard();
+  const { activeTab, dashboardTabs, handleLogout, openTab, runtimeBranchLabel, runtimeVersionLabel } = useDashboard();
   return (
     <aside className="sticky top-0 hidden h-screen w-52 shrink-0 flex-col border-r border-border bg-rail lg:flex">
       <div className="flex items-center gap-2.5 px-4 pb-5 pt-5">
@@ -35,7 +35,9 @@ export function Sidebar() {
               <Clock3 className="h-3.5 w-3.5 shrink-0" />
               Next run
             </dt>
-            <dd className="tabular-nums text-foreground">{countdown}</dd>
+            <dd className="tabular-nums text-foreground">
+              <Countdown />
+            </dd>
           </div>
           <div
             className="flex items-center justify-between gap-2"

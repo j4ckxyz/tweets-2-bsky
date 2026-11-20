@@ -1,28 +1,34 @@
-import axios from 'axios';
 import { useCallback } from 'react';
+import * as api from '../lib/api';
 import { DEFAULT_BACKFILL_LIMIT } from '../lib/constants';
 import { canBridgeToFediverse, normalizeTwitterUsername } from '../lib/format';
-import type {
-  AccountMapping,
-  BulkAccountsAction,
-  BulkAppendBotNameAllResult,
-  BulkBotLabelAllResult,
-  MirrorProfileSyncResult,
-} from '../lib/types';
+import type { AccountMapping, BulkAccountsAction } from '../lib/types';
 import type { useAccountsList } from './useAccountsList';
+import type { useActivity } from './useActivity';
+import type { useAuthForms } from './useAuthForms';
 import type { useAuthSession } from './useAuthSession';
 import type { useDashboardData } from './useDashboardData';
 import type { useDashboardState } from './useDashboardState';
+import type { useGroups } from './useGroups';
 import type { useNotice } from './useNotice';
+import type { usePosts } from './usePosts';
+import type { useRouting } from './useRouting';
+import type { useTheme } from './useTheme';
 
 // Per-account and bulk actions: run now, backfills, pins, profile sync, bot labels, bridging, deletes.
 export function useAccountActions(
   deps: Pick<
     ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
       ReturnType<typeof useNotice> &
       ReturnType<typeof useAuthSession> &
+      ReturnType<typeof useRouting> &
       ReturnType<typeof useDashboardData> &
-      ReturnType<typeof useAccountsList>,
+      ReturnType<typeof useAuthForms> &
+      ReturnType<typeof useGroups> &
+      ReturnType<typeof useAccountsList> &
+      ReturnType<typeof usePosts> &
+      ReturnType<typeof useActivity>,
     | 'authHeaders'
     | 'canManageMapping'
     | 'canQueueBackfillsPermission'
@@ -60,7 +66,6 @@ export function useAccountActions(
     | 'setStatus'
     | 'setSyncingProfileMappingId'
     | 'showNotice'
-    | 'statusMutationRef'
     | 'syncingProfileMappingId'
   >,
 ) {
@@ -102,7 +107,6 @@ export function useAccountActions(
     setStatus,
     setSyncingProfileMappingId,
     showNotice,
-    statusMutationRef,
     syncingProfileMappingId,
   } = deps;
 
@@ -131,7 +135,6 @@ export function useAccountActions(
     }
 
     try {
-      statusMutationRef.current += 1;
       setStatus((previous) =>
         previous
           ? {
@@ -148,7 +151,7 @@ export function useAccountActions(
             }
           : previous,
       );
-      await axios.post('/api/run-now', {}, { headers: authHeaders });
+      await api.runNow({}, { headers: authHeaders });
       showNotice('info', 'Check triggered.');
       await fetchStatus();
     } catch (error) {
@@ -167,7 +170,6 @@ export function useAccountActions(
     }
 
     try {
-      statusMutationRef.current += 1;
       setStatus((previous) =>
         previous
           ? {
@@ -184,7 +186,7 @@ export function useAccountActions(
             }
           : previous,
       );
-      await axios.post('/api/backfill/clear-all', {}, { headers: authHeaders });
+      await api.clearAllBackfills({}, { headers: authHeaders });
       showNotice('success', 'Backfill queue cleared.');
       await fetchStatus();
     } catch (error) {
@@ -197,7 +199,7 @@ export function useAccountActions(
       return;
     }
     try {
-      const response = await axios.post(`/api/mappings/${mappingId}/recheck-account`, {}, { headers: authHeaders });
+      const response = await api.recheckAccount(mappingId, {}, { headers: authHeaders });
       showNotice('success', response.data?.message || `Will retry ${bskyIdentifier} on the next post batch.`);
       await fetchStatus();
     } catch (error) {
@@ -217,7 +219,6 @@ export function useAccountActions(
     }
 
     try {
-      statusMutationRef.current += 1;
       setStatus((previous) => {
         if (!previous) {
           return previous;
@@ -231,7 +232,7 @@ export function useAccountActions(
           pendingBackfills: nextPending,
         };
       });
-      await axios.delete(`/api/backfill/${mappingId}`, { headers: authHeaders });
+      await api.cancelBackfill(mappingId, { headers: authHeaders });
       showNotice('success', 'Queue entry cancelled.');
       await fetchStatus();
     } catch (error) {
@@ -266,10 +267,9 @@ export function useAccountActions(
           showNotice('error', 'Only admins can reset cache before backfill.');
           return;
         }
-        await axios.delete(`/api/mappings/${mappingId}/cache`, { headers: authHeaders });
+        await api.clearMappingCache(mappingId, { headers: authHeaders });
       }
 
-      statusMutationRef.current += 1;
       setStatus((previous) => {
         if (!previous) {
           return previous;
@@ -294,7 +294,7 @@ export function useAccountActions(
           pendingBackfills: nextPending,
         };
       });
-      await axios.post(`/api/backfill/${mappingId}`, { limit: safeLimit }, { headers: authHeaders });
+      await api.requestBackfill(mappingId, { limit: safeLimit }, { headers: authHeaders });
       showNotice(
         'success',
         mode === 'reset'
@@ -318,7 +318,7 @@ export function useAccountActions(
     }
 
     try {
-      await axios.post(`/api/pin-sync/${mappingId}`, {}, { headers: authHeaders });
+      await api.syncPin(mappingId, {}, { headers: authHeaders });
       showNotice('success', 'Pin sync queued. The pinned tweet will be mirrored and pinned on Bluesky.');
       await fetchStatus();
     } catch (error) {
@@ -347,8 +347,8 @@ export function useAccountActions(
     }
 
     try {
-      const response = await axios.post<{ message: string }>(
-        `/api/mappings/${mappingId}/delete-all-posts`,
+      const response = await api.deleteAllPosts(
+        mappingId,
         { scope: finalConfirm === 'DELETE ALL' ? 'all' : 'mirrored' },
         { headers: authHeaders },
       );
@@ -374,7 +374,7 @@ export function useAccountActions(
     }
 
     try {
-      await axios.delete(`/api/mappings/${mappingId}`, { headers: authHeaders });
+      await api.deleteMapping(mappingId, { headers: authHeaders });
       setMappings((prev) => prev.filter((mapping) => mapping.id !== mappingId));
       setFediverseBridgeStatusByMappingId((previous) => {
         if (!(mappingId in previous)) {
@@ -448,8 +448,8 @@ export function useAccountActions(
 
     setSyncingProfileMappingId(mapping.id);
     try {
-      const response = await axios.post<MirrorProfileSyncResult>(
-        `/api/mappings/${mapping.id}/sync-profile-from-twitter`,
+      const response = await api.syncProfileFromTwitter(
+        mapping.id,
         { sourceTwitterUsername },
         { headers: authHeaders },
       );
@@ -532,11 +532,7 @@ export function useAccountActions(
 
     setPullingBioMappingId(mapping.id);
     try {
-      const response = await axios.post<MirrorProfileSyncResult>(
-        `/api/mappings/${mapping.id}/pull-twitter-bio`,
-        { sourceTwitterUsername },
-        { headers: authHeaders },
-      );
+      const response = await api.pullTwitterBio(mapping.id, { sourceTwitterUsername }, { headers: authHeaders });
 
       const result = response.data;
       const warnings = result?.warnings || [];
@@ -726,8 +722,7 @@ export function useAccountActions(
 
     setIsBotLabelAllBusy(true);
     try {
-      const response = await axios.post<BulkBotLabelAllResult>(
-        '/api/mappings/bot-label-all',
+      const response = await api.applyBotLabelAll(
         { mappingIds: candidates.map((mapping) => mapping.id) },
         { headers: authHeaders },
       );
@@ -772,8 +767,7 @@ export function useAccountActions(
 
     setIsAppendBotNameAllBusy(true);
     try {
-      const response = await axios.post<BulkAppendBotNameAllResult>(
-        '/api/mappings/append-bot-name-all',
+      const response = await api.appendBotNameAll(
         { mappingIds: candidates.map((mapping) => mapping.id) },
         { headers: authHeaders },
       );
@@ -806,7 +800,7 @@ export function useAccountActions(
     let failed = 0;
     for (const mapping of targets) {
       try {
-        await axios.post(`/api/pin-sync/${mapping.id}`, {}, { headers: authHeaders });
+        await api.syncPin(mapping.id, {}, { headers: authHeaders });
         queued += 1;
       } catch {
         failed += 1;
@@ -881,8 +875,8 @@ export function useAccountActions(
     const nextSource = sourceExists ? normalizedSource : normalizeTwitterUsername(mapping.twitterUsernames[0] || '');
 
     try {
-      await axios.put(
-        `/api/mappings/${mapping.id}`,
+      await api.updateMapping(
+        mapping.id,
         {
           profileSyncSourceUsername: nextSource,
         },
@@ -950,11 +944,7 @@ export function useAccountActions(
 
     setBridgingMappingId(mapping.id);
     try {
-      const response = await axios.post<{ fediverseAddress?: string }>(
-        `/api/mappings/${mapping.id}/bridge-to-fediverse`,
-        {},
-        { headers: authHeaders },
-      );
+      const response = await api.bridgeToFediverse(mapping.id, {}, { headers: authHeaders });
       setFediverseBridgeStatusByMappingId((previous) => ({
         ...previous,
         [mapping.id]: {

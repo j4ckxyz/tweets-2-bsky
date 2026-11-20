@@ -1,4 +1,5 @@
 import { AccountHealth } from '../components/AccountHealth';
+import { Countdown } from '../components/Countdown';
 import { useDashboard } from '../lib/dashboard-context';
 import { formatCompactNumber } from '../lib/facets';
 import { formatRelativeTime, formatState } from '../lib/format';
@@ -6,7 +7,6 @@ import { formatRelativeTime, formatState } from '../lib/format';
 export function OverviewPage() {
   const {
     authHeaders,
-    countdown,
     currentStatus,
     handleLogout,
     latestActivity,
@@ -55,7 +55,9 @@ export function OverviewPage() {
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">Next run</dt>
-            <dd className="mt-0.5 font-semibold tabular-nums">{countdown}</dd>
+            <dd className="mt-0.5 font-semibold tabular-nums">
+              <Countdown />
+            </dd>
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">State</dt>

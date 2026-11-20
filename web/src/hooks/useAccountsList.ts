@@ -3,14 +3,26 @@ import { ACCOUNT_PAGE_SIZE_DEFAULT, ACCOUNT_SEARCH_MIN_SCORE, DEFAULT_GROUP_NAME
 import { canBridgeToFediverse, getMappingGroupMeta, normalizeTwitterUsername } from '../lib/format';
 import { normalizeSearchValue, scoreAccountMapping, tokenizeSearchValue } from '../lib/search';
 import type { AccountMapping } from '../lib/types';
+import type { useAuthForms } from './useAuthForms';
 import type { useAuthSession } from './useAuthSession';
+import type { useDashboardData } from './useDashboardData';
 import type { useDashboardState } from './useDashboardState';
 import type { useGroups } from './useGroups';
+import type { useNotice } from './useNotice';
+import type { useRouting } from './useRouting';
+import type { useTheme } from './useTheme';
 
 // Accounts tab list state: search, folder and creator filters, paging and selection.
 export function useAccountsList(
   deps: Pick<
-    ReturnType<typeof useDashboardState> & ReturnType<typeof useAuthSession> & ReturnType<typeof useGroups>,
+    ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
+      ReturnType<typeof useNotice> &
+      ReturnType<typeof useAuthSession> &
+      ReturnType<typeof useRouting> &
+      ReturnType<typeof useDashboardData> &
+      ReturnType<typeof useAuthForms> &
+      ReturnType<typeof useGroups>,
     | 'accountsCreatorFilter'
     | 'accountsSearchQuery'
     | 'bridgingMappingId'
@@ -58,6 +70,8 @@ export function useAccountsList(
   const [accountsPage, setAccountsPage] = useState(1);
   const [accountsPageSize, setAccountsPageSize] = useState(ACCOUNT_PAGE_SIZE_DEFAULT);
   const [selectedAccountMappingIds, setSelectedAccountMappingIds] = useState<string[]>([]);
+  const [showAccountAvatars, setShowAccountAvatars] = useState(false);
+  const [showAccountBios, setShowAccountBios] = useState(false);
   const accountMappingsForView = useMemo(() => {
     if (!isAdmin || accountsCreatorFilter === 'all') {
       return mappings;
@@ -343,6 +357,10 @@ export function useAccountsList(
   };
 
   return {
+    showAccountAvatars,
+    setShowAccountAvatars,
+    showAccountBios,
+    setShowAccountBios,
     pullingBioMappingId,
     setPullingBioMappingId,
     isPullBioAllBusy,

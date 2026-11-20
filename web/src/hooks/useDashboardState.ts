@@ -1,24 +1,14 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { DEFAULT_GROUP_EMOJI, defaultUserForm } from '../lib/constants';
 import type {
-  AccountGroup,
   AccountMapping,
   AccountSecurityEmailState,
   AccountSecurityPasswordState,
-  ActivityLog,
-  AuthUser,
   AuthView,
   BlueskyCredentialValidation,
-  BskyProfileView,
-  EnrichedPost,
   FediverseBridgeStatusView,
-  LocalPostSearchResult,
-  ManagedUser,
-  RuntimeVersionInfo,
   SettingsSection,
-  StatusResponse,
   TwitterMirrorProfile,
-  UpdateStatusInfo,
   UserFormState,
 } from '../lib/types';
 
@@ -27,15 +17,6 @@ export function useDashboardState() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem('token'));
   const [authView, setAuthView] = useState<AuthView>('login');
 
-  const [mappings, setMappings] = useState<AccountMapping[]>([]);
-  const [groups, setGroups] = useState<AccountGroup[]>([]);
-  const [enrichedPosts, setEnrichedPosts] = useState<EnrichedPost[]>([]);
-  const [profilesByActor, setProfilesByActor] = useState<Record<string, BskyProfileView>>({});
-  const [recentActivity, setRecentActivity] = useState<ActivityLog[]>([]);
-  const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [runtimeVersion, setRuntimeVersion] = useState<RuntimeVersionInfo | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<UpdateStatusInfo | null>(null);
-  const [me, setMe] = useState<AuthUser | null>(null);
   const [editingMapping, setEditingMapping] = useState<AccountMapping | null>(null);
   const [newTwitterUsers, setNewTwitterUsers] = useState<string[]>([]);
   const [newTwitterMirrorProfiles, setNewTwitterMirrorProfiles] = useState<Record<string, TwitterMirrorProfile>>({});
@@ -63,11 +44,8 @@ export function useDashboardState() {
   const [settingsActiveSection, setSettingsActiveSection] = useState<SettingsSection>('account');
   const [accountsSearchQuery, setAccountsSearchQuery] = useState('');
   const [postsSearchQuery, setPostsSearchQuery] = useState('');
-  const [localPostSearchResults, setLocalPostSearchResults] = useState<LocalPostSearchResult[]>([]);
-  const [isSearchingLocalPosts, setIsSearchingLocalPosts] = useState(false);
   const [groupDraftsByKey, setGroupDraftsByKey] = useState<Record<string, { name: string; emoji: string }>>({});
   const [isGroupActionBusy, setIsGroupActionBusy] = useState(false);
-  const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
   const [accountsCreatorFilter, setAccountsCreatorFilter] = useState('all');
   const [newUserForm, setNewUserForm] = useState<UserFormState>(defaultUserForm);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
@@ -83,20 +61,10 @@ export function useDashboardState() {
     confirmPassword: '',
   });
   const [isUpdateBusy, setIsUpdateBusy] = useState(false);
-  const postsSearchRequestRef = useRef(0);
 
   // Everything a signed-in session leaves behind, cleared on sign-out.
   const resetDashboardState = useCallback(() => {
     setToken(null);
-    setMe(null);
-    setMappings([]);
-    setGroups([]);
-    setEnrichedPosts([]);
-    setProfilesByActor({});
-    setStatus(null);
-    setRuntimeVersion(null);
-    setUpdateStatus(null);
-    setRecentActivity([]);
     setEditingMapping(null);
     setNewTwitterUsers([]);
     setNewTwitterMirrorProfiles({});
@@ -118,19 +86,15 @@ export function useDashboardState() {
     setSettingsActiveSection('account');
     setAccountsSearchQuery('');
     setPostsSearchQuery('');
-    setLocalPostSearchResults([]);
-    setIsSearchingLocalPosts(false);
     setGroupDraftsByKey({});
     setIsGroupActionBusy(false);
     setIsUpdateBusy(false);
-    setManagedUsers([]);
     setAccountsCreatorFilter('all');
     setNewUserForm(defaultUserForm());
     setEditingUserId(null);
     setEditingUserForm(defaultUserForm());
     setEmailForm({ currentEmail: '', newEmail: '', password: '' });
     setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
-    postsSearchRequestRef.current = 0;
     setAuthView('login');
   }, []);
 
@@ -140,24 +104,6 @@ export function useDashboardState() {
     setToken,
     authView,
     setAuthView,
-    mappings,
-    setMappings,
-    groups,
-    setGroups,
-    enrichedPosts,
-    setEnrichedPosts,
-    profilesByActor,
-    setProfilesByActor,
-    recentActivity,
-    setRecentActivity,
-    status,
-    setStatus,
-    runtimeVersion,
-    setRuntimeVersion,
-    updateStatus,
-    setUpdateStatus,
-    me,
-    setMe,
     editingMapping,
     setEditingMapping,
     newTwitterUsers,
@@ -200,16 +146,10 @@ export function useDashboardState() {
     setAccountsSearchQuery,
     postsSearchQuery,
     setPostsSearchQuery,
-    localPostSearchResults,
-    setLocalPostSearchResults,
-    isSearchingLocalPosts,
-    setIsSearchingLocalPosts,
     groupDraftsByKey,
     setGroupDraftsByKey,
     isGroupActionBusy,
     setIsGroupActionBusy,
-    managedUsers,
-    setManagedUsers,
     accountsCreatorFilter,
     setAccountsCreatorFilter,
     newUserForm,
@@ -224,6 +164,5 @@ export function useDashboardState() {
     setPasswordForm,
     isUpdateBusy,
     setIsUpdateBusy,
-    postsSearchRequestRef,
   };
 }

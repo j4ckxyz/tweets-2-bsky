@@ -1,3 +1,4 @@
+import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 // Per-account health: how fast each mirror is keeping up, when it last posted,
 // what is queued behind it, and whether its Bluesky account is down. The
@@ -5,45 +6,12 @@ import axios from 'axios';
 // that answers "is this mirror healthy?" without reading either.
 import { ChevronRight, RefreshCw, Search } from 'lucide-react';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import * as api from '../lib/api';
+import { queryKeys } from '../lib/query-keys';
+import type { AccountHealthResponse, AccountHealthRow, AccountHealthSource } from '../lib/types';
 import { cn } from '../lib/utils';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
-
-export interface AccountHealthSource {
-  twitterUsername: string;
-  tier: string;
-  lastCheckedAt: number | null;
-  lastFoundAt: number | null;
-  dueInMs: number;
-  lastError?: string | null;
-  protectedSince?: number | null;
-}
-
-export interface AccountHealthRow {
-  mappingId: string;
-  bskyIdentifier: string;
-  twitterUsernames: string[];
-  enabled: boolean;
-  groupName?: string;
-  groupEmoji?: string;
-  down: { state: string; reason: string; detectedAt: number } | null;
-  lag: { samples: number; averageMs: number; medianMs: number; p95Ms: number; worstMs: number } | null;
-  posts: { posted: number; skipped: number; failed: number; lastPostedAt: number | null };
-  queue: { pending: number; processing: number; failed: number };
-  sources: AccountHealthSource[];
-}
-
-export interface AccountHealthResponse {
-  windowDays: number;
-  accounts: AccountHealthRow[];
-  summary: {
-    accounts: number;
-    down: number;
-    averageLagMs: number | null;
-    lagSamples: number;
-    postedInWindow: number;
-  };
-}
 
 // The stated goal is a 5-10 minute mirror delay, so the thresholds mark where a
 // mirror stops meeting it rather than using round numbers for their own sake.
@@ -228,35 +196,30 @@ export function AccountHealth({
   onOpenAccount?: (mappingId: string) => void;
   onSummary?: (summary: RouteSummary) => void;
 }) {
-  const [data, setData] = useState<AccountHealthResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<'lag' | 'name' | 'recent'>('lag');
   const [query, setQuery] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showAllOnTime, setShowAllOnTime] = useState(false);
 
-  const load = useCallback(async () => {
-    if (!authHeaders) return;
-    setLoading(true);
-    try {
-      const response = await axios.get<AccountHealthResponse>('/api/account-health', { headers: authHeaders });
-      setData(response.data);
-      setError(null);
-    } catch (err) {
-      if (axios.isAxiosError(err) && err.response?.status === 401) {
-        onAuthFailure?.();
-        return;
-      }
-      setError('Could not load account health.');
-    } finally {
-      setLoading(false);
-    }
-  }, [authHeaders, onAuthFailure]);
-
+  const healthQuery = useQuery({
+    queryKey: queryKeys.accountHealth,
+    queryFn: async () => (await api.getAccountHealth({ headers: authHeaders })).data,
+    enabled: Boolean(authHeaders),
+  });
+  const data: AccountHealthResponse | null = healthQuery.data ?? null;
+  const loading = healthQuery.isFetching;
+  const healthError = healthQuery.error;
+  const signedOut = axios.isAxiosError(healthError) && healthError.response?.status === 401;
+  const error = healthError && !signedOut ? 'Could not load account health.' : null;
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (signedOut) {
+      onAuthFailure?.();
+    }
+  }, [onAuthFailure, signedOut]);
+  const { refetch } = healthQuery;
+  const load = useCallback(async () => {
+    await refetch();
+  }, [refetch]);
 
   useEffect(() => {
     if (!data || !onSummary) return;

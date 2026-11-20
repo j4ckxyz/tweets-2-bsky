@@ -1,21 +1,41 @@
-import axios from 'axios';
+import * as api from '../lib/api';
 import { defaultUserForm } from '../lib/constants';
 import { normalizeEmail, normalizePermissions, normalizeUsername } from '../lib/format';
 import type { ManagedUser } from '../lib/types';
+import type { useAccountActions } from './useAccountActions';
+import type { useAccountsList } from './useAccountsList';
+import type { useActivity } from './useActivity';
+import type { useAddAccount } from './useAddAccount';
 import type { useAuthForms } from './useAuthForms';
 import type { useAuthSession } from './useAuthSession';
 import type { useDashboardData } from './useDashboardData';
 import type { useDashboardState } from './useDashboardState';
+import type { useEditMapping } from './useEditMapping';
+import type { useGroups } from './useGroups';
 import type { useNotice } from './useNotice';
+import type { usePosts } from './usePosts';
+import type { useRouting } from './useRouting';
+import type { useSettings } from './useSettings';
+import type { useTheme } from './useTheme';
 
 // Admin user management: create, edit, reset password, delete.
 export function useUserAdmin(
   deps: Pick<
     ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
       ReturnType<typeof useNotice> &
       ReturnType<typeof useAuthSession> &
+      ReturnType<typeof useRouting> &
       ReturnType<typeof useDashboardData> &
-      ReturnType<typeof useAuthForms>,
+      ReturnType<typeof useAuthForms> &
+      ReturnType<typeof useGroups> &
+      ReturnType<typeof useAccountsList> &
+      ReturnType<typeof usePosts> &
+      ReturnType<typeof useActivity> &
+      ReturnType<typeof useAccountActions> &
+      ReturnType<typeof useAddAccount> &
+      ReturnType<typeof useEditMapping> &
+      ReturnType<typeof useSettings>,
     | 'accountsCreatorFilter'
     | 'authHeaders'
     | 'editingUserForm'
@@ -84,8 +104,7 @@ export function useUserAdmin(
 
     setIsBusy(true);
     try {
-      await axios.post(
-        '/api/admin/users',
+      await api.createUser(
         {
           username: username || undefined,
           email: email || undefined,
@@ -119,8 +138,8 @@ export function useUserAdmin(
 
     setIsBusy(true);
     try {
-      await axios.put(
-        `/api/admin/users/${userId}`,
+      await api.updateUser(
+        userId,
         {
           username: username || undefined,
           email: email || undefined,
@@ -155,8 +174,8 @@ export function useUserAdmin(
 
     setIsBusy(true);
     try {
-      await axios.post(
-        `/api/admin/users/${userId}/reset-password`,
+      await api.resetUserPassword(
+        userId,
         {
           newPassword,
         },
@@ -184,7 +203,7 @@ export function useUserAdmin(
 
     setIsBusy(true);
     try {
-      await axios.delete(`/api/admin/users/${user.id}`, { headers: authHeaders });
+      await api.deleteUser(user.id, { headers: authHeaders });
       showNotice('success', 'User deleted and owned mappings disabled.');
       if (accountsCreatorFilter === user.id) {
         setAccountsCreatorFilter('all');

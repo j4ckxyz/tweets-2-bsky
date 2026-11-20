@@ -1,5 +1,5 @@
-import axios from 'axios';
 import { useEffect, useMemo } from 'react';
+import * as api from '../lib/api';
 import { DEFAULT_GROUP_EMOJI, DEFAULT_GROUP_KEY, DEFAULT_GROUP_NAME } from '../lib/constants';
 import { getGroupKey, getGroupMeta, getMappingGroupMeta } from '../lib/format';
 import type { AccountMapping } from '../lib/types';
@@ -8,13 +8,17 @@ import type { useAuthSession } from './useAuthSession';
 import type { useDashboardData } from './useDashboardData';
 import type { useDashboardState } from './useDashboardState';
 import type { useNotice } from './useNotice';
+import type { useRouting } from './useRouting';
+import type { useTheme } from './useTheme';
 
 // Folders: options, drafts and create/rename/delete/assign actions.
 export function useGroups(
   deps: Pick<
     ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
       ReturnType<typeof useNotice> &
       ReturnType<typeof useAuthSession> &
+      ReturnType<typeof useRouting> &
       ReturnType<typeof useDashboardData> &
       ReturnType<typeof useAuthForms>,
     | 'authHeaders'
@@ -120,7 +124,7 @@ export function useGroups(
 
     setIsBusy(true);
     try {
-      await axios.post('/api/groups', { name, emoji }, { headers: authHeaders });
+      await api.createGroup({ name, emoji }, { headers: authHeaders });
       setNewGroupName('');
       setNewGroupEmoji(DEFAULT_GROUP_EMOJI);
       await fetchGroups();
@@ -146,8 +150,8 @@ export function useGroups(
     const nextGroupEmoji = selectedGroup?.emoji || '';
 
     try {
-      await axios.put(
-        `/api/mappings/${mapping.id}`,
+      await api.updateMapping(
+        mapping.id,
         {
           groupName: nextGroupName,
           groupEmoji: nextGroupEmoji,
@@ -209,8 +213,8 @@ export function useGroups(
 
     setIsGroupActionBusy(true);
     try {
-      await axios.put(
-        `/api/groups/${encodeURIComponent(groupKey)}`,
+      await api.updateGroup(
+        groupKey,
         {
           name: draft.name.trim(),
           emoji: draft.emoji.trim(),
@@ -250,7 +254,7 @@ export function useGroups(
 
     setIsGroupActionBusy(true);
     try {
-      const response = await axios.delete<{ reassignedCount?: number }>(`/api/groups/${encodeURIComponent(groupKey)}`, {
+      const response = await api.deleteGroup(groupKey, {
         headers: authHeaders,
       });
       const reassignedCount = response.data?.reassignedCount || 0;

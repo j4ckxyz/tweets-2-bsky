@@ -1,24 +1,42 @@
-import axios from 'axios';
 import { Bot, Download, Settings2, SunMoon, UserRound, Users } from 'lucide-react';
 import { useMemo } from 'react';
 import { Badge } from '../components/ui/badge';
+import * as api from '../lib/api';
 import { normalizePermissions } from '../lib/format';
-import type { AuthUser, SettingsSection } from '../lib/types';
+import type { SettingsSection } from '../lib/types';
 import { cn } from '../lib/utils';
+import type { useAccountActions } from './useAccountActions';
+import type { useAccountsList } from './useAccountsList';
+import type { useActivity } from './useActivity';
+import type { useAddAccount } from './useAddAccount';
 import type { useAuthForms } from './useAuthForms';
 import type { useAuthSession } from './useAuthSession';
 import type { useDashboardData } from './useDashboardData';
 import type { useDashboardState } from './useDashboardState';
+import type { useEditMapping } from './useEditMapping';
+import type { useGroups } from './useGroups';
 import type { useNotice } from './useNotice';
+import type { usePosts } from './usePosts';
+import type { useRouting } from './useRouting';
+import type { useTheme } from './useTheme';
 
 // Settings tab: section nav, X/AI config, import/export, updates and own email/password.
 export function useSettings(
   deps: Pick<
     ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
       ReturnType<typeof useNotice> &
       ReturnType<typeof useAuthSession> &
+      ReturnType<typeof useRouting> &
       ReturnType<typeof useDashboardData> &
-      ReturnType<typeof useAuthForms>,
+      ReturnType<typeof useAuthForms> &
+      ReturnType<typeof useGroups> &
+      ReturnType<typeof useAccountsList> &
+      ReturnType<typeof usePosts> &
+      ReturnType<typeof useActivity> &
+      ReturnType<typeof useAccountActions> &
+      ReturnType<typeof useAddAccount> &
+      ReturnType<typeof useEditMapping>,
     | 'aiConfig'
     | 'authHeaders'
     | 'emailForm'
@@ -105,8 +123,7 @@ export function useSettings(
     setIsBusy(true);
 
     try {
-      await axios.post(
-        '/api/twitter-config',
+      await api.saveTwitterConfig(
         {
           authToken: twitterConfig.authToken,
           ct0: twitterConfig.ct0,
@@ -133,8 +150,7 @@ export function useSettings(
     setIsBusy(true);
 
     try {
-      await axios.post(
-        '/api/ai-config',
+      await api.saveAiConfig(
         {
           provider: aiConfig.provider,
           apiKey: aiConfig.apiKey,
@@ -158,7 +174,7 @@ export function useSettings(
     }
 
     try {
-      const response = await axios.get<Blob>('/api/config/export', {
+      const response = await api.exportConfig({
         headers: authHeaders,
         responseType: 'blob',
       });
@@ -200,7 +216,7 @@ export function useSettings(
       const text = await file.text();
       const json = JSON.parse(text);
 
-      await axios.post('/api/config/import', json, { headers: authHeaders });
+      await api.importConfig(json, { headers: authHeaders });
       showNotice('success', 'Configuration imported.');
       await fetchData();
     } catch (error) {
@@ -224,7 +240,7 @@ export function useSettings(
 
     setIsUpdateBusy(true);
     try {
-      const response = await axios.post<{ message?: string }>('/api/update', {}, { headers: authHeaders });
+      const response = await api.runUpdate({}, { headers: authHeaders });
       showNotice('info', response.data?.message || 'Update started. Service may restart soon.');
       await Promise.all([fetchRuntimeVersion(), fetchUpdateStatus()]);
     } catch (error) {
@@ -250,8 +266,7 @@ export function useSettings(
 
     setIsBusy(true);
     try {
-      const response = await axios.post<{ token?: string; me?: AuthUser }>(
-        '/api/me/change-email',
+      const response = await api.changeOwnEmail(
         {
           currentEmail: emailForm.currentEmail,
           newEmail: emailForm.newEmail,
@@ -305,8 +320,7 @@ export function useSettings(
 
     setIsBusy(true);
     try {
-      await axios.post(
-        '/api/me/change-password',
+      await api.changeOwnPassword(
         {
           currentPassword: passwordForm.currentPassword,
           newPassword: passwordForm.newPassword,

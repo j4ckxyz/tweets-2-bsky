@@ -1,23 +1,39 @@
-import axios from 'axios';
 import { useEffect, useState } from 'react';
 import { pickMirrorSettings } from '../components/MirrorSettingsFields';
+import * as api from '../lib/api';
 import { defaultMappingForm, mirrorSettingsFromMapping } from '../lib/constants';
 import { addTwitterUsernames, normalizeTwitterUsername } from '../lib/format';
 import type { AccountMapping, MappingFormState } from '../lib/types';
+import type { useAccountActions } from './useAccountActions';
+import type { useAccountsList } from './useAccountsList';
+import type { useActivity } from './useActivity';
+import type { useAddAccount } from './useAddAccount';
 import type { useAuthForms } from './useAuthForms';
 import type { useAuthSession } from './useAuthSession';
 import type { useDashboardData } from './useDashboardData';
 import type { useDashboardState } from './useDashboardState';
+import type { useGroups } from './useGroups';
 import type { useNotice } from './useNotice';
+import type { usePosts } from './usePosts';
+import type { useRouting } from './useRouting';
+import type { useTheme } from './useTheme';
 
 // The edit-account dialog form and save.
 export function useEditMapping(
   deps: Pick<
     ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
       ReturnType<typeof useNotice> &
       ReturnType<typeof useAuthSession> &
+      ReturnType<typeof useRouting> &
       ReturnType<typeof useDashboardData> &
-      ReturnType<typeof useAuthForms>,
+      ReturnType<typeof useAuthForms> &
+      ReturnType<typeof useGroups> &
+      ReturnType<typeof useAccountsList> &
+      ReturnType<typeof usePosts> &
+      ReturnType<typeof useActivity> &
+      ReturnType<typeof useAccountActions> &
+      ReturnType<typeof useAddAccount>,
     | 'authHeaders'
     | 'canManageMapping'
     | 'editTwitterUsers'
@@ -130,8 +146,8 @@ export function useEditMapping(
     setIsBusy(true);
 
     try {
-      await axios.put(
-        `/api/mappings/${editingMapping.id}`,
+      await api.updateMapping(
+        editingMapping.id,
         {
           owner: editForm.owner.trim(),
           twitterUsernames: editTwitterUsers,

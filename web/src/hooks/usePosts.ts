@@ -1,44 +1,46 @@
-import axios from 'axios';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import * as api from '../lib/api';
 import { getMappingGroupMeta, normalizeTwitterUsername } from '../lib/format';
+import { queryKeys } from '../lib/query-keys';
 import type { EnrichedPost, LocalPostSearchResult } from '../lib/types';
+import type { useAccountsList } from './useAccountsList';
+import type { useAuthForms } from './useAuthForms';
 import type { useAuthSession } from './useAuthSession';
 import type { useDashboardData } from './useDashboardData';
 import type { useDashboardState } from './useDashboardState';
 import type { useGroups } from './useGroups';
+import type { useNotice } from './useNotice';
+import type { useRouting } from './useRouting';
+import type { useTheme } from './useTheme';
 
 // Posts tab: folder filter and local post search.
 export function usePosts(
   deps: Pick<
     ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
+      ReturnType<typeof useNotice> &
       ReturnType<typeof useAuthSession> &
+      ReturnType<typeof useRouting> &
       ReturnType<typeof useDashboardData> &
-      ReturnType<typeof useGroups>,
+      ReturnType<typeof useAuthForms> &
+      ReturnType<typeof useGroups> &
+      ReturnType<typeof useAccountsList>,
     | 'authHeaders'
     | 'groupOptions'
-    | 'handleAuthFailure'
-    | 'localPostSearchResults'
     | 'mappingsByBskyIdentifier'
     | 'mappingsByTwitterUsername'
     | 'postedActivity'
     | 'postsSearchQuery'
-    | 'postsSearchRequestRef'
-    | 'setIsSearchingLocalPosts'
-    | 'setLocalPostSearchResults'
   >,
 ) {
   const {
     authHeaders,
     groupOptions,
-    handleAuthFailure,
-    localPostSearchResults,
     mappingsByBskyIdentifier,
     mappingsByTwitterUsername,
     postedActivity,
     postsSearchQuery,
-    postsSearchRequestRef,
-    setIsSearchingLocalPosts,
-    setLocalPostSearchResults,
   } = deps;
 
   const [postsGroupFilter, setPostsGroupFilter] = useState('all');
@@ -64,6 +66,38 @@ export function usePosts(
       }),
     [postedActivity, postsGroupFilter, resolveMappingForPost],
   );
+  // Local post history search: debounced while typing; the previous results
+  // stay on screen until the new ones arrive.
+  const trimmedPostsSearchQuery = postsSearchQuery.trim();
+  const [debouncedPostsSearchQuery, setDebouncedPostsSearchQuery] = useState(trimmedPostsSearchQuery);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedPostsSearchQuery(trimmedPostsSearchQuery), 220);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [trimmedPostsSearchQuery]);
+  const localSearch = useQuery({
+    queryKey: queryKeys.postSearch(debouncedPostsSearchQuery),
+    queryFn: async () => {
+      const response = await api.searchPosts({
+        params: { q: debouncedPostsSearchQuery, limit: 120 },
+        headers: authHeaders,
+      });
+      return Array.isArray(response.data) ? response.data : [];
+    },
+    enabled: Boolean(authHeaders) && debouncedPostsSearchQuery.length > 0,
+    placeholderData: keepPreviousData,
+    meta: { errorMessage: 'Failed to search local post history.' },
+  });
+  const searching = Boolean(authHeaders) && trimmedPostsSearchQuery.length > 0;
+  const postSearchResults = localSearch.data;
+  const localPostSearchResults = useMemo<LocalPostSearchResult[]>(
+    () => (searching ? (postSearchResults ?? []) : []),
+    [postSearchResults, searching],
+  );
+  const isSearchingLocalPosts =
+    searching && (debouncedPostsSearchQuery !== trimmedPostsSearchQuery || localSearch.isFetching);
+
   const filteredLocalPostSearchResults = useMemo(
     () =>
       localPostSearchResults.filter((post) => {
@@ -83,60 +117,6 @@ export function usePosts(
     }
   }, [activityGroupFilter, groupOptions, postsGroupFilter]);
 
-  useEffect(() => {
-    if (!authHeaders) {
-      setIsSearchingLocalPosts(false);
-      setLocalPostSearchResults([]);
-      return;
-    }
-
-    const query = postsSearchQuery.trim();
-    if (!query) {
-      postsSearchRequestRef.current += 1;
-      setIsSearchingLocalPosts(false);
-      setLocalPostSearchResults([]);
-      return;
-    }
-
-    const requestId = postsSearchRequestRef.current + 1;
-    postsSearchRequestRef.current = requestId;
-    setIsSearchingLocalPosts(true);
-
-    const timer = window.setTimeout(async () => {
-      try {
-        const response = await axios.get<LocalPostSearchResult[]>('/api/posts/search', {
-          params: { q: query, limit: 120 },
-          headers: authHeaders,
-        });
-        if (postsSearchRequestRef.current !== requestId) {
-          return;
-        }
-        setLocalPostSearchResults(Array.isArray(response.data) ? response.data : []);
-      } catch (error) {
-        if (postsSearchRequestRef.current !== requestId) {
-          return;
-        }
-        setLocalPostSearchResults([]);
-        handleAuthFailure(error, 'Failed to search local post history.');
-      } finally {
-        if (postsSearchRequestRef.current === requestId) {
-          setIsSearchingLocalPosts(false);
-        }
-      }
-    }, 220);
-
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [
-    authHeaders,
-    handleAuthFailure,
-    postsSearchQuery,
-    postsSearchRequestRef,
-    setIsSearchingLocalPosts,
-    setLocalPostSearchResults,
-  ]);
-
   return {
     postsGroupFilter,
     setPostsGroupFilter,
@@ -146,5 +126,7 @@ export function usePosts(
     resolveMappingForPost,
     filteredPostedActivity,
     filteredLocalPostSearchResults,
+    localPostSearchResults,
+    isSearchingLocalPosts,
   };
 }

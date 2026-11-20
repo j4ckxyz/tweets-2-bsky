@@ -1,4 +1,5 @@
 import { ChevronDown } from 'lucide-react';
+import { useState } from 'react';
 import { useDashboard } from '../lib/dashboard-context';
 import { formatRelativeTime, formatState } from '../lib/format';
 import { JOB_KIND_DOT, JOB_KIND_LABEL } from '../lib/types';
@@ -7,13 +8,13 @@ import { Button } from './ui/button';
 
 // Running jobs and post-queue status, shown on Overview.
 export function JobsStrip() {
+  const [jobsExpanded, setJobsExpanded] = useState(false);
   const {
     activeJobs,
     activeTab,
     clearFailedQueue,
     currentStatus,
     isAdmin,
-    jobsExpanded,
     openTab,
     pendingBackfills,
     postQueue,
@@ -21,7 +22,6 @@ export function JobsStrip() {
     queuedPostCount,
     retryFailedQueue,
     setActivityView,
-    setJobsExpanded,
   } = useDashboard();
   return activeTab === 'overview' &&
     (activeJobs.length > 0 ||

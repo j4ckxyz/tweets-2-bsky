@@ -1,31 +1,37 @@
-import axios from 'axios';
 import { useCallback, useEffect, useState } from 'react';
 import { pickMirrorSettings } from '../components/MirrorSettingsFields';
+import * as api from '../lib/api';
 import { DEFAULT_GROUP_KEY, defaultMappingForm } from '../lib/constants';
 import { addTwitterUsernames, getUserLabel, normalizeTwitterUsername } from '../lib/format';
-import type {
-  AccountMapping,
-  BlueskyCredentialValidation,
-  MappingFormState,
-  MirrorProfileSyncResult,
-  TwitterMirrorProfile,
-} from '../lib/types';
+import type { BlueskyCredentialValidation, MappingFormState, TwitterMirrorProfile } from '../lib/types';
+import type { useAccountActions } from './useAccountActions';
+import type { useAccountsList } from './useAccountsList';
+import type { useActivity } from './useActivity';
 import type { useAuthForms } from './useAuthForms';
 import type { useAuthSession } from './useAuthSession';
 import type { useDashboardData } from './useDashboardData';
 import type { useDashboardState } from './useDashboardState';
 import type { useGroups } from './useGroups';
 import type { useNotice } from './useNotice';
+import type { usePosts } from './usePosts';
+import type { useRouting } from './useRouting';
+import type { useTheme } from './useTheme';
 
 // The add-account sheet: step state, mirror preview, credential check and submit.
 export function useAddAccount(
   deps: Pick<
     ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
       ReturnType<typeof useNotice> &
       ReturnType<typeof useAuthSession> &
+      ReturnType<typeof useRouting> &
       ReturnType<typeof useDashboardData> &
       ReturnType<typeof useAuthForms> &
-      ReturnType<typeof useGroups>,
+      ReturnType<typeof useGroups> &
+      ReturnType<typeof useAccountsList> &
+      ReturnType<typeof usePosts> &
+      ReturnType<typeof useActivity> &
+      ReturnType<typeof useAccountActions>,
     | 'addAccountStep'
     | 'authHeaders'
     | 'canCreateMappings'
@@ -186,11 +192,7 @@ export function useAddAccount(
 
       setIsMirrorPreviewLoading(true);
       try {
-        const response = await axios.post<TwitterMirrorProfile>(
-          '/api/onboarding/twitter-profile',
-          { twitterUsername: normalized },
-          { headers: authHeaders },
-        );
+        const response = await api.getTwitterProfile({ twitterUsername: normalized }, { headers: authHeaders });
         setNewTwitterMirrorProfiles((previous) => ({
           ...previous,
           [normalized]: response.data,
@@ -222,8 +224,7 @@ export function useAddAccount(
 
     setIsCredentialValidationBusy(true);
     try {
-      const response = await axios.post<BlueskyCredentialValidation>(
-        '/api/onboarding/bsky-credentials',
+      const response = await api.validateBskyCredentials(
         {
           bskyIdentifier,
           bskyPassword,
@@ -297,8 +298,7 @@ export function useAddAccount(
     setIsBusy(true);
 
     try {
-      const createResponse = await axios.post<AccountMapping>(
-        '/api/mappings',
+      const createResponse = await api.createMapping(
         {
           owner: newMapping.owner.trim(),
           twitterUsernames: newTwitterUsers,
@@ -314,8 +314,8 @@ export function useAddAccount(
         { headers: authHeaders },
       );
 
-      const syncResponse = await axios.post<MirrorProfileSyncResult>(
-        `/api/mappings/${createResponse.data.id}/sync-profile-from-twitter`,
+      const syncResponse = await api.syncProfileFromTwitter(
+        createResponse.data.id,
         {
           sourceTwitterUsername,
         },

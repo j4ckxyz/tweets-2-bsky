@@ -1,5 +1,6 @@
-import axios from 'axios';
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import * as api from '../lib/api';
 import {
   filenameFromResponse,
   formatLogEntryForExport,
@@ -7,22 +8,33 @@ import {
   normalizeTwitterUsername,
   triggerBlobDownload,
 } from '../lib/format';
-import type { ActivityLog, LogEntry, LogLevel, LogsResponse, QueueFailuresResponse } from '../lib/types';
+import { queryKeys } from '../lib/query-keys';
+import type { ActivityLog, LogEntry, LogLevel, QueueFailuresResponse } from '../lib/types';
+import type { useAccountsList } from './useAccountsList';
+import type { useAuthForms } from './useAuthForms';
 import type { useAuthSession } from './useAuthSession';
 import type { useDashboardData } from './useDashboardData';
 import type { useDashboardState } from './useDashboardState';
+import type { useGroups } from './useGroups';
 import type { useNotice } from './useNotice';
 import type { usePosts } from './usePosts';
 import type { useRouting } from './useRouting';
+import type { useTheme } from './useTheme';
 
 // Activity tab: outcomes filter, system log viewer and the failed post queue.
+const EMPTY_QUEUE_FAILURES: QueueFailuresResponse = { summary: [], items: [] };
+
 export function useActivity(
   deps: Pick<
     ReturnType<typeof useDashboardState> &
+      ReturnType<typeof useTheme> &
       ReturnType<typeof useNotice> &
       ReturnType<typeof useAuthSession> &
       ReturnType<typeof useRouting> &
       ReturnType<typeof useDashboardData> &
+      ReturnType<typeof useAuthForms> &
+      ReturnType<typeof useGroups> &
+      ReturnType<typeof useAccountsList> &
       ReturnType<typeof usePosts>,
     | 'activeTab'
     | 'activityGroupFilter'
@@ -49,21 +61,19 @@ export function useActivity(
     token,
   } = deps;
 
+  const queryClient = useQueryClient();
+
   // System log viewer state (Activity tab → "System log").
-  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
-  const [logHasMore, setLogHasMore] = useState(false);
   const [logLevelFilter, setLogLevelFilter] = useState<'all' | LogLevel>('all');
   const [logStageFilter, setLogStageFilter] = useState('all');
   const [logSearch, setLogSearch] = useState('');
   const [logLimit, setLogLimit] = useState(200);
-  const [logsLoading, setLogsLoading] = useState(false);
   const [logAutoRefresh, setLogAutoRefresh] = useState(true);
   const [activityView, setActivityView] = useState<'outcomes' | 'logs' | 'failures'>('outcomes');
-  const [queueFailures, setQueueFailures] = useState<QueueFailuresResponse>({ summary: [], items: [] });
-  const [queueFailuresLoading, setQueueFailuresLoading] = useState(false);
 
   // Filters live in one place so the viewer, the clipboard copy and the file
   // download always describe exactly the same set of entries.
+  const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
   const logQueryParams = useMemo(() => {
     const params = new URLSearchParams();
     if (logLevelFilter !== 'all') {
@@ -77,72 +87,78 @@ export function useActivity(
     return params;
   }, [logLevelFilter, logStageFilter, logSearch]);
 
+  // The log viewer only fetches while it is on screen, and refetches straight
+  // away when a filter changes so the list always matches the controls.
+  const logsVisible = Boolean(token && authHeaders) && activeTab === 'activity' && activityView === 'logs';
+  const logsQueryString = useMemo(() => {
+    const params = new URLSearchParams(logQueryParams);
+    params.set('limit', String(logLimit));
+    return params.toString();
+  }, [logLimit, logQueryParams]);
+  const logsQuery = useQuery({
+    queryKey: queryKeys.logs(logsQueryString),
+    queryFn: async () => (await api.getLogs(logsQueryString, { headers: authHeaders })).data,
+    enabled: logsVisible,
+    // Auto-refresh is a silent live tail: no spinner, so the list does not flicker.
+    refetchInterval: logAutoRefresh ? 5000 : false,
+    placeholderData: keepPreviousData,
+    meta: { errorMessage: 'Failed to fetch logs.' },
+  });
+  const logEntries = useMemo<LogEntry[]>(() => logsQuery.data?.entries || [], [logsQuery.data]);
+  const logHasMore = Boolean(logsQuery.data?.hasMore);
+
+  // The spinner shows for fetches someone asked for (opening the view, changing
+  // a filter, Refresh), never for the auto-refresh tick. A filter change shows
+  // the previous entries as placeholder data until the new ones arrive.
+  const [logsFetchRequested, setLogsFetchRequested] = useState(false);
+  useEffect(() => {
+    if (logsVisible) {
+      setLogsFetchRequested(true);
+    }
+  }, [logsVisible]);
+  const logsFetching = logsQuery.isFetching;
+  useEffect(() => {
+    if (!logsFetching) {
+      setLogsFetchRequested(false);
+    }
+  }, [logsFetching]);
+  const logsLoading = logsFetching && (logsFetchRequested || logsQuery.isPlaceholderData);
+
   const fetchLogs = useCallback(
     async (options: { silent?: boolean } = {}) => {
       if (!authHeaders) {
         return;
       }
-      if (!options.silent) setLogsLoading(true);
+      if (!options.silent) setLogsFetchRequested(true);
       try {
-        const params = new URLSearchParams(logQueryParams);
-        params.set('limit', String(logLimit));
-        const response = await axios.get<LogsResponse>(`/api/logs?${params.toString()}`, { headers: authHeaders });
-        setLogEntries(response.data.entries || []);
-        setLogHasMore(Boolean(response.data.hasMore));
-      } catch (error) {
-        handleAuthFailure(error, 'Failed to fetch logs.');
+        await queryClient.refetchQueries({ queryKey: queryKeys.logs(logsQueryString) });
       } finally {
-        if (!options.silent) setLogsLoading(false);
+        if (!options.silent) setLogsFetchRequested(false);
       }
     },
-    [authHeaders, handleAuthFailure, logLimit, logQueryParams],
+    [authHeaders, logsQueryString, queryClient],
   );
+
+  const queueFailuresQuery = useQuery({
+    queryKey: queryKeys.queueFailures,
+    queryFn: async (): Promise<QueueFailuresResponse> => {
+      const response = await api.getQueueFailures({
+        headers: authHeaders,
+      });
+      return { summary: response.data.summary || [], items: response.data.items || [] };
+    },
+    enabled: Boolean(token && authHeaders) && activeTab === 'activity' && activityView === 'failures',
+    meta: { errorMessage: 'Failed to fetch queue failures.' },
+  });
+  const queueFailures = queueFailuresQuery.data ?? EMPTY_QUEUE_FAILURES;
+  const queueFailuresLoading = queueFailuresQuery.isFetching;
 
   const fetchQueueFailures = useCallback(async () => {
     if (!authHeaders) {
       return;
     }
-    setQueueFailuresLoading(true);
-    try {
-      const response = await axios.get<QueueFailuresResponse>('/api/queue/failures?limit=200', {
-        headers: authHeaders,
-      });
-      setQueueFailures({ summary: response.data.summary || [], items: response.data.items || [] });
-    } catch (error) {
-      handleAuthFailure(error, 'Failed to fetch queue failures.');
-    } finally {
-      setQueueFailuresLoading(false);
-    }
-  }, [authHeaders, handleAuthFailure]);
-
-  // The log viewer is only fetched while it is on screen. Refetch immediately
-  // whenever a filter changes so the list always matches the controls.
-  useEffect(() => {
-    if (!token || activeTab !== 'activity' || activityView !== 'logs') {
-      return;
-    }
-    void fetchLogs();
-  }, [token, activeTab, activityView, fetchLogs]);
-
-  useEffect(() => {
-    if (!token || activeTab !== 'activity' || activityView !== 'logs' || !logAutoRefresh) {
-      return;
-    }
-    // Silent refresh: no spinner, so a live tail does not flicker.
-    const interval = window.setInterval(() => {
-      void fetchLogs({ silent: true });
-    }, 5000);
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [token, activeTab, activityView, logAutoRefresh, fetchLogs]);
-
-  useEffect(() => {
-    if (!token || activeTab !== 'activity' || activityView !== 'failures') {
-      return;
-    }
-    void fetchQueueFailures();
-  }, [token, activeTab, activityView, fetchQueueFailures]);
+    await queryClient.refetchQueries({ queryKey: queryKeys.queueFailures });
+  }, [authHeaders, queryClient]);
   const resolveMappingForActivity = useCallback(
     (activity: ActivityLog) =>
       mappingsByBskyIdentifier.get(normalizeTwitterUsername(activity.bsky_identifier)) ||
@@ -164,7 +180,7 @@ export function useActivity(
       return;
     }
     try {
-      const response = await axios.post('/api/queue/retry-failed', {}, { headers: authHeaders });
+      const response = await api.retryFailedQueue({}, { headers: authHeaders });
       showNotice('success', response.data?.message || 'Failed tweets requeued.');
       await fetchStatus();
     } catch (error) {
@@ -181,7 +197,7 @@ export function useActivity(
       return;
     }
     try {
-      const response = await axios.delete('/api/queue/failed', { headers: authHeaders });
+      const response = await api.clearFailedQueue({ headers: authHeaders });
       showNotice('success', response.data?.message || 'Failed tweets removed.');
       await Promise.all([fetchStatus(), fetchQueueFailures()]);
     } catch (error) {
@@ -218,7 +234,7 @@ export function useActivity(
       params.set('limit', '50000');
       // The route needs the auth header, so fetch as a blob and save it
       // client-side rather than pointing the browser straight at the URL.
-      const response = await axios.get(`/api/logs/export?${params.toString()}`, {
+      const response = await api.exportLogs(params.toString(), {
         headers: authHeaders,
         responseType: 'blob',
       });
@@ -234,7 +250,7 @@ export function useActivity(
       return;
     }
     try {
-      const response = await axios.get('/api/logs/diagnostics', { headers: authHeaders, responseType: 'blob' });
+      const response = await api.getLogDiagnostics({ headers: authHeaders, responseType: 'blob' });
       triggerBlobDownload(response.data as Blob, filenameFromResponse(response, 'tweets-2-bsky-diagnostics.json'));
       showNotice('success', 'Diagnostics bundle downloaded.');
     } catch (error) {
@@ -251,7 +267,7 @@ export function useActivity(
       return;
     }
     try {
-      const response = await axios.delete('/api/logs', { headers: authHeaders });
+      const response = await api.clearLogs({ headers: authHeaders });
       showNotice('success', response.data?.message || 'Logs cleared.');
       await fetchLogs();
     } catch (error) {
@@ -260,10 +276,10 @@ export function useActivity(
   };
 
   return {
+    expandedLogId,
+    setExpandedLogId,
     logEntries,
-    setLogEntries,
     logHasMore,
-    setLogHasMore,
     logLevelFilter,
     setLogLevelFilter,
     logStageFilter,
@@ -273,15 +289,12 @@ export function useActivity(
     logLimit,
     setLogLimit,
     logsLoading,
-    setLogsLoading,
     logAutoRefresh,
     setLogAutoRefresh,
     activityView,
     setActivityView,
     queueFailures,
-    setQueueFailures,
     queueFailuresLoading,
-    setQueueFailuresLoading,
     logQueryParams,
     fetchLogs,
     fetchQueueFailures,
