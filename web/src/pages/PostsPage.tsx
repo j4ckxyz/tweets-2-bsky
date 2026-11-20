@@ -93,7 +93,7 @@ export function PostsPage() {
                   return (
                     <article
                       key={`${post.twitterId}-${post.bskyIdentifier}-${post.bskyCid || post.createdAt || 'result'}`}
-                      className="rounded-lg border border-border/70 bg-background p-4"
+                      className="min-w-0 rounded-lg border border-border/70 bg-background p-4"
                     >
                       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                         <div className="min-w-0">
@@ -185,25 +185,25 @@ export function PostsPage() {
                 return (
                   <article
                     key={post.bskyUri || `${post.bskyCid || 'post'}-${post.createdAt || index}`}
-                    className="cv-auto rounded-lg border border-border bg-background p-4"
+                    className="cv-auto min-w-0 rounded-lg border border-border bg-background p-4"
                   >
-                    <div className="mb-3 flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-2">
+                    <div className="mb-3 flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+                      <div className="flex min-w-0 items-center gap-2">
                         {authorAvatar ? (
                           <img
-                            className="h-9 w-9 rounded-full border border-border/70 object-cover"
+                            className="h-9 w-9 shrink-0 rounded-full border border-border/70 object-cover"
                             src={authorAvatar}
                             alt={authorName}
                             loading="lazy"
                           />
                         ) : (
-                          <div className="flex h-9 w-9 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
+                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border/70 bg-muted text-muted-foreground">
                             <UserRound className="h-4 w-4" />
                           </div>
                         )}
-                        <div>
-                          <p className="text-sm font-semibold">{authorName}</p>
-                          <p className="text-xs text-muted-foreground">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold">{authorName}</p>
+                          <p className="break-words text-xs text-muted-foreground">
                             @{authorHandle} • from @{post.twitterUsername}
                           </p>
                         </div>

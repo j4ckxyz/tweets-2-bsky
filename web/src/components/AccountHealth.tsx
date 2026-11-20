@@ -101,6 +101,7 @@ const DOWN_LABEL: Record<string, string> = {
 };
 
 const TIER_LABEL: Record<string, string> = {
+  priority: 'every sweep',
   active: 'every sweep',
   recent: 'every 10m',
   quiet: 'every 30m',
@@ -361,7 +362,7 @@ export function AccountHealth({
           <span>Route</span>
           <span className="flex justify-between">
             <span>Typical transit</span>
-            <span className="font-normal opacity-70">0 · 4h</span>
+            <span className="font-normal">0 · 4h</span>
           </span>
           <span className="text-right">95th pct</span>
           <span className="text-right">Last post</span>

@@ -1,11 +1,12 @@
 import { useEffect } from 'react';
 import type { ReactNode } from 'react';
-import { Route, Routes } from 'react-router';
+import { Route, Routes, useLocation } from 'react-router';
 import { AccountAlertsBanner } from './components/AccountAlertsBanner';
 import { AddAccountSheet } from './components/AddAccountSheet';
 import { EditMappingDialog } from './components/EditMappingDialog';
 import { JobsStrip } from './components/JobsStrip';
 import { NoticeBanner } from './components/NoticeBanner';
+import { RouteErrorBoundary } from './components/RouteErrorBoundary';
 import { StatusStrip } from './components/StatusStrip';
 import { MobileNav } from './components/layout/MobileNav';
 import { PageHeader } from './components/layout/PageHeader';
@@ -30,6 +31,7 @@ const pageForTab: Record<DashboardTab, ReactNode> = {
 
 function AppShell() {
   const { accountDetailId, activeTab, token } = useDashboard();
+  const location = useLocation();
 
   useEffect(() => {
     console.log(
@@ -63,20 +65,22 @@ function AppShell() {
 
             <JobsStrip />
 
-            <Routes>
-              <Route caseSensitive path="/" element={<OverviewPage />} />
-              <Route caseSensitive path="/accounts" element={<AccountsPage />} />
-              <Route
-                caseSensitive
-                path="/accounts/:accountId"
-                element={accountDetailId ? <AccountDetailPage /> : pageForTab[activeTab]}
-              />
-              <Route caseSensitive path="/posts" element={<PostsPage />} />
-              <Route caseSensitive path="/activity" element={<ActivityPage />} />
-              <Route caseSensitive path="/settings" element={<SettingsPage />} />
-              {/* Not a dashboard path: show the fallback tab while useRouting redirects to it. */}
-              <Route path="*" element={pageForTab[activeTab]} />
-            </Routes>
+            <RouteErrorBoundary resetKey={location.pathname}>
+              <Routes>
+                <Route caseSensitive path="/" element={<OverviewPage />} />
+                <Route caseSensitive path="/accounts" element={<AccountsPage />} />
+                <Route
+                  caseSensitive
+                  path="/accounts/:accountId"
+                  element={accountDetailId ? <AccountDetailPage /> : pageForTab[activeTab]}
+                />
+                <Route caseSensitive path="/posts" element={<PostsPage />} />
+                <Route caseSensitive path="/activity" element={<ActivityPage />} />
+                <Route caseSensitive path="/settings" element={<SettingsPage />} />
+                {/* Not a dashboard path: show the fallback tab while useRouting redirects to it. */}
+                <Route path="*" element={pageForTab[activeTab]} />
+              </Routes>
+            </RouteErrorBoundary>
 
             <AddAccountSheet />
 

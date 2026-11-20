@@ -15,7 +15,7 @@ colors:
   postal-ink: "oklch(25% 0.045 262)"
   on-airmail: "oklch(98.5% 0.005 250)"
   cancellation-red: "oklch(53% 0.19 27)"
-  customs-amber: "oklch(56% 0.13 62)"
+  customs-amber: "oklch(50% 0.125 62)"
   cleared-green: "oklch(50% 0.1 165)"
   tracking-blue: "oklch(50% 0.12 240)"
   # Dark theme (postal navy). Values are the OKLCH triplets in web/src/index.css .dark.
@@ -153,7 +153,7 @@ components:
     rounded: "{rounded.sm}"
     padding: "2px 6px"
   badge-warning:
-    backgroundColor: "oklch(56% 0.13 62 / 0.1)"
+    backgroundColor: "oklch(50% 0.125 62 / 0.1)"
     textColor: "{colors.customs-amber}"
     typography: "{typography.micro}"
     rounded: "{rounded.sm}"

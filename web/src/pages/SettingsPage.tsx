@@ -12,7 +12,7 @@ export function SettingsPage() {
   const { setSettingsActiveSection, settingsActiveSection, settingsNavItems } = useDashboard();
   return (
     <section className="grid gap-6 lg:grid-cols-[180px_1fr] animate-fade-in">
-      <div className="h-fit lg:sticky lg:top-6">
+      <div className="h-fit min-w-0 lg:sticky lg:top-6">
         <NavList
           items={settingsNavItems}
           activeId={settingsActiveSection}

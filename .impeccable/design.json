@@ -187,7 +187,7 @@
       "customs-amber": {
         "role": "secondary",
         "displayName": "Customs Amber",
-        "canonical": "oklch(56% 0.13 62)",
+        "canonical": "oklch(50% 0.125 62)",
         "tonalRamp": [
           "oklch(15% 0.069 62)",
           "oklch(27% 0.087 62)",

@@ -48,6 +48,7 @@ function formatAgo(timestamp: number | null | undefined): string {
 }
 
 const TIER_LABEL: Record<string, string> = {
+  priority: 'every sweep',
   active: 'every sweep',
   recent: 'every 10m',
   quiet: 'every 30m',
@@ -224,7 +225,7 @@ export function AccountDetail({
       </div>
 
       {canManage ? (
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <h3 className="text-sm font-medium">Actions</h3>
           <p className="mt-1 text-xs text-muted-foreground">
             Checking for tweets does not repost anything: tweets already mirrored are skipped by id.
@@ -371,7 +372,7 @@ export function AccountDetail({
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <h3 className="flex items-center gap-2 text-sm font-medium">
             <Clock className="h-4 w-4" />
             Sources
@@ -415,7 +416,7 @@ export function AccountDetail({
           </div>
         </div>
 
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <h3 className="flex items-center gap-2 text-sm font-medium">
             <Gauge className="h-4 w-4" />
             Queue
@@ -470,7 +471,7 @@ export function AccountDetail({
       </div>
 
       {canManage && mapping.twitterUsernames[0] ? (
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <MirrorPreview
             twitterUsername={mapping.profileSyncSourceUsername || mapping.twitterUsernames[0]}
             mappingId={mapping.id}
@@ -480,7 +481,7 @@ export function AccountDetail({
       ) : null}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <h3 className="flex items-center gap-2 text-sm font-medium">
             <CheckCircle2 className="h-4 w-4" />
             Recent posts
@@ -508,7 +509,7 @@ export function AccountDetail({
           )}
         </div>
 
-        <div className="rounded-lg border border-border bg-background p-4">
+        <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <h3 className="text-sm font-medium">Recent activity</h3>
           {recentLogs.length === 0 ? (
             <p className="mt-3 text-sm text-muted-foreground">No log entries for this account yet.</p>

@@ -1,4 +1,5 @@
 import { Loader2 } from 'lucide-react';
+import { useEffect, useRef } from 'react';
 import { selectClassName } from '../lib/constants';
 import { useDashboard } from '../lib/dashboard-context';
 import { normalizeTwitterUsername } from '../lib/format';
@@ -24,11 +25,48 @@ export function EditMappingDialog() {
     setEditTwitterInput,
     setEditingMapping,
   } = useDashboard();
+  // Escape closes the dialog, like the add-account sheet.
+  const isOpen = Boolean(editingMapping);
+  const pressStartedOnBackdropRef = useRef(false);
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setEditingMapping(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isOpen, setEditingMapping]);
+
   return editingMapping ? (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-4 animate-backdrop-fade">
-      <Card className="w-full max-w-xl border-border/90 bg-card animate-fade-in">
+    // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click-to-dismiss; Escape is handled above
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-foreground/30 p-4 animate-backdrop-fade"
+      onMouseDown={(event) => {
+        pressStartedOnBackdropRef.current = event.target === event.currentTarget;
+      }}
+      onClick={(event) => {
+        // Only a press that both starts and ends on the backdrop dismisses, so
+        // dragging a text selection out of a field does not discard the edit.
+        if (event.target === event.currentTarget && pressStartedOnBackdropRef.current) {
+          setEditingMapping(null);
+        }
+      }}
+    >
+      {/* biome-ignore lint/a11y/useSemanticElements: styled card; a native <dialog> would change layout and animation */}
+      <Card
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="edit-account-title"
+        className="my-auto w-full max-w-xl border-border/90 bg-card animate-fade-in"
+      >
         <CardHeader>
-          <CardTitle>Edit account</CardTitle>
+          <CardTitle id="edit-account-title">Edit account</CardTitle>
           <CardDescription>Update ownership, handles, and target credentials.</CardDescription>
         </CardHeader>
         <CardContent>

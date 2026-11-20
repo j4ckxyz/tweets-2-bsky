@@ -32,22 +32,24 @@ export function JobsStrip() {
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 px-3 py-1.5">
         <button
           type="button"
-          className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm font-medium disabled:cursor-default"
+          className="flex min-w-0 flex-1 basis-full items-center gap-2 text-left text-sm font-medium disabled:cursor-default sm:basis-0"
           onClick={() => setJobsExpanded((previous) => !previous)}
           disabled={activeJobs.length === 0}
           aria-expanded={activeJobs.length > 0 ? jobsExpanded : undefined}
         >
-          <span className="relative flex h-2 w-2" aria-hidden="true">
+          <span className="relative flex h-2 w-2 shrink-0" aria-hidden="true">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/40 motion-reduce:animate-none" />
             <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
           </span>
-          {activeJobs.length > 0
-            ? `${activeJobs.length} job${activeJobs.length === 1 ? '' : 's'} running`
-            : queuedPostCount > 0
-              ? `${queuedPostCount} tweet${queuedPostCount === 1 ? '' : 's'} queued to post`
-              : (postQueue?.failed ?? 0) > 0
-                ? `${postQueue?.failed} tweet${postQueue?.failed === 1 ? '' : 's'} failed to post`
-                : `${formatState(currentStatus?.state || 'processing')} in progress`}
+          <span className="shrink-0 whitespace-nowrap">
+            {activeJobs.length > 0
+              ? `${activeJobs.length} job${activeJobs.length === 1 ? '' : 's'} running`
+              : queuedPostCount > 0
+                ? `${queuedPostCount} tweet${queuedPostCount === 1 ? '' : 's'} queued to post`
+                : (postQueue?.failed ?? 0) > 0
+                  ? `${postQueue?.failed} tweet${postQueue?.failed === 1 ? '' : 's'} failed to post`
+                  : `${formatState(currentStatus?.state || 'processing')} in progress`}
+          </span>
           {activeJobs.length > 0 ? (
             <span className="min-w-0 truncate font-normal text-muted-foreground">
               · {activeJobs.map((job) => (job.account ? `@${job.account}` : job.kind)).join(', ')}

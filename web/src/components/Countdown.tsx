@@ -27,11 +27,11 @@ function subscribeToClock(listener: () => void) {
 
 const ignoreClock = () => () => {};
 
-/** Time until the next scheduled check, shown on Overview; "--" elsewhere. */
+/** Time until the next scheduled check; "--" until the first status arrives. */
 export function Countdown() {
-  const { activeTab, status } = useDashboard();
+  const { status } = useDashboard();
   const nextCheckTime = status?.nextCheckTime;
-  const ticking = activeTab === 'overview' && Boolean(nextCheckTime);
+  const ticking = Boolean(nextCheckTime);
   const currentTime = useSyncExternalStore(ticking ? subscribeToClock : ignoreClock, () => now);
 
   if (!ticking || !nextCheckTime) {

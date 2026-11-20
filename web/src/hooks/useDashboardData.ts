@@ -42,7 +42,6 @@ export function useDashboardData(
     | 'activeTab'
     | 'authHeaders'
     | 'fediverseBridgeStatusByMappingId'
-    | 'fetchBootstrapStatus'
     | 'handleAuthFailure'
     | 'handleLogout'
     | 'isAdmin'
@@ -54,7 +53,6 @@ export function useDashboardData(
     activeTab,
     authHeaders,
     fediverseBridgeStatusByMappingId,
-    fetchBootstrapStatus,
     handleAuthFailure,
     handleLogout,
     isAdmin,
@@ -385,11 +383,17 @@ export function useDashboardData(
     [authHeaders, fetchFediverseBridgeStatuses, queryClient, setFediverseBridgeStatusByMappingId],
   );
 
+  // A replaced token (changing your own email issues a new one) reloads
+  // everything with the new credentials. Signing in needs nothing here: the
+  // queries start as soon as there is a token.
+  const previousTokenRef = useRef(token);
   useEffect(() => {
-    if (!token) {
-      void fetchBootstrapStatus();
+    const previousToken = previousTokenRef.current;
+    previousTokenRef.current = token;
+    if (token && previousToken && previousToken !== token) {
+      void fetchData();
     }
-  }, [token, fetchBootstrapStatus]);
+  }, [fetchData, token]);
 
   useEffect(() => {
     if (!token || activeTab !== 'accounts' || mappings.length === 0) {

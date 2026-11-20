@@ -21,6 +21,7 @@ export const mirrorSettingsFromMapping = (mapping: Partial<MirrorSettings>): Mir
   imageLayout: mapping.imageLayout ?? 'gallery',
   botDisplayNameSuffix: mapping.botDisplayNameSuffix !== false,
   syncDeletes: mapping.syncDeletes === true,
+  priority: mapping.priority === true,
 });
 
 export const defaultMappingForm = (): MappingFormState => ({

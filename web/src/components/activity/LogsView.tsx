@@ -65,11 +65,11 @@ export function LogsView() {
             </Button>
             <DropdownMenu
               trigger={
-                <Button size="sm" variant="outline">
-                  <Download className="mr-1 h-3.5 w-3.5" />
+                <>
+                  <Download className="h-3.5 w-3.5" />
                   Download
-                  <ChevronDown className="ml-1 h-3.5 w-3.5" />
-                </Button>
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </>
               }
             >
               <DropdownMenuLabel>Export current filter</DropdownMenuLabel>

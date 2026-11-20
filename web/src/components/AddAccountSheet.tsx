@@ -53,13 +53,19 @@ export function AddAccountSheet() {
       onClick={closeAddAccountSheet}
     >
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: click handler only stops backdrop propagation, it is not an interaction */}
+      {/* biome-ignore lint/a11y/useSemanticElements: styled drawer; a native <dialog> would change layout and animation */}
       <aside
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="add-account-title"
         className="flex h-[95vh] w-full max-w-xl flex-col rounded-t-xl border border-border bg-card shadow-[0_16px_48px_-12px_oklch(var(--foreground)/0.3)] sm:h-full sm:rounded-none sm:rounded-l-xl animate-slide-up sm:animate-slide-in-right"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-start justify-between border-b border-border/70 px-5 py-4">
           <div>
-            <h2 className="text-lg font-semibold">Add account</h2>
+            <h2 id="add-account-title" className="text-lg font-semibold">
+              Add account
+            </h2>
             <p className="text-sm text-muted-foreground">Map X accounts to a Bluesky mirror.</p>
           </div>
           <Button variant="ghost" size="icon" onClick={closeAddAccountSheet} aria-label="Close add account flow">
