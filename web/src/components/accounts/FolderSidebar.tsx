@@ -1,7 +1,7 @@
 import { ChevronDown, Folder, Plus, Save, Trash2 } from 'lucide-react';
 import { DEFAULT_GROUP_NAME } from '../../lib/constants';
 import { useDashboard } from '../../lib/dashboard-context';
-import { getMappingGroupMeta } from '../../lib/format';
+import { getGroupKey, getMappingGroupMeta } from '../../lib/format';
 import { cn } from '../../lib/utils';
 import { DiscoveryPanel } from '../DiscoveryPanel';
 import { FolderGlyph } from '../FolderGlyph';
@@ -150,7 +150,11 @@ export function FolderSidebar() {
                           disabled={isGroupActionBusy || !draft.name.trim()}
                           title="Save folder"
                           onClick={() => {
-                            void handleRenameGroup(group.key);
+                            void handleRenameGroup(group.key).then((renamed) => {
+                              if (renamed && selectedFolderKey === group.key) {
+                                setSelectedFolderKey(getGroupKey(draft.name));
+                              }
+                            });
                           }}
                         >
                           <Save className="h-4 w-4" />

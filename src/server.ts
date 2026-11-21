@@ -372,7 +372,10 @@ function ensureGroupExists(config: AppConfig, name?: string, emoji?: string) {
 
   if (normalizedEmoji) {
     const existingGroupName = normalizeGroupName(config.groups[existingIndex]?.name) || normalizedName;
+    // Keep the folder's Bluesky list and starter pack: rebuilding it from name
+    // and emoji alone made the next discovery sync create duplicates.
     config.groups[existingIndex] = {
+      ...config.groups[existingIndex],
       name: existingGroupName,
       emoji: normalizedEmoji,
     };
@@ -1588,18 +1591,48 @@ function reconcileUpdateJobState() {
     return;
   }
 
+  // A setsid-launched updater reports its own pid and exit code through files
+  // next to its log, because its launcher exits straight away.
+  const logFile = updateJobState.logFile;
+  if (!updateJobState.pid && logFile) {
+    const pid = Number(readSmallFile(`${logFile}.pid`));
+    if (Number.isInteger(pid) && pid > 0) {
+      updateJobState = { ...updateJobState, pid };
+    } else if (!fs.existsSync(`${logFile}.exit`) && Date.now() - (updateJobState.startedAt ?? 0) < 30_000) {
+      return;
+    }
+  }
+
   if (isProcessAlive(updateJobState.pid)) {
     return;
   }
 
+  const recordedExit = logFile ? Number.parseInt(readSmallFile(`${logFile}.exit`) ?? '', 10) : Number.NaN;
   updateJobState = {
     ...updateJobState,
     running: false,
     finishedAt: updateJobState.finishedAt || Date.now(),
-    exitCode: updateJobState.exitCode ?? null,
+    exitCode: updateJobState.exitCode ?? (Number.isInteger(recordedExit) ? recordedExit : null),
     signal: updateJobState.signal ?? null,
   };
 }
+
+function readSmallFile(filePath: string): string | undefined {
+  try {
+    return fs.readFileSync(filePath, 'utf8').trim();
+  } catch {
+    return undefined;
+  }
+}
+
+// PM2 restarts the app by killing its whole process tree, found by parent pid.
+// An updater started as a plain child of the app is in that tree, so it was
+// killed by its own `pm2 delete` before it could start the new version.
+// `setsid -f` forks it away so its parent becomes init.
+const SETSID_AVAILABLE = process.platform === 'linux' && Boolean(safeExec('command -v setsid'));
+const UPDATER_WRAPPER =
+  'echo $$ > "$0.pid"; bash "$1"; code=$?; echo "$code" > "$0.exit"; ' +
+  'echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Updater exited code=$code" >> "$0"; exit "$code"';
 
 function getUpdateStatusPayload(): UpdateStatusPayload {
   reconcileUpdateJobState();
@@ -1626,16 +1659,22 @@ function startUpdateJob(startedBy: string): { ok: true; state: UpdateStatusPaylo
   fs.writeSync(logFd, `[${new Date().toISOString()}] Update requested by ${startedBy}\n`);
 
   try {
-    const child = spawn('bash', [UPDATE_SCRIPT_PATH], {
-      cwd: APP_ROOT_DIR,
-      detached: true,
-      stdio: ['ignore', logFd, logFd],
-      env: process.env,
-    });
+    const child = SETSID_AVAILABLE
+      ? spawn('setsid', ['-f', 'bash', '-c', UPDATER_WRAPPER, logFile, UPDATE_SCRIPT_PATH], {
+          cwd: APP_ROOT_DIR,
+          stdio: ['ignore', logFd, logFd],
+          env: process.env,
+        })
+      : spawn('bash', [UPDATE_SCRIPT_PATH], {
+          cwd: APP_ROOT_DIR,
+          detached: true,
+          stdio: ['ignore', logFd, logFd],
+          env: process.env,
+        });
 
     updateJobState = {
       running: true,
-      pid: child.pid,
+      pid: SETSID_AVAILABLE ? undefined : child.pid,
       startedAt: Date.now(),
       startedBy,
       logFile,
@@ -1655,6 +1694,9 @@ function startUpdateJob(startedBy: string): { ok: true; state: UpdateStatusPaylo
     });
 
     child.on('exit', (code, signal) => {
+      // With setsid, this is the launcher exiting; the updater reports through
+      // its pid and exit files. Only a failed launch is news here.
+      if (SETSID_AVAILABLE && code === 0) return;
       const success = code === 0;
       fs.appendFileSync(
         logFile,
@@ -3028,15 +3070,20 @@ app.post('/api/mappings/:id/delete-all-posts', authenticateToken, requireAdmin, 
   // hand on the account, and has to be asked for explicitly.
   const scope: DeletePostsScope = req.body?.scope === 'all' ? 'all' : 'mirrored';
   try {
-    const { deleted } = await deletePosts(id, scope);
+    const { deleted, failed } = await deletePosts(id, scope);
     res.json({
       success: true,
       deleted,
+      failed,
       scope,
+      // Some deletes failed (often Bluesky's hourly write limit): those posts
+      // are still up and still counted as mirrored, and mirroring was not reset.
       message:
-        scope === 'all'
-          ? `Deleted all ${deleted} posts from ${mapping.bskyIdentifier}. Only tweets posted from now on will be mirrored.`
-          : `Deleted ${deleted} mirrored posts from ${mapping.bskyIdentifier}. Posts written directly on Bluesky were kept, and only tweets posted from now on will be mirrored.`,
+        failed > 0
+          ? `Deleted ${deleted} posts from ${mapping.bskyIdentifier}, but ${failed} could not be deleted and are still up. Run this again later to retry them.`
+          : scope === 'all'
+            ? `Deleted all ${deleted} posts from ${mapping.bskyIdentifier}. Only tweets posted from now on will be mirrored.`
+            : `Deleted ${deleted} mirrored posts from ${mapping.bskyIdentifier}. Posts written directly on Bluesky were kept, and only tweets posted from now on will be mirrored.`,
     });
   } catch (err) {
     console.error('Failed to delete all posts:', err);
@@ -4233,6 +4280,13 @@ export function clearBackfill(id: string, requestId?: string) {
 }
 
 // Serve the frontend for any other route (middleware approach for Express 5)
+// Unknown API routes and missing build assets get a real 404. Serving the
+// dashboard page for them answered a typo'd API call with HTML and a 200, and
+// a stale script URL after an update with HTML the browser refuses to run.
+app.use(['/api', '/assets'], (_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
 app.use((_req, res) => {
   res.setHeader('Cache-Control', 'no-store, max-age=0, must-revalidate');
   res.setHeader('Pragma', 'no-cache');

@@ -289,6 +289,71 @@ realLog('\nDeleting posts\n');
   );
 }
 
+realLog('\nDeleting posts when Bluesky refuses some deletes\n');
+{
+  const did = 'did:plc:dave';
+  const uri = (rkey: string) => `at://${did}/app.bsky.feed.post/${rkey}`;
+  updateConfig((fresh) => {
+    fresh.mappings.push({ ...baseMapping, id: 'm4', twitterUsernames: ['dave'], bskyIdentifier: 'dave.test' });
+  });
+  for (let index = 0; index < 10; index++) {
+    dbService.saveTweet({
+      twitter_id: String(400 + index),
+      twitter_username: 'dave',
+      bsky_identifier: 'dave.test',
+      bsky_uri: uri(`p${index}`),
+      bsky_cid: 'c',
+      status: 'migrated',
+    });
+  }
+  postQueueService.enqueue([
+    {
+      twitter_id: '499',
+      bsky_identifier: 'dave.test',
+      mapping_id: 'm4',
+      twitter_username: 'dave',
+      kind: 'scheduled',
+      tweet_json: '{}',
+    },
+  ]);
+  const live = new Set(Array.from({ length: 10 }, (_, index) => uri(`p${index}`)));
+  let calls = 0;
+  const agent = {
+    session: { did },
+    com: {
+      atproto: {
+        repo: {
+          listRecords: async () => ({ data: { records: [...live].map((entry) => ({ uri: entry, value: {} })) } }),
+          // The PDS starts refusing after four deletes (write limit, dropped session).
+          deleteRecord: async (input: { rkey: string }) => {
+            calls += 1;
+            if (calls > 4) throw new Error('Rate Limit Exceeded');
+            live.delete(uri(input.rkey));
+          },
+        },
+      },
+    },
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: mock agent
+  const result = await deletePosts('m4', 'mirrored', agent as any);
+  assert(
+    result.deleted === 4 && result.failed === 6,
+    `Failed deletes are reported (${result.deleted}/${result.failed})`,
+  );
+  const stillMirrored = dbService.getTweetsForIdentifierWithUris('dave.test').map((row) => row.bsky_uri);
+  assert(
+    stillMirrored.length === 6 && stillMirrored.every((entry) => entry && live.has(entry)),
+    `Only rows whose posts are gone are marked deleted (${stillMirrored.length} left)`,
+  );
+  assert(!getConfig().mappings.find((m) => m.id === 'm4')?.mirrorFromMs, 'Checks do not restart while posts remain');
+  assert(postQueueService.getQueuedIdSet('dave.test').size === 1, 'The queue is left alone');
+
+  calls = -100;
+  // biome-ignore lint/suspicious/noExplicitAny: mock agent
+  const retry = await deletePosts('m4', 'mirrored', agent as any);
+  assert(retry.deleted === 6 && retry.failed === 0 && live.size === 0, 'Running it again deletes the rest');
+}
+
 realLog('\nQueue and stats queries\n');
 {
   const many = Array.from({ length: 300 }, (_, index) => ({
@@ -312,6 +377,25 @@ realLog('\nQueue and stats queries\n');
   ]);
   const bobItems = postQueueService.listItems({ mappingIds: new Set(['m2']), limit: 50 });
   assert(bobItems.length === 1, "An account's queue rows show up even behind another account's 300-row backfill");
+
+  // 201 distinct, newer failure reasons for carol must not hide bob's one.
+  rawDb
+    .prepare(
+      "UPDATE post_queue SET status = 'failed', failure_stage = 'media', last_error = 'Could not fetch ' || twitter_id, updated_at = ? WHERE mapping_id = 'm3' AND CAST(twitter_id AS INTEGER) < 9201",
+    )
+    .run(Date.now());
+  rawDb
+    .prepare(
+      "UPDATE post_queue SET status = 'failed', failure_stage = 'post', last_error = 'rejected', updated_at = ? WHERE twitter_id = '9999'",
+    )
+    .run(Date.now() - 60_000);
+  const bobFailures = postQueueService.summarizeFailures(new Set(['m2']));
+  assert(
+    bobFailures.length === 1 && bobFailures[0]?.reason === 'rejected',
+    `An account's failure summary survives another account's 201 failure reasons (${bobFailures.length})`,
+  );
+  assert(postQueueService.summarizeFailures(new Set()).length === 0, 'An empty mapping filter summarises nothing');
+  rawDb.prepare("UPDATE post_queue SET status = 'pending', failure_stage = NULL, last_error = NULL").run();
 
   // A row written 6 days and 23 hours ago is inside a 7-day window.
   dbService.saveTweet({
@@ -404,8 +488,63 @@ realLog('\nProfile helpers\n');
     'A bio edited by hand on Bluesky is left alone',
   );
   assert(!profile.canOverwriteDescription('Written by hand', undefined), '…including when nothing was mirrored before');
+  const shopUrl = 'https://shop.examplefc.com/collections/2026-home-kit/products/adult-home-shirt?variant=44012345678';
+  const clubBio = `Official account of the Example Football Club. Tickets, fixtures, news and behind-the-scenes from the training ground. Shop: ${shopUrl}`;
+  const clubDescription = profile.buildMirroredDescription(clubBio, 'ExampleFC');
+  assert(
+    !/https:\/\/shop\S*$/.test(clubDescription) && clubDescription.endsWith('Shop:'),
+    `A bio cut short never ends on half a link (…${clubDescription.slice(-24)})`,
+  );
+  const fitsBio = `Tickets: ${'x'.repeat(10)} https://examplefc.com`;
+  assert(
+    profile.buildMirroredDescription(fitsBio, 'ExampleFC').endsWith('https://examplefc.com'),
+    'A link that fits is kept whole',
+  );
   const changes = profile.hasMirrorStateChanges({ website: undefined }, { website: 'https://x.com/nasa' });
   assert(changes.website, 'A new website value counts as a profile change');
+}
+
+realLog('\nConfig file safety\n');
+{
+  const configModule = await import('../src/config-manager.js');
+  const file = path.join(scratchDir, 'config.json');
+  const backup = `${file}.bak`;
+  const good = getConfig();
+  const modeOf = (target: string) => fs.statSync(target).mode & 0o777;
+
+  fs.chmodSync(file, 0o640);
+  saveConfig(getConfig());
+  assert(modeOf(file) === 0o640, `A save keeps the file's existing permissions (${modeOf(file).toString(8)})`);
+  fs.rmSync(file);
+  saveConfig(good);
+  assert(modeOf(file) === 0o600, `A brand-new config file is owner-only (${modeOf(file).toString(8)})`);
+
+  // Two saves leave the first one in the backup; then a bad hand edit.
+  saveConfig(good);
+  fs.writeFileSync(file, '{ "mappings": oops');
+  const recovered = getConfig();
+  assert(recovered.mappings.length === good.mappings.length, 'A broken config is recovered from the backup');
+  let backupParses = true;
+  try {
+    JSON.parse(fs.readFileSync(backup, 'utf8'));
+  } catch {
+    backupParses = false;
+  }
+  assert(backupParses, 'Recovery does not copy the broken file over the backup');
+  assert(configModule.isConfigUnreadable?.() === false, 'A recovered config is not reported unreadable');
+
+  fs.writeFileSync(file, '{ broken');
+  fs.writeFileSync(backup, '{ broken too');
+  const fallback = getConfig();
+  assert(configModule.isConfigUnreadable?.() === true, 'An unrecoverable config is reported unreadable');
+  fallback.mappings.push({ ...baseMapping, id: 'ghost', twitterUsernames: ['ghost'], bskyIdentifier: 'ghost.test' });
+  assert(getConfig().mappings.length === 0, 'The empty fallback config is a fresh object every time');
+
+  fs.writeFileSync(file, `${JSON.stringify(good, null, 2)}\n`);
+  assert(
+    getConfig().mappings.length === good.mappings.length && !configModule.isConfigUnreadable?.(),
+    '…and clears once fixed',
+  );
 }
 
 realLog(`\n${passed} passed, ${failed} failed`);

@@ -101,6 +101,33 @@ console.log('\nGraphemes and bytes');
   assert(familyChunks.join('') === family, 'ZWJ sequences are never split apart');
 }
 
+console.log('\nAlways makes progress');
+{
+  // Run in a child with a deadline: these inputs used to loop forever.
+  const { spawnSync } = await import('node:child_process');
+  const probe = (expression: string) => {
+    const run = spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `import { splitText } from ${JSON.stringify(new URL('../src/text-split.ts', import.meta.url).pathname)}; console.log(JSON.stringify(${expression}));`,
+      ],
+      { timeout: 10_000, encoding: 'utf8' },
+    );
+    return run.status === 0 ? (JSON.parse(run.stdout) as string[]) : null;
+  };
+
+  // One base letter plus 1600 combining accents: one grapheme, 3201 bytes.
+  const oversized = probe(`splitText('hello ' + 'a' + '\\u0301'.repeat(1600) + ' world')`);
+  assert(oversized !== null, 'A single grapheme over the byte cap does not hang the splitter');
+  assert(
+    oversized?.join(' ') === `hello a${'\u0301'.repeat(1600)} world`,
+    'Text around an oversized grapheme survives the split',
+  );
+  const zero = probe(`splitText('hello world', 0)`);
+  assert(zero !== null && zero.join('') === 'helloworld', 'A limit of 0 still terminates');
+}
+
 const total = failures === 0;
 console.log(`\n${total ? 'All tests passed' : `${failures} test(s) failed`}`);
 process.exit(total ? 0 : 1);

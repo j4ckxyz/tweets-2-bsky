@@ -31,7 +31,7 @@ import {
   parseTweetStatusUrl,
   resolvePostLangs,
 } from './compose.js';
-import { getConfig, saveConfig, updateConfig } from './config-manager.js';
+import { getConfig, isConfigUnreadable, saveConfig, updateConfig } from './config-manager.js';
 import { DELETE_SYNC_MIN_MISSING_SPAN_MS, checkSourceTweet, syncDeletesForAccount } from './delete-sync.js';
 import { refreshDiscoveryDaily } from './discovery-runner.js';
 import type { ErrorDetail } from './event-log.js';
@@ -1035,7 +1035,13 @@ async function pollForVideoProcessing(agent: BskyAgent, jobId: string, signal?: 
   return blob!;
 }
 
-async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<any> {
+// A link card only needs the page's <head>. axios `timeout` is an idle timer,
+// so without a byte cap and a hard deadline a large or endless response (a
+// file download, a live stream) held the batch until its watchdog fired.
+const LINK_CARD_MAX_BYTES = 5 * 1024 * 1024;
+const LINK_CARD_DEADLINE_MS = 20_000;
+
+async function fetchEmbedUrlCard(agent: BskyAgent, url: string, signal?: AbortSignal): Promise<any> {
   try {
     const response = await axios.get(url, {
       headers: {
@@ -1046,6 +1052,8 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<any> {
       },
       timeout: 10000,
       maxRedirects: 5,
+      maxContentLength: LINK_CARD_MAX_BYTES,
+      signal: deadlineSignal(LINK_CARD_DEADLINE_MS, signal),
     });
 
     const $ = cheerio.load(response.data);
@@ -1061,7 +1069,7 @@ async function fetchEmbedUrlCard(agent: BskyAgent, url: string): Promise<any> {
         imageUrl = new URL(imageUrl, baseUrl.origin).toString();
       }
       try {
-        const { buffer, mimeType } = await downloadMedia(imageUrl);
+        const { buffer, mimeType } = await downloadMedia(imageUrl, 60_000, signal);
         // The og:image URL can 404/redirect into an HTML error page instead of
         // an image (server still answers 200), and app.bsky.embed.external's
         // thumb caps at 1,000,000 bytes — tighter than the 2MB post-image
@@ -1255,8 +1263,9 @@ async function fetchUserTweets(
         const tweetId = tweet.id_str || tweet.id;
 
         // Early stopping logic: if we see 3 consecutive tweets we've already processed, stop.
-        // This assumes timeline order (mostly true).
-        if (processedIds && tweetId && processedIds.has(tweetId)) {
+        // This assumes timeline order (mostly true). The pinned tweet sits on
+        // top whatever its age, so it says nothing about where new tweets end.
+        if (!tweet.isPin && processedIds && tweetId && processedIds.has(tweetId)) {
           consecutiveProcessedCount++;
           if (consecutiveProcessedCount >= 3) {
             console.log(`[${username}] 🛑 Found 3 consecutive processed tweets. Stopping fetch early.`);
@@ -1977,10 +1986,14 @@ export async function processTweets(
 
           let parentBackfilled = false;
           let parentLookupError: ErrorDetail | undefined;
+          // Set once Twitter has answered. An error before that means we never
+          // learned whose the parent is; one after it came from mirroring it.
+          let parentFetched = false;
           try {
             const scraper = await getTwitterScraper(sessionKey);
             if (scraper) {
               const parentRaw = await scraper.getTweet(replyStatusId);
+              parentFetched = true;
               if (parentRaw) {
                 const parentTweet = mapScraperTweetToLocalTweet(parentRaw);
                 const parentAuthor = parentTweet.user?.screen_name;
@@ -2017,6 +2030,8 @@ export async function processTweets(
             }
           } catch (e) {
             parentLookupError = toErrorDetail(e);
+            // The nested run hit a rejected session: stop this run too.
+            if (parentFetched && isAuthFailure(parentLookupError)) throw e;
             logEvent({
               level: 'warn',
               stage: 'twitter',
@@ -2029,6 +2044,19 @@ export async function processTweets(
             });
           }
 
+          if (!parentBackfilled && parentLookupError && !parentFetched) {
+            // We could not reach Twitter to find out whose the parent is. Leave
+            // the reply to be retried rather than writing it off as external.
+            recordOutcome(context, tweetId, {
+              status: 'failed',
+              stage: 'thread',
+              reason: `Parent tweet ${replyStatusId} could not be fetched (${describeErrorDetail(parentLookupError)}); will retry.`,
+              detail: parentLookupError,
+              retryable: true,
+              durationMs: Date.now() - tweetStartedAt,
+            });
+            continue;
+          }
           if (!parentBackfilled) {
             // Distinguish "this reply is genuinely external" from "we could not
             // reach Twitter to find out" — the first is a permanent skip, the
@@ -2538,9 +2566,12 @@ export async function processTweets(
 
       const linkToEmbed = potentialLinks[potentialLinks.length - 1];
       if (linkToEmbed) {
+        console.log(`[${twitterUsername}] 🃏 Fetching link card for: ${linkToEmbed}`);
+        linkCard = await fetchEmbedUrlCard(agent, linkToEmbed, context?.signal);
+
         // Optimization: If text is too long, but removing the link makes it fit, do it!
-        // The link will be present in the embed card anyway.
-        if (graphemeLength(text) > BSKY_POST_LIMIT && text.includes(linkToEmbed)) {
+        // Only once the card exists: it is what carries the link instead.
+        if (linkCard && graphemeLength(text) > BSKY_POST_LIMIT && text.includes(linkToEmbed)) {
           const withoutLink = text.replace(linkToEmbed, '').trim();
           if (graphemeLength(withoutLink) <= BSKY_POST_LIMIT) {
             console.log(
@@ -2550,9 +2581,6 @@ export async function processTweets(
             text = withoutLink.replace(/\s\.$/, '.').replace(/\s\s+/g, ' ');
           }
         }
-
-        console.log(`[${twitterUsername}] 🃏 Fetching link card for: ${linkToEmbed}`);
-        linkCard = await fetchEmbedUrlCard(agent, linkToEmbed);
       }
     }
 
@@ -2580,18 +2608,42 @@ export async function processTweets(
     // A post with neither text nor an embed is rejected by every PDS, so it can
     // never succeed no matter how many times it is retried. This happens for
     // real: a media-only tweet whose t.co links get stripped during cleanup and
-    // whose upload then fails leaves an empty record behind. Record it as a
-    // skip with the actual reason instead of burning the retry budget.
+    // whose upload then fails leaves an empty record behind. Only a tweet that
+    // never had anything to post is a skip; lost media is retried below.
     if (text.trim().length === 0 && !hasEmbed) {
-      const reason =
-        droppedMedia.length > 0
-          ? `Nothing left to post: the tweet had no text and its media could not be uploaded (${droppedMedia
-              .map((entry) => `${entry.type}: ${entry.reason}`)
-              .join('; ')}).`
-          : 'Nothing left to post: the tweet had no text and no embeddable media.';
-      skip(tweetId, 'compose', reason, tweetText, 'warn', 'tweet.skipped.empty', {
-        durationMs: Date.now() - tweetStartedAt,
-      });
+      if (droppedMedia.length > 0) {
+        // The media is the whole tweet and a download or upload can fail for a
+        // passing reason, so this is a failure to retry (bounded by the queue's
+        // attempt cap), not a skip that writes the tweet off for good.
+        const reason = `Nothing left to post: the tweet had no text and its media could not be uploaded (${droppedMedia
+          .map((entry) => `${entry.type}: ${entry.reason}`)
+          .join('; ')}).`;
+        logEvent({
+          level: 'warn',
+          stage: 'post',
+          event: 'tweet.failed.media',
+          message: `Tweet ${tweetId} was not posted to ${bskyIdentifier}. ${reason}`,
+          twitterId: tweetId,
+          ...logScope,
+        });
+        recordOutcome(context, tweetId, {
+          status: 'failed',
+          stage: 'media',
+          reason,
+          retryable: true,
+          durationMs: Date.now() - tweetStartedAt,
+        });
+        continue;
+      }
+      skip(
+        tweetId,
+        'compose',
+        'Nothing left to post: the tweet had no text and no embeddable media.',
+        tweetText,
+        'warn',
+        'tweet.skipped.empty',
+        { durationMs: Date.now() - tweetStartedAt },
+      );
       continue;
     }
 
@@ -2789,7 +2841,12 @@ export async function processTweets(
               // The old loop retried everything three times. A rejected record
               // (400) or a deleted account (403) fails identically every time,
               // so those three attempts only delayed the real explanation.
-              if (attempt === maxAttempts || attemptDetail.retryable === false || context?.signal?.aborted) {
+              if (
+                attempt === maxAttempts ||
+                attemptDetail.retryable === false ||
+                isAuthFailure(attemptDetail) ||
+                context?.signal?.aborted
+              ) {
                 logEvent({
                   level: 'error',
                   stage: 'bluesky',
@@ -3018,6 +3075,16 @@ export async function processTweets(
         detail,
         retryable: detail?.retryable ?? true,
         durationMs: Date.now() - tweetStartedAt,
+      });
+    }
+
+    // A rejected session fails every later post the same way. Stop here so the
+    // caller sees it: runPostBatch drops the cached agent, and the tweets not
+    // reached yet stay queued without being charged an attempt.
+    if (postFailure && isAuthFailure(postFailure.detail)) {
+      throw Object.assign(new Error(describeErrorDetail(postFailure.detail)), {
+        status: postFailure.detail.status,
+        code: postFailure.detail.code,
       });
     }
 
@@ -3813,6 +3880,14 @@ async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionK
       }
     }
 
+    // A source renamed while these waited keeps its old @handle in the stored
+    // copies, which the author check would then reject. Relabel only tweets
+    // from the same numeric account, so anyone else's tweet is still dropped.
+    const sourceUserId = sourceActivityService.get(batch.twitter_username)?.twitter_user_id;
+    for (const tweet of tweets) {
+      if (sourceUserId && tweet.user?.id_str === sourceUserId) tweet.user.screen_name = batch.twitter_username;
+    }
+
     // Queue batches arrive oldest-first; processTweets expects timeline order
     // (newest first) and reverses internally.
     tweets.reverse();
@@ -3865,13 +3940,7 @@ async function runPostBatch(mapping: AccountMapping, batch: QueueBatch, sessionK
     // An expired or rejected session poisons every subsequent post for this
     // account. Drop the cached agent so the next batch signs in again instead
     // of replaying the same auth failure until the tweets hit their retry cap.
-    const authFailure =
-      batchFailure.status === 401 ||
-      batchFailure.status === 403 ||
-      /expiredtoken|invalidtoken|authmissing|not authenticated|login failed/i.test(
-        `${batchFailure.code || ''} ${batchFailure.message || ''}`,
-      );
-    if (authFailure) {
+    if (isAuthFailure(batchFailure)) {
       invalidateAgent(mapping.bskyIdentifier, mapping.bskyServiceUrl);
       logEvent({
         level: 'warn',
@@ -4293,6 +4362,11 @@ const activeTasks = new Map<string, Promise<void>>();
 const DEFAULT_BACKFILL_ACCOUNT_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_SCHEDULED_ACCOUNT_TIMEOUT_MS = 20 * 60 * 1000;
 const PROFILE_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// A failed automatic profile sync waits this long before the next try. Only a
+// success moves lastProfileSyncAt (the dashboard shows it), so without this a
+// failing sync ran again on every sweep.
+const PROFILE_SYNC_RETRY_MS = 60 * 60 * 1000;
+const profileSyncFailedAt = new Map<string, number>();
 let profileSyncStateWriteQueue: Promise<void> = Promise.resolve();
 
 // Errors reaching this pipeline come from four very different places — the AT
@@ -4361,6 +4435,10 @@ function toErrorDetail(error: unknown): ErrorDetail {
 // permissive direction is what made a malformed post burn eight attempts and
 // six hours of backoff before anyone could see why it was rejected.
 function isRetryableFailure(detail: ErrorDetail): boolean {
+  // Checked before the 4xx rule: an expired session or a suspended account
+  // comes back as 400/401/403 too, but it is fixed by signing in again (or by a
+  // human), not by changing the post, so the tweet must stay queued.
+  if (isAuthFailure(detail)) return true;
   const status = detail.status;
   if (typeof status === 'number') {
     // 429 and 5xx are transient; other 4xx mean the request itself is wrong
@@ -4403,6 +4481,17 @@ function isRetryableFailure(detail: ErrorDetail): boolean {
     return true;
   }
   return true;
+}
+
+/** The session or the account is the problem, not the tweet. */
+function isAuthFailure(detail: ErrorDetail): boolean {
+  return (
+    detail.status === 401 ||
+    detail.status === 403 ||
+    /expiredtoken|invalidtoken|authmissing|authenticationrequired|accounttakedown|accountdeactivated|accountsuspended|not authenticated|login failed/i.test(
+      `${detail.code || ''} ${detail.message || ''}`,
+    )
+  );
 }
 
 /** Compact one-line reason suitable for a queue row or a log message. */
@@ -4827,6 +4916,10 @@ async function maybeSyncMappingProfileInBackground(
   if (!isProfileSyncDue(mapping)) {
     return;
   }
+  const failedAt = profileSyncFailedAt.get(mapping.id);
+  if (failedAt !== undefined && Date.now() - failedAt < PROFILE_SYNC_RETRY_MS) {
+    return;
+  }
 
   const sourceTwitterUsername = resolveProfileSyncSourceForMapping(mapping);
   if (!sourceTwitterUsername) {
@@ -4869,6 +4962,7 @@ async function maybeSyncMappingProfileInBackground(
 
     Object.assign(mapping, applyProfileMirrorSyncState(mapping, sourceTwitterUsername, result));
     await persistProfileSyncResult(mapping.id, sourceTwitterUsername, result);
+    profileSyncFailedAt.delete(mapping.id);
 
     // The daily profile read is also the one place a protected account shows
     // itself: its timeline just comes back empty, which looks like silence.
@@ -4889,6 +4983,7 @@ async function maybeSyncMappingProfileInBackground(
 
     console.log(`${logPrefix} ✅ Profile sync completed.`);
   } catch (error) {
+    profileSyncFailedAt.set(mapping.id, Date.now());
     const message = describeError(error);
     console.error(`${logPrefix} ❌ Automatic profile sync failed: ${message}`);
     if (/suspended|does not exist|not found|private/i.test(message)) {
@@ -5426,10 +5521,12 @@ async function main(): Promise<void> {
 
   purgeStaleFailedQueueRows();
   // Drop rows whose mapping was deleted while the app was down — nothing can
-  // ever claim them.
+  // ever claim them. Not when the config has no mappings at all: an unreadable
+  // config.json loads as the empty default, and that would wipe the queue.
   const knownMappingIds = new Set(getConfig().mappings.map((mapping) => mapping.id));
+  const configTrusted = !isConfigUnreadable() && knownMappingIds.size > 0;
   for (const entry of postQueueService.getCounts().perMapping) {
-    if (!knownMappingIds.has(entry.mapping_id)) {
+    if (configTrusted && !knownMappingIds.has(entry.mapping_id)) {
       const removed = postQueueService.deleteByMappingId(entry.mapping_id);
       logEvent({
         level: 'info',
@@ -5608,10 +5705,23 @@ async function main(): Promise<void> {
       // Fetch-only sweep: new tweets land in the post queue and the workers
       // post them in parallel, so the next check is never blocked by posting.
       const forced = takeForcedSweep();
-      await runFetchSweep(config.mappings, {
-        force: forced.all,
-        forceMappingIds: forced.mappingIds.size > 0 ? forced.mappingIds : undefined,
-      });
+      try {
+        await runFetchSweep(config.mappings, {
+          force: forced.all,
+          forceMappingIds: forced.mappingIds.size > 0 ? forced.mappingIds : undefined,
+        });
+      } catch (err) {
+        // One bad sweep (a locked database, a housekeeping bug) must not end the
+        // scheduler: the post workers would carry on with nothing feeding the
+        // queue. Log it; the next interval sweeps again.
+        logEvent({
+          level: 'error',
+          stage: 'sweep',
+          event: 'sweep.failed',
+          message: `Scheduled sweep failed: ${describeError(err)}`,
+          error: toErrorDetail(err),
+        });
+      }
 
       updateAppStatus({ state: 'idle', message: 'Scheduled checks complete' });
     }
@@ -5627,7 +5737,18 @@ async function main(): Promise<void> {
 // script through a wrapper (pm2 with a custom interpreter) would otherwise
 // quietly never start the daemon.
 if (process.env.TWEETS2BSKY_NO_AUTOSTART !== '1') {
-  main();
+  main().catch((err) => {
+    // Only a failure outside the scheduler loop gets here (startup, a one-shot
+    // CLI run). Record why, then exit non-zero so a process manager restarts it.
+    logEvent({
+      level: 'error',
+      stage: 'system',
+      event: 'daemon.crashed',
+      message: `Stopped: ${describeError(err)}`,
+      error: toErrorDetail(err),
+    });
+    process.exit(1);
+  });
 }
 
 export { enqueueTweetsForMapping, mapScraperTweetToLocalTweet, uploadToBluesky, reconcilePostedButUnrecorded };

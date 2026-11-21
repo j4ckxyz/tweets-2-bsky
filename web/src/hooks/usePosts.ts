@@ -29,17 +29,17 @@ export function usePosts(
     | 'authHeaders'
     | 'groupOptions'
     | 'mappingsByBskyIdentifier'
+    | 'enrichedPosts'
     | 'mappingsByTwitterUsername'
-    | 'postedActivity'
     | 'postsSearchQuery'
   >,
 ) {
   const {
     authHeaders,
+    enrichedPosts,
     groupOptions,
     mappingsByBskyIdentifier,
     mappingsByTwitterUsername,
-    postedActivity,
     postsSearchQuery,
   } = deps;
 
@@ -57,14 +57,18 @@ export function usePosts(
       mappingsByTwitterUsername.get(normalizeTwitterUsername(post.twitterUsername)),
     [mappingsByBskyIdentifier, mappingsByTwitterUsername],
   );
+  // Filter the whole fetched feed, then keep the first 12: cutting to 12 first
+  // left a folder empty whenever its posts were further down.
   const filteredPostedActivity = useMemo(
     () =>
-      postedActivity.filter((post) => {
-        if (postsGroupFilter === 'all') return true;
-        const mapping = resolveMappingForPost(post);
-        return getMappingGroupMeta(mapping).key === postsGroupFilter;
-      }),
-    [postedActivity, postsGroupFilter, resolveMappingForPost],
+      enrichedPosts
+        .filter((post) => {
+          if (postsGroupFilter === 'all') return true;
+          const mapping = resolveMappingForPost(post);
+          return getMappingGroupMeta(mapping).key === postsGroupFilter;
+        })
+        .slice(0, 12),
+    [enrichedPosts, postsGroupFilter, resolveMappingForPost],
   );
   // Local post history search: debounced while typing; the previous results
   // stay on screen until the new ones arrive.

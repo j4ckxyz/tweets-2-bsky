@@ -1,5 +1,6 @@
 import { Loader2 } from 'lucide-react';
 import { useEffect, useRef } from 'react';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import { selectClassName } from '../lib/constants';
 import { useDashboard } from '../lib/dashboard-context';
 import { normalizeTwitterUsername } from '../lib/format';
@@ -28,6 +29,8 @@ export function EditMappingDialog() {
   // Escape closes the dialog, like the add-account sheet.
   const isOpen = Boolean(editingMapping);
   const pressStartedOnBackdropRef = useRef(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, isOpen);
   useEffect(() => {
     if (!isOpen) {
       return;
@@ -61,6 +64,7 @@ export function EditMappingDialog() {
       {/* biome-ignore lint/a11y/useSemanticElements: styled card; a native <dialog> would change layout and animation */}
       <Card
         role="dialog"
+        ref={dialogRef}
         aria-modal="true"
         aria-labelledby="edit-account-title"
         className="my-auto w-full max-w-xl border-border/90 bg-card animate-fade-in"

@@ -164,5 +164,27 @@ console.log('\nGlobal rate limiter\n');
   assert(clock >= 1500, `Concurrent callers are serialised through the gap (last slot at ${clock}ms)`);
 }
 
+console.log('\nEnvironment settings');
+{
+  // The constants are read at import, so check them in a child process.
+  const { spawnSync } = await import('node:child_process');
+  const moduleUrl = new URL('../src/scraper-fetch.ts', import.meta.url).pathname;
+  const read = (env: Record<string, string>) => {
+    const run = spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `const m = await import(${JSON.stringify(moduleUrl)}); console.log(JSON.stringify([m.SCRAPER_MIN_GAP_MS, m.SCRAPER_JITTER_MS, m.SCRAPER_REQUEST_TIMEOUT_MS]));`,
+      ],
+      { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 20_000 },
+    );
+    return run.stdout.trim();
+  };
+  const blank = read({ SCRAPER_MIN_GAP_MS: '', SCRAPER_JITTER_MS: ' ', SCRAPER_REQUEST_TIMEOUT_MS: '' });
+  assert(blank === '[800,400,25000]', `A blank setting means the default, not 0 (${blank})`);
+  const set = read({ SCRAPER_MIN_GAP_MS: '1500', SCRAPER_JITTER_MS: '0', SCRAPER_REQUEST_TIMEOUT_MS: '9000' });
+  assert(set === '[1500,0,9000]', `An explicit value, 0 included, is still honoured (${set})`);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

@@ -4,7 +4,7 @@ import { Scraper, type Profile as TwitterProfile } from '@the-convocation/twitte
 import axios from 'axios';
 import sharp from 'sharp';
 import { getConfig } from './config-manager.js';
-import { createScraperFetch } from './scraper-fetch.js';
+import { createScraperFetch, throwOnRateLimit } from './scraper-fetch.js';
 
 const PROFILE_IMAGE_MAX_BYTES = 1_000_000;
 const PROFILE_IMAGE_TARGET_BYTES = 950 * 1024;
@@ -576,7 +576,10 @@ const fetchTwitterProfileWithCookies = async (
   username: string,
   cookieSet: TwitterCookieSet,
 ): Promise<TwitterProfile> => {
-  const scraper = new Scraper({ fetch: profileScraperFetch });
+  // Fail fast on a rate limit, as sweep checks do: the library's default sleeps
+  // up to 15 minutes, which held the sweep (daily profile sync) or a dashboard
+  // request that long. A failure falls through to the next cookie set.
+  const scraper = new Scraper({ fetch: profileScraperFetch, rateLimitStrategy: throwOnRateLimit });
   await scraper.setCookies([`auth_token=${cookieSet.authToken}`, `ct0=${cookieSet.ct0}`]);
   return scraper.getProfile(username);
 };
@@ -610,7 +613,14 @@ export const buildMirroredDescription = (biography: string | undefined, username
 
   const reserved = getGraphemeSegments(`${intro}\n\n`).length;
   const maxBioLength = Math.max(0, 256 - reserved);
-  const truncatedBio = truncateGraphemes(bio, maxBioLength);
+  let truncatedBio = truncateGraphemes(bio, maxBioLength);
+  // Never end on half a link: it stays clickable and points somewhere wrong.
+  // Drop a URL the cut landed inside (one followed by more of itself in the bio).
+  const cutUrl = truncatedBio.match(/https?:\/\/\S*$/i)?.[0];
+  const next = bio.charAt(truncatedBio.length);
+  if (cutUrl && next !== '' && !/\s/.test(next)) {
+    truncatedBio = truncatedBio.slice(0, truncatedBio.length - cutUrl.length).trimEnd();
+  }
   return `${intro}\n\n${truncatedBio}`;
 };
 

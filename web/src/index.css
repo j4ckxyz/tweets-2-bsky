@@ -97,12 +97,14 @@
     scrollbar-color: oklch(var(--foreground) / 0.22) transparent;
   }
 
-  /* iOS zooms the page when focusing inputs below 16px; keep form text at 16px on phones. */
-  @media (max-width: 640px) {
+  /* iOS zooms the page when focusing inputs below 16px; keep form text at 16px on phones.
+     !important because the controls carry text-sm / text-[13px] utilities, which
+     otherwise outrank this base rule. Stops just short of the sm breakpoint. */
+  @media (max-width: 639.98px) {
     input,
     select,
     textarea {
-      font-size: 16px;
+      font-size: 16px !important;
     }
   }
 

@@ -2,7 +2,7 @@ import { AccountHealth } from '../components/AccountHealth';
 import { Countdown } from '../components/Countdown';
 import { useDashboard } from '../lib/dashboard-context';
 import { formatCompactNumber } from '../lib/facets';
-import { formatRelativeTime, formatState } from '../lib/format';
+import { formatRelativeTime, formatState, parseServerTimestamp } from '../lib/format';
 
 export function OverviewPage() {
   const {
@@ -78,7 +78,7 @@ export function OverviewPage() {
             <dt className="text-xs text-muted-foreground">Last activity</dt>
             <dd className="mt-0.5 font-semibold">
               {latestActivity?.created_at
-                ? formatRelativeTime(new Date(latestActivity.created_at).getTime())
+                ? formatRelativeTime(parseServerTimestamp(latestActivity.created_at))
                 : 'None yet'}
             </dd>
           </div>

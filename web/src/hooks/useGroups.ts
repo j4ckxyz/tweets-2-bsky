@@ -196,19 +196,20 @@ export function useGroups(
     }));
   };
 
-  const handleRenameGroup = async (groupKey: string) => {
+  // Resolves true once the rename is saved, so the folder view can follow it.
+  const handleRenameGroup = async (groupKey: string): Promise<boolean> => {
     if (!authHeaders) {
-      return;
+      return false;
     }
     if (!canManageGroupsPermission) {
       showNotice('error', 'You do not have permission to rename groups.');
-      return;
+      return false;
     }
 
     const draft = groupDraftsByKey[groupKey];
     if (!draft || !draft.name.trim()) {
       showNotice('error', 'Group name is required.');
-      return;
+      return false;
     }
 
     setIsGroupActionBusy(true);
@@ -223,8 +224,10 @@ export function useGroups(
       );
       showNotice('success', 'Group updated.');
       await fetchData();
+      return true;
     } catch (error) {
       handleAuthFailure(error, 'Failed to update group.');
+      return false;
     } finally {
       setIsGroupActionBusy(false);
     }

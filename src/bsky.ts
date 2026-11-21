@@ -282,6 +282,8 @@ export type DeletePostsScope = 'mirrored' | 'all';
 
 export interface DeletePostsResult {
   deleted: number;
+  /** Records Bluesky refused to delete. When non-zero, history and checks were not reset. */
+  failed: number;
   scope: DeletePostsScope;
 }
 
@@ -295,6 +297,10 @@ export interface DeletePostsResult {
  * Either way the history is kept — rows are marked deleted rather than wiped —
  * and scheduled checks restart from now. Wiping the history used to make the
  * very next sweep re-post the account's latest 50 tweets.
+ *
+ * If any delete fails, only the rows whose posts are all gone are marked
+ * deleted, and the queue and check cutoff are left alone, so running it again
+ * picks up exactly what is still on Bluesky.
  */
 export async function deleteAllPosts(mappingId: string, scope: DeletePostsScope = 'mirrored'): Promise<number> {
   return (await deletePosts(mappingId, scope)).deleted;
@@ -319,24 +325,34 @@ export async function deletePosts(
   // Everything the mirror recorded posting.
   const history = dbService.getTweetsForIdentifierWithUris(mapping.bskyIdentifier);
   const mirroredUris = new Set<string>();
-  const tails: { root: string; tail: string }[] = [];
+  const tails: { root: string; tail: string; rowUris: string[] }[] = [];
   const repostUris = new Set<string>();
+  // Every record each history row produced, so a partial failure can leave
+  // exactly the rows whose posts are still up.
+  const recordsByTweet = new Map<string, string[]>();
   for (const row of history) {
     if (row.status === 'reposted' && row.bsky_uri) {
       repostUris.add(row.bsky_uri);
+      recordsByTweet.set(row.twitter_id, [row.bsky_uri]);
       continue;
     }
     if (!row.bsky_uri) continue;
-    mirroredUris.add(row.bsky_uri);
-    if (row.bsky_tail_uri) mirroredUris.add(row.bsky_tail_uri);
+    const rowUris: string[] = [];
+    recordsByTweet.set(row.twitter_id, rowUris);
+    const add = (uri: string) => {
+      mirroredUris.add(uri);
+      rowUris.push(uri);
+    };
+    add(row.bsky_uri);
+    if (row.bsky_tail_uri) add(row.bsky_tail_uri);
     if (row.bsky_chunk_uris) {
       try {
-        for (const uri of JSON.parse(row.bsky_chunk_uris) as string[]) mirroredUris.add(uri);
+        for (const uri of JSON.parse(row.bsky_chunk_uris) as string[]) add(uri);
       } catch {
         // fall back to the chain walk below
       }
     } else if (row.bsky_tail_uri && row.bsky_tail_uri !== row.bsky_uri) {
-      tails.push({ root: row.bsky_uri, tail: row.bsky_tail_uri });
+      tails.push({ root: row.bsky_uri, tail: row.bsky_tail_uri, rowUris });
     }
   }
 
@@ -359,21 +375,24 @@ export async function deletePosts(
     cursor = data.cursor;
     if (!cursor || data.records.length === 0) break;
   }
-  for (const { root, tail } of tails) {
+  for (const { root, tail, rowUris } of tails) {
     let current: string | undefined = tail;
     for (let hops = 0; current && current !== root && hops < 200; hops++) {
       mirroredUris.add(current);
+      rowUris.push(current);
       current = posts.get(current)?.parent;
     }
   }
 
   const targets = scope === 'all' ? [...posts.keys()] : [...mirroredUris].filter((uri) => posts.has(uri));
   let deleted = 0;
+  const failedUris = new Set<string>();
   const deleteRecord = async (uri: string, collection: string) => {
     try {
       await agent.com.atproto.repo.deleteRecord({ repo, collection, rkey: uri.split('/').pop() as string });
       deleted += 1;
     } catch (e) {
+      failedUris.add(uri);
       console.warn(`Failed to delete record ${uri}:`, (e as Error).message);
     }
   };
@@ -382,6 +401,17 @@ export async function deletePosts(
     if (!agentOverride) await new Promise((r) => setTimeout(r, 300));
   }
   for (const uri of repostUris) await deleteRecord(uri, 'app.bsky.feed.repost');
+
+  const failed = failedUris.size;
+  if (failed > 0) {
+    // Some posts are still up: mark only the rows that are fully gone, so a
+    // second run still finds the rest, and leave the queue and cutoff alone.
+    for (const [twitterId, uris] of recordsByTweet) {
+      if (!uris.some((uri) => failedUris.has(uri))) dbService.markDeleted(twitterId, mapping.bskyIdentifier);
+    }
+    console.warn(`[${mapping.bskyIdentifier}] ⚠️ Deleted ${deleted} record(s); ${failed} could not be deleted.`);
+    return { deleted, failed, scope };
+  }
 
   // Keep the history so nothing is re-mirrored; mark it deleted.
   dbService.markAllDeleted(mapping.bskyIdentifier);
@@ -393,5 +423,5 @@ export async function deletePosts(
   });
 
   console.log(`[${mapping.bskyIdentifier}] ✅ Deleted ${deleted} record(s).`);
-  return { deleted, scope };
+  return { deleted, failed, scope };
 }

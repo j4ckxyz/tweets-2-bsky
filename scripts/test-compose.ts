@@ -56,6 +56,9 @@ const httpLog: string[] = [];
 // biome-ignore lint/suspicious/noExplicitAny: stubbing axios for offline tests
 (axios as any).request = async (config: { url: string }) => {
   httpLog.push(`DOWNLOAD ${config.url}`);
+  if (config.url.includes('unreachable')) {
+    throw Object.assign(new Error('getaddrinfo ENOTFOUND pbs.twimg.com'), { code: 'ENOTFOUND', isAxiosError: true });
+  }
   if (config.url.includes('.mp4')) {
     return { data: Buffer.from('fake-mp4-bytes'), headers: { 'content-type': 'video/mp4' } };
   }
@@ -865,6 +868,83 @@ realLog('\nImages\n');
   const { data } = await sharp(uploaded?.buffer).raw().toBuffer({ resolveWithObject: true });
   const [r, g, b] = [data[0] ?? 0, data[1] ?? 0, data[2] ?? 0];
   assert(r > 200 && g > 200 && b > 200, `Transparent areas become white, not black (got rgb ${r},${g},${b})`);
+}
+
+realLog('\nFailures that must stay retryable\n');
+{
+  const mediaOnly = tweet({
+    text: 'https://t.co/gone1',
+    extended_entities: {
+      media: [
+        {
+          type: 'photo',
+          url: 'https://t.co/gone1',
+          media_url_https: 'https://pbs.twimg.com/media/unreachable.jpg',
+        },
+      ],
+    },
+  });
+  const { captured, outcomes } = await run([mediaOnly]);
+  const outcome = outcomes.get(mediaOnly.id_str as string);
+  assert(
+    captured.posts.length === 0 && outcome?.status === 'failed' && outcome.retryable === true,
+    'A media-only tweet whose image cannot be fetched is a retryable failure, not a skip',
+  );
+  assert(!dbService.getTweet(mediaOnly.id_str as string, 'alice.test'), '…and leaves no history row behind');
+}
+{
+  // The card fetch for this host fails (see the axios stub), so the link must
+  // stay in the text even though removing it would avoid a thread.
+  const longText = `${'Long announcement text. '.repeat(11).trim()} https://t.co/blocked1`;
+  const longLink = tweet({
+    text: longText,
+    entities: {
+      urls: [{ url: 'https://t.co/blocked1', expanded_url: 'https://blocked.example.com/a-long-article-slug' }],
+    },
+  });
+  const { captured } = await run([longLink]);
+  assert(
+    captured.posts.some((post) => post.text.includes('blocked.example.com')),
+    'An over-length tweet keeps its link when no card could be made for it',
+  );
+}
+{
+  const tweets = [tweet({ text: 'first, session expired' }), tweet({ text: 'second, never tried' })];
+  const { agent } = mockAgent('did:plc:alice');
+  let postCalls = 0;
+  agent.post = async () => {
+    postCalls++;
+    throw Object.assign(new Error('Token has expired'), { status: 400, error: 'ExpiredToken' });
+  };
+  const outcomes = new Map<string, TweetOutcome>();
+  let rejection: { status?: number; code?: string } | null = null;
+  try {
+    // biome-ignore lint/suspicious/noExplicitAny: mock agent
+    await processTweets(
+      agent as any,
+      'alice',
+      'alice.test',
+      [...tweets].reverse(),
+      false,
+      undefined,
+      undefined,
+      'test',
+      {
+        outcomes,
+        settings: resolveMirrorSettings(),
+      },
+    );
+  } catch (err) {
+    rejection = err as { status?: number; code?: string };
+  }
+  assert(
+    outcomes.get(tweets[0]?.id_str as string)?.retryable === true,
+    'An expired session at post time leaves the tweet retryable',
+  );
+  assert(
+    postCalls === 1 && rejection?.code === 'ExpiredToken' && !outcomes.has(tweets[1]?.id_str as string),
+    '…and stops the run so the batch drops the session; later tweets are untouched',
+  );
 }
 
 realLog('\nPreview speed (child process with real pacing)\n');

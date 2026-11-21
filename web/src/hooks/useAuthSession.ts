@@ -129,7 +129,14 @@ export function useAuthSession(
 
   const handleAuthFailure = useCallback(
     (error: unknown, fallbackMessage: string) => {
-      if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
+      // Only the token check answers with a bare 401/403. A 401/403 that carries
+      // an `error` message (wrong current password, missing permission) is an
+      // ordinary failure: show it rather than signing the user out.
+      if (
+        axios.isAxiosError(error) &&
+        (error.response?.status === 401 || error.response?.status === 403) &&
+        typeof error.response?.data?.error !== 'string'
+      ) {
         handleLogout();
         return;
       }

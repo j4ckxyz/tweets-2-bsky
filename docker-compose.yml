@@ -17,6 +17,13 @@ services:
       TWEETS2BSKY_DATA_DIR: /app/data
     volumes:
       - tweets2bsky_data:/app/data
+    # Every check logs a line, so an unbounded log fills the disk over months
+    # of uptime. Keeps at most 5 x 10 MB of container output.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   tweets2bsky_data:

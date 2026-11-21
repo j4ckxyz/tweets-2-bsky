@@ -200,6 +200,19 @@ realLog('\nStarter pack settings\n');
   assert(state.curatorMappingId === alice.id, '…and is returned');
   const noFolder = await api('POST', '/api/groups/Nope/discovery-sync', {});
   assert(noFolder.status === 400, 'Syncing a folder that does not exist explains itself');
+
+  // Editing an account in a folder used to rebuild the folder from name and
+  // emoji, dropping its list and starter pack, so the next sync made new ones.
+  const { updateConfig } = await import('../src/config-manager.js');
+  updateConfig((config) => {
+    config.groups = [{ name: 'News', emoji: '📰', listUri: 'at://list/1', starterPackUri: 'at://pack/1' }];
+  });
+  await api('PUT', `/api/mappings/${alice.id}`, { groupName: 'News', groupEmoji: '🗞️' });
+  const folder = getConfig().groups.find((group) => group.name === 'News');
+  assert(
+    folder?.emoji === '🗞️' && folder.listUri === 'at://list/1' && folder.starterPackUri === 'at://pack/1',
+    "Editing an account keeps its folder's list and starter pack",
+  );
 }
 
 realLog('\nAccount page\n');

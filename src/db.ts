@@ -1689,6 +1689,11 @@ export const postQueueService = {
     sampleBskyIdentifier: string;
     lastSeenAt: number;
   }[] {
+    // Filter in SQL, before the LIMIT: filtering afterwards let 200 groups from
+    // other accounts push this account's failures out of the summary.
+    const ids = mappingIds ? [...mappingIds] : undefined;
+    if (ids && ids.length === 0) return [];
+    const mappingClause = ids ? `AND mapping_id IN (${ids.map(() => '?').join(',')})` : '';
     const rows = db
       .prepare(`
         SELECT mapping_id,
@@ -1700,23 +1705,21 @@ export const postQueueService = {
                MIN(twitter_username) AS sample_twitter_username,
                MIN(bsky_identifier) AS sample_bsky_identifier
         FROM post_queue
-        WHERE status = 'failed'
+        WHERE status = 'failed' ${mappingClause}
         GROUP BY mapping_id, stage, reason
         ORDER BY count DESC, last_seen_at DESC
         LIMIT 200
       `)
-      .all() as any[];
-    return rows
-      .filter((row) => !mappingIds || mappingIds.has(row.mapping_id))
-      .map((row) => ({
-        stage: row.stage,
-        reason: row.reason,
-        count: row.count,
-        sampleTwitterId: row.sample_twitter_id,
-        sampleTwitterUsername: row.sample_twitter_username,
-        sampleBskyIdentifier: row.sample_bsky_identifier,
-        lastSeenAt: row.last_seen_at,
-      }));
+      .all(...(ids ?? [])) as any[];
+    return rows.map((row) => ({
+      stage: row.stage,
+      reason: row.reason,
+      count: row.count,
+      sampleTwitterId: row.sample_twitter_id,
+      sampleTwitterUsername: row.sample_twitter_username,
+      sampleBskyIdentifier: row.sample_bsky_identifier,
+      lastSeenAt: row.last_seen_at,
+    }));
   },
 
   cancelPendingByRequestId(requestId: string): number {

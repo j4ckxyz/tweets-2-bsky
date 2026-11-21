@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { pickMirrorSettings } from '../components/MirrorSettingsFields';
 import * as api from '../lib/api';
 import { DEFAULT_GROUP_KEY, defaultMappingForm } from '../lib/constants';
-import { addTwitterUsernames, getUserLabel, normalizeTwitterUsername } from '../lib/format';
+import { addTwitterUsernames, getApiErrorMessage, getUserLabel, normalizeTwitterUsername } from '../lib/format';
 import type { BlueskyCredentialValidation, MappingFormState, TwitterMirrorProfile } from '../lib/types';
 import type { useAccountActions } from './useAccountActions';
 import type { useAccountsList } from './useAccountsList';
@@ -175,7 +175,7 @@ export function useAddAccount(
   };
 
   const ensureTwitterMirrorProfileLoaded = useCallback(
-    async (twitterUsername: string): Promise<TwitterMirrorProfile | null> => {
+    async (twitterUsername: string, options?: { force?: boolean }): Promise<TwitterMirrorProfile | null> => {
       if (!authHeaders) {
         return null;
       }
@@ -185,8 +185,9 @@ export function useAddAccount(
         return null;
       }
 
+      // "Refresh preview" forces a new fetch; everything else reuses the cache.
       const cached = newTwitterMirrorProfiles[normalized];
-      if (cached) {
+      if (cached && !options?.force) {
         return cached;
       }
 
@@ -314,15 +315,22 @@ export function useAddAccount(
         { headers: authHeaders },
       );
 
-      const syncResponse = await api.syncProfileFromTwitter(
-        createResponse.data.id,
-        {
-          sourceTwitterUsername,
-        },
-        { headers: authHeaders },
-      );
-
-      const warnings = syncResponse.data.warnings || [];
+      // The mapping exists from here on, so a failed profile sync must not read
+      // as a failed create: that invited a retry and a duplicate mapping.
+      let warnings: string[] = [];
+      let profileSyncError: string | null = null;
+      try {
+        const syncResponse = await api.syncProfileFromTwitter(
+          createResponse.data.id,
+          {
+            sourceTwitterUsername,
+          },
+          { headers: authHeaders },
+        );
+        warnings = syncResponse.data.warnings || [];
+      } catch (error) {
+        profileSyncError = getApiErrorMessage(error, 'Profile sync failed.');
+      }
       const botLabelApplied = createResponse.data.hasBotLabel === true;
 
       setNewMapping(defaultMappingForm());
@@ -333,7 +341,12 @@ export function useAddAccount(
       setValidatedBskyCredentials(null);
       setIsAddAccountSheetOpen(false);
       setAddAccountStep(1);
-      if (warnings.length > 0) {
+      if (profileSyncError) {
+        showNotice(
+          'error',
+          `Account mapping added, but the profile sync failed; use Sync Profile on the account to retry. Reason: ${profileSyncError}`,
+        );
+      } else if (warnings.length > 0) {
         showNotice(
           'info',
           `Account mapping added. Profile mirrored with ${warnings.length} warning(s).${

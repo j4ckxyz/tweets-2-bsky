@@ -101,7 +101,9 @@ export function createGatedFetch(acquire: () => Promise<void>, fetchImpl: typeof
 }
 
 function envInt(name: string, fallback: number, min: number, max: number): number {
-  const raw = Number(process.env[name]);
+  // Blank means unset: Number('') is 0, which used to clamp to the minimum.
+  const value = process.env[name]?.trim();
+  const raw = value ? Number(value) : Number.NaN;
   if (Number.isFinite(raw)) return Math.min(max, Math.max(min, Math.round(raw)));
   return fallback;
 }

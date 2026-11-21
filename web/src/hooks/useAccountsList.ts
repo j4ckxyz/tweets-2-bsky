@@ -161,6 +161,13 @@ export function useAccountsList(
         ),
       }));
   }, [accountMappingsForView, groupOptions]);
+  // A selected folder that no longer exists (deleted, or renamed elsewhere)
+  // falls back to All rather than showing an empty list.
+  useEffect(() => {
+    if (selectedFolderKey !== '__all__' && !groupedMappings.some((group) => group.key === selectedFolderKey)) {
+      setSelectedFolderKey('__all__');
+    }
+  }, [groupedMappings, selectedFolderKey]);
   const deferredAccountsSearchQuery = useDeferredValue(accountsSearchQuery);
   const normalizedAccountsQuery = useMemo(
     () => normalizeSearchValue(deferredAccountsSearchQuery),
