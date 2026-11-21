@@ -141,8 +141,9 @@ export function useUserAdmin(
       await api.updateUser(
         userId,
         {
-          username: username || undefined,
-          email: email || undefined,
+          // '' clears the field; undefined would tell the server to keep it.
+          username,
+          email,
           isAdmin: editingUserForm.isAdmin,
           permissions: editingUserForm.permissions,
         },

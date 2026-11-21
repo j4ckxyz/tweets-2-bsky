@@ -1,4 +1,4 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 // One page per mirrored account: its configuration, health, queue, recent
 // posts and log, plus every action that applies to it. Managing one account
 // previously meant hopping between the account list, the activity tab, the
@@ -82,6 +82,7 @@ export function AccountDetail({
   onBack: () => void;
   onNotice?: (type: 'success' | 'error', message: string) => void;
 }) {
+  const queryClient = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
   const [backfillLimit, setBackfillLimit] = useState('50');
 
@@ -117,6 +118,8 @@ export function AccountDetail({
       try {
         const response = await run();
         onNotice?.('success', response?.data?.message || fallbackMessage);
+        // Pause/resume and profile sync change the mapping the Accounts list shows.
+        void queryClient.invalidateQueries({ queryKey: queryKeys.mappings });
         await load();
       } catch (err) {
         const message = axios.isAxiosError(err)
@@ -127,7 +130,7 @@ export function AccountDetail({
         setBusy(null);
       }
     },
-    [load, onNotice],
+    [load, onNotice, queryClient],
   );
 
   if (loading) {
@@ -473,6 +476,7 @@ export function AccountDetail({
       {canManage && mapping.twitterUsernames[0] ? (
         <div className="min-w-0 rounded-lg border border-border bg-background p-4">
           <MirrorPreview
+            key={mapping.id}
             twitterUsername={mapping.profileSyncSourceUsername || mapping.twitterUsernames[0]}
             mappingId={mapping.id}
             authHeaders={authHeaders}

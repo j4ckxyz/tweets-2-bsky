@@ -265,8 +265,9 @@ export function useDashboardData(
   const fetchUpdateStatus = useCallback(() => refetch(queryKeys.updateStatus), [refetch]);
   const fetchManagedUsers = useCallback(() => refetch(queryKeys.users), [refetch]);
 
-  // Profiles for a chosen set of accounts (after a bulk profile sync). The
-  // result replaces the cached map, as it always has.
+  // Profiles for a chosen set of accounts (before a bulk bridge). They are
+  // merged into the cached map: replacing it dropped every other account's
+  // avatar, display name and bio.
   const fetchProfiles = useCallback(
     async (actors: string[]): Promise<Record<string, BskyProfileView> | null> => {
       if (!authHeaders) {
@@ -274,7 +275,10 @@ export function useDashboardData(
       }
       try {
         const nextProfiles = await loadProfiles(actors);
-        queryClient.setQueryData(queryKeys.bskyProfiles, nextProfiles);
+        queryClient.setQueryData<Record<string, BskyProfileView>>(queryKeys.bskyProfiles, (previous) => ({
+          ...(previous ?? {}),
+          ...nextProfiles,
+        }));
         return nextProfiles;
       } catch (error) {
         handleAuthFailure(error, 'Failed to resolve Bluesky profiles.');

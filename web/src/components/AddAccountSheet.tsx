@@ -1,4 +1,6 @@
 import { ArrowUpRight, ChevronLeft, ChevronRight, Loader2, Plus, X } from 'lucide-react';
+import { useRef } from 'react';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import {
   ADD_ACCOUNT_STEPS,
   ADD_ACCOUNT_STEP_COUNT,
@@ -46,16 +48,29 @@ export function AddAccountSheet() {
     validateAddAccountCredentials,
     validatedBskyCredentials,
   } = useDashboard();
+  const sheetRef = useRef<HTMLElement>(null);
+  const pressStartedOnBackdropRef = useRef(false);
+  useDialogFocus(sheetRef, isAddAccountSheetOpen);
   return isAddAccountSheetOpen ? (
     // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click-to-dismiss; keyboard users close via the sheet's Close button
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/30 p-0 sm:items-stretch sm:justify-end animate-backdrop-fade"
-      onClick={closeAddAccountSheet}
+      onMouseDown={(event) => {
+        pressStartedOnBackdropRef.current = event.target === event.currentTarget;
+      }}
+      onClick={(event) => {
+        // Only a press that both starts and ends on the backdrop dismisses, so
+        // dragging a text selection out of a field does not discard the draft.
+        if (event.target === event.currentTarget && pressStartedOnBackdropRef.current) {
+          closeAddAccountSheet();
+        }
+      }}
     >
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: click handler only stops backdrop propagation, it is not an interaction */}
       {/* biome-ignore lint/a11y/useSemanticElements: styled drawer; a native <dialog> would change layout and animation */}
       <aside
         role="dialog"
+        ref={sheetRef}
         aria-modal="true"
         aria-labelledby="add-account-title"
         className="flex h-[95vh] w-full max-w-xl flex-col rounded-t-xl border border-border bg-card shadow-[0_16px_48px_-12px_oklch(var(--foreground)/0.3)] sm:h-full sm:rounded-none sm:rounded-l-xl animate-slide-up sm:animate-slide-in-right"
@@ -188,7 +203,7 @@ export function AddAccountSheet() {
                     disabled={!selectedMirrorSourceUsername || isMirrorPreviewLoading}
                     onClick={() => {
                       if (!selectedMirrorSourceUsername) return;
-                      void ensureTwitterMirrorProfileLoaded(selectedMirrorSourceUsername);
+                      void ensureTwitterMirrorProfileLoaded(selectedMirrorSourceUsername, { force: true });
                     }}
                   >
                     {isMirrorPreviewLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
@@ -212,7 +227,12 @@ export function AddAccountSheet() {
               </div>
               {selectedMirrorSourceUsername ? (
                 <div className="rounded-lg border border-border/70 bg-muted/30 p-3">
-                  <MirrorPreview twitterUsername={selectedMirrorSourceUsername} authHeaders={authHeaders} />
+                  {/* Keyed by source so switching it drops the previous account's composed tweets. */}
+                  <MirrorPreview
+                    key={selectedMirrorSourceUsername}
+                    twitterUsername={selectedMirrorSourceUsername}
+                    authHeaders={authHeaders}
+                  />
                 </div>
               ) : null}
             </div>

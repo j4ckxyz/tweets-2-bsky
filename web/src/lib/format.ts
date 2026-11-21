@@ -86,6 +86,17 @@ export function triggerBlobDownload(blob: Blob, filename: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
+/**
+ * Epoch ms for a timestamp from the API. SQLite's CURRENT_TIMESTAMP is UTC but
+ * carries no zone ("2026-07-01 10:00:00"), which Date reads as local time; a
+ * zone is added before parsing. ISO strings with a zone are parsed as given.
+ */
+export function parseServerTimestamp(value: string): number {
+  const trimmed = value.trim();
+  const sqliteUtc = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(trimmed);
+  return Date.parse(sqliteUtc ? `${trimmed.replace(' ', 'T')}Z` : trimmed);
+}
+
 export function formatRelativeTime(timestamp: number): string {
   const deltaMs = Date.now() - timestamp;
   const absMs = Math.abs(deltaMs);
@@ -97,11 +108,14 @@ export function formatRelativeTime(timestamp: number): string {
 }
 
 export function getBskyPostUrl(activity: ActivityLog): string | null {
-  if (!activity.bsky_uri || !activity.bsky_identifier) {
+  // A deleted mirror has nothing left to open.
+  if (!activity.bsky_uri || !activity.bsky_identifier || activity.status === 'deleted') {
     return null;
   }
 
-  const postId = activity.bsky_uri.split('/').filter(Boolean).pop();
+  // Only a post record has a bsky.app page; a repost record's key does not.
+  const match = activity.bsky_uri.match(/^at:\/\/[^/]+\/app\.bsky\.feed\.post\/([^/]+)$/);
+  const postId = match?.[1];
   if (!postId) {
     return null;
   }

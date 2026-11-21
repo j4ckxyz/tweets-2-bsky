@@ -22,7 +22,7 @@ export function DropdownMenu({
   ariaLabel,
 }: DropdownMenuProps) {
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+  const [position, setPosition] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
@@ -32,15 +32,65 @@ export function DropdownMenu({
     const content = contentRef.current;
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
+    const gap = 6;
+    const margin = 8;
     const contentWidth = content?.offsetWidth ?? 208;
-    const left = align === 'end' ? rect.right - contentWidth : rect.left;
-    setPosition({ top: rect.bottom + 6, left: Math.max(8, left) });
+    // scrollHeight is the full height even once maxHeight has clipped the menu.
+    const contentHeight = content?.scrollHeight ?? 0;
+    const spaceBelow = window.innerHeight - rect.bottom - gap - margin;
+    const spaceAbove = rect.top - gap - margin;
+    // Open upward only when the menu does not fit below and there is more room above.
+    const openUp = contentHeight > spaceBelow && spaceAbove > spaceBelow;
+    const maxHeight = Math.max(0, openUp ? spaceAbove : spaceBelow);
+    const top = openUp ? rect.top - gap - Math.min(contentHeight, maxHeight) : rect.bottom + gap;
+    const preferredLeft = align === 'end' ? rect.right - contentWidth : rect.left;
+    const left = Math.max(margin, Math.min(preferredLeft, window.innerWidth - contentWidth - margin));
+    setPosition({ top, left, maxHeight });
   }, [align]);
 
   useLayoutEffect(() => {
     if (!open) return;
     updatePosition();
   }, [open, updatePosition]);
+
+  // Closing from inside the menu (an item, Escape, Tab) hands focus back to the
+  // trigger; a click elsewhere on the page leaves focus where it landed.
+  const closeMenu = useCallback((restoreFocus: boolean) => {
+    setOpen(false);
+    if (restoreFocus) triggerRef.current?.focus();
+  }, []);
+
+  const menuItems = () => [
+    ...(contentRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? []),
+  ];
+
+  useEffect(() => {
+    if (!open) return;
+    contentRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true });
+  }, [open]);
+
+  const handleMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      closeMenu(true);
+      return;
+    }
+    // Arrow keys inside the embedded sync-source select keep their own meaning.
+    const target = event.target as HTMLElement;
+    if (target.closest('select, input, textarea')) return;
+    const items = menuItems();
+    if (items.length === 0) return;
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    let next: HTMLElement | undefined;
+    if (event.key === 'ArrowDown') next = items[(index + 1) % items.length];
+    else if (event.key === 'ArrowUp') next = items[(index - 1 + items.length) % items.length];
+    else if (event.key === 'Home') next = items[0];
+    else if (event.key === 'End') next = items[items.length - 1];
+    if (next) {
+      event.preventDefault();
+      next.focus();
+    }
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -53,7 +103,7 @@ export function DropdownMenu({
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setOpen(false);
+        closeMenu(true);
       }
     };
     document.addEventListener('pointerdown', handlePointerDown);
@@ -66,7 +116,7 @@ export function DropdownMenu({
       window.removeEventListener('scroll', updatePosition, true);
       window.removeEventListener('resize', updatePosition);
     };
-  }, [open, updatePosition]);
+  }, [closeMenu, open, updatePosition]);
 
   return (
     <>
@@ -88,14 +138,13 @@ export function DropdownMenu({
       </button>
       {open
         ? createPortal(
-            // biome-ignore lint/a11y/useKeyWithClickEvents: event-delegation container over focusable menu-item buttons
             <div
               ref={contentRef}
               id={menuId}
               role="menu"
-              style={{ top: position?.top ?? -9999, left: position?.left ?? -9999 }}
+              style={{ top: position?.top ?? -9999, left: position?.left ?? -9999, maxHeight: position?.maxHeight }}
               className={cn(
-                'fixed z-50 min-w-[13rem] overflow-hidden rounded-lg border border-border bg-card py-1 text-sm shadow-[0_8px_24px_-6px_oklch(var(--foreground)/0.18),0_2px_4px_oklch(var(--foreground)/0.06)] animate-fade-in',
+                'fixed z-50 min-w-[13rem] overflow-y-auto overscroll-contain rounded-lg border border-border bg-card py-1 text-sm shadow-[0_8px_24px_-6px_oklch(var(--foreground)/0.18),0_2px_4px_oklch(var(--foreground)/0.06)] animate-fade-in',
                 contentClassName,
               )}
               onClick={(event) => {
@@ -103,8 +152,9 @@ export function DropdownMenu({
                 if (target.closest('[data-keep-open="true"]')) {
                   return;
                 }
-                setOpen(false);
+                closeMenu(true);
               }}
+              onKeyDown={handleMenuKeyDown}
             >
               {children}
             </div>,

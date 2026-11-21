@@ -8,7 +8,7 @@ import { selectClassName } from '../lib/constants';
 import { useDashboard } from '../lib/dashboard-context';
 import { buildFacetSegments, formatCompactNumber } from '../lib/facets';
 import { folderText } from '../lib/folders';
-import { getMappingGroupMeta, getTwitterPostUrl } from '../lib/format';
+import { getMappingGroupMeta, getTwitterPostUrl, parseServerTimestamp } from '../lib/format';
 import { cn } from '../lib/utils';
 
 export function PostsPage() {
@@ -102,7 +102,9 @@ export function PostsPage() {
                             <span className="text-muted-foreground">from @{post.twitterUsername}</span>
                           </p>
                           <p className="text-xs text-muted-foreground">
-                            {post.createdAt ? new Date(post.createdAt).toLocaleString() : 'Unknown time'}
+                            {post.createdAt
+                              ? new Date(parseServerTimestamp(post.createdAt)).toLocaleString()
+                              : 'Unknown time'}
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
@@ -357,7 +359,11 @@ export function PostsPage() {
                     ) : null}
 
                     <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-                      <span>{post.createdAt ? new Date(post.createdAt).toLocaleString() : 'Unknown time'}</span>
+                      <span>
+                        {post.createdAt
+                          ? new Date(parseServerTimestamp(post.createdAt)).toLocaleString()
+                          : 'Unknown time'}
+                      </span>
                       <div className="flex items-center gap-3">
                         {sourceTweetUrl ? (
                           <a

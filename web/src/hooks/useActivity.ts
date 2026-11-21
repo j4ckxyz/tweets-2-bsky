@@ -182,7 +182,7 @@ export function useActivity(
     try {
       const response = await api.retryFailedQueue({}, { headers: authHeaders });
       showNotice('success', response.data?.message || 'Failed tweets requeued.');
-      await fetchStatus();
+      await Promise.all([fetchStatus(), fetchQueueFailures()]);
     } catch (error) {
       handleAuthFailure(error, 'Failed to requeue failed tweets.');
     }

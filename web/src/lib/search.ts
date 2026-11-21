@@ -98,6 +98,16 @@ export function scoreSearchField(query: string, tokens: string[], candidateValue
 }
 
 export function scoreAccountMapping(mapping: AccountMapping, query: string, tokens: string[]): number {
+  // Every word typed must appear somewhere in the account. Fuzzy scoring alone
+  // let partial subsequence and bigram credit admit almost every row.
+  const fields = [...mapping.twitterUsernames, mapping.bskyIdentifier, mapping.owner, mapping.groupName].map((value) =>
+    normalizeSearchValue(value || ''),
+  );
+  // "@nasa" must still find nasa: stored usernames carry no @.
+  const words = tokens.map((token) => token.replace(/^[@#]+/, '')).filter((token) => token.length > 0);
+  if (!words.every((word) => fields.some((field) => field.includes(word)))) {
+    return 0;
+  }
   const usernameScores = mapping.twitterUsernames.map((username) => scoreSearchField(query, tokens, username) * 1.24);
   const bestUsernameScore = usernameScores.length > 0 ? Math.max(...usernameScores) : 0;
   const identifierScore = scoreSearchField(query, tokens, mapping.bskyIdentifier) * 1.2;

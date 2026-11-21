@@ -99,7 +99,8 @@ export interface ActivityLog {
   bsky_identifier: string;
   tweet_text?: string;
   bsky_uri?: string;
-  status: 'migrated' | 'skipped' | 'failed';
+  /** reposted: a retweet mirrored as a Bluesky repost. deleted: the tweet and its mirror were deleted. */
+  status: 'migrated' | 'skipped' | 'failed' | 'reposted' | 'deleted';
   created_at?: string;
 }
 

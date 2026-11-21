@@ -42,7 +42,8 @@ export function useRouting() {
 
   useEffect(() => {
     if (tabFromPath === null) {
-      navigate(TAB_PATHS[activeTab]);
+      // Replace, so Back does not land on the unknown path and bounce forward again.
+      navigate(TAB_PATHS[activeTab], { replace: true });
     }
   }, [activeTab, navigate, tabFromPath]);
 

@@ -43,7 +43,12 @@ function AppShell() {
   }, []);
 
   if (!token) {
-    return <LoginPage />;
+    return (
+      <>
+        <NoticeBanner />
+        <LoginPage />
+      </>
+    );
   }
 
   return (
@@ -56,8 +61,6 @@ function AppShell() {
         <main className="flex-1">
           <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
             <PageHeader />
-
-            <NoticeBanner />
 
             <StatusStrip />
 
@@ -88,6 +91,8 @@ function AppShell() {
           </div>
         </main>
       </div>
+
+      <NoticeBanner />
     </div>
   );
 }

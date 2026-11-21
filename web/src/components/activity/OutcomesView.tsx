@@ -2,7 +2,7 @@ import { ArrowUpRight, History } from 'lucide-react';
 import { selectClassName } from '../../lib/constants';
 import { useDashboard } from '../../lib/dashboard-context';
 import { folderText } from '../../lib/folders';
-import { getBskyPostUrl, getMappingGroupMeta, getTwitterPostUrl } from '../../lib/format';
+import { getBskyPostUrl, getMappingGroupMeta, getTwitterPostUrl, parseServerTimestamp } from '../../lib/format';
 import { FolderGlyph } from '../FolderGlyph';
 import { Badge } from '../ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
@@ -74,7 +74,7 @@ export function OutcomesView() {
                   >
                     <td className="px-2 py-3 align-top text-xs text-muted-foreground">
                       {activity.created_at
-                        ? new Date(activity.created_at).toLocaleTimeString([], {
+                        ? new Date(parseServerTimestamp(activity.created_at)).toLocaleTimeString([], {
                             hour: '2-digit',
                             minute: '2-digit',
                           })
@@ -90,8 +90,12 @@ export function OutcomesView() {
                     <td className="px-2 py-3 align-top">
                       {activity.status === 'migrated' ? (
                         <Badge variant="success">Migrated</Badge>
+                      ) : activity.status === 'reposted' ? (
+                        <Badge variant="success">Reposted</Badge>
                       ) : activity.status === 'skipped' ? (
                         <Badge variant="outline">Skipped</Badge>
+                      ) : activity.status === 'deleted' ? (
+                        <Badge variant="secondary">Deleted</Badge>
                       ) : (
                         <Badge variant="danger">Failed</Badge>
                       )}

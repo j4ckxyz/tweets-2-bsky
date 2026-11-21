@@ -2,6 +2,7 @@ import { AccessScopeSection } from '../components/settings/AccessScopeSection';
 import { AccountSecuritySection } from '../components/settings/AccountSecuritySection';
 import { AiSection } from '../components/settings/AiSection';
 import { DataSection } from '../components/settings/DataSection';
+import { SessionSection } from '../components/settings/SessionSection';
 import { SystemSection } from '../components/settings/SystemSection';
 import { TwitterSection } from '../components/settings/TwitterSection';
 import { UsersSection } from '../components/settings/UsersSection';
@@ -26,6 +27,8 @@ export function SettingsPage() {
         <AccountSecuritySection />
 
         <AccessScopeSection />
+
+        <SessionSection />
 
         <SystemSection />
 
