@@ -138,13 +138,18 @@ export async function syncDeletesForAccount(
     if (misses < DELETE_SYNC_MIN_MISSES || now() - since < DELETE_SYNC_MIN_MISSING_SPAN_MS) continue;
 
     const uris = mirroredUris(candidate);
+    let deleteFailed = false;
     for (const uri of uris) {
       try {
         await deps.deletePost(uri);
       } catch (error) {
+        deleteFailed = true;
         deps.log('warn', 'delete-sync.delete-failed', `Could not delete ${uri}: ${(error as Error).message}`, { uri });
       }
     }
+    // Leave the row as a live mirror so a later pass tries again; marking it
+    // deleted here took it out of the candidates with the post still up.
+    if (deleteFailed) continue;
     deps.markDeleted(candidate.twitter_id);
     result.deleted += 1;
     deps.log('info', 'delete-sync.deleted', `Tweet ${candidate.twitter_id} was deleted on X; deleted its mirror.`, {

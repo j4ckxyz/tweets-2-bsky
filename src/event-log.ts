@@ -95,7 +95,9 @@ export interface LogEntry {
 // --- Tunables -------------------------------------------------------------
 
 function envInt(name: string, fallback: number, min: number, max: number): number {
-  const raw = Number(process.env[name]);
+  // Blank means unset: Number('') is 0, which used to clamp to the minimum.
+  const value = process.env[name]?.trim();
+  const raw = value ? Number(value) : Number.NaN;
   if (Number.isFinite(raw)) return Math.min(max, Math.max(min, Math.round(raw)));
   return fallback;
 }
@@ -442,9 +444,11 @@ function buildWhere(filters: LogQueryFilters): { sql: string; params: unknown[] 
   if (filters.search?.trim()) {
     const needle = `%${filters.search.trim().toLowerCase()}%`;
     clauses.push(
-      '(LOWER(message) LIKE ? OR LOWER(event) LIKE ? OR LOWER(IFNULL(error_message, "")) LIKE ? ' +
-        'OR LOWER(IFNULL(detail, "")) LIKE ? OR LOWER(IFNULL(twitter_username, "")) LIKE ? ' +
-        'OR LOWER(IFNULL(bsky_identifier, "")) LIKE ? OR IFNULL(twitter_id, "") LIKE ?)',
+      // Single quotes: "" is an identifier in standard SQL, and builds without
+      // the double-quoted-string fallback (better-sqlite3) reject it.
+      "(LOWER(message) LIKE ? OR LOWER(event) LIKE ? OR LOWER(IFNULL(error_message, '')) LIKE ? " +
+        "OR LOWER(IFNULL(detail, '')) LIKE ? OR LOWER(IFNULL(twitter_username, '')) LIKE ? " +
+        "OR LOWER(IFNULL(bsky_identifier, '')) LIKE ? OR IFNULL(twitter_id, '') LIKE ?)",
     );
     for (let i = 0; i < 7; i += 1) params.push(needle);
   }

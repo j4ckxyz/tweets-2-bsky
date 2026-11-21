@@ -52,20 +52,41 @@ export const STARTER_PACK_RECOMMENDED_MIN = 7;
 
 const rkeyOf = (uri: string) => uri.split('/').pop() as string;
 
-function truncate(text: string, limit: number): string {
+/** A list's name is capped at 64 UTF-8 bytes, not graphemes. */
+const LIST_NAME_MAX_BYTES = 64;
+
+function truncate(text: string, limit: number, maxBytes = Number.POSITIVE_INFINITY): string {
   const graphemes = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)].map((s) => s.segment);
-  return graphemes.length <= limit ? text : `${graphemes.slice(0, limit - 1).join('')}…`;
+  if (graphemes.length <= limit && Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  let out = '';
+  for (const grapheme of graphemes.slice(0, limit - 1)) {
+    if (Buffer.byteLength(`${out}${grapheme}…`, 'utf8') > maxBytes) break;
+    out += grapheme;
+  }
+  return `${out}…`;
 }
 
-async function recordExists(agent: DiscoveryAgent, uri: string | undefined, collection: string): Promise<boolean> {
-  if (!uri) return false;
+function isRecordNotFound(error: unknown): boolean {
+  const { error: code, message } = (error ?? {}) as { error?: unknown; message?: unknown };
+  return code === 'RecordNotFound' || (typeof message === 'string' && /not found|could not locate/i.test(message));
+}
+
+/**
+ * The record's value, or null when it does not exist. Any other failure (a
+ * timeout, a 5xx) is thrown: treating it as "missing" created a second list
+ * and left the starter pack pointing at the first.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: record values are free-form
+async function existingRecord(agent: DiscoveryAgent, uri: string | undefined, collection: string): Promise<any | null> {
+  if (!uri) return null;
   const repo = agent.session?.did;
-  if (!repo || !uri.startsWith(`at://${repo}/${collection}/`)) return false;
+  if (!repo || !uri.startsWith(`at://${repo}/${collection}/`)) return null;
   try {
-    await agent.com.atproto.repo.getRecord({ repo, collection, rkey: rkeyOf(uri) });
-    return true;
-  } catch {
-    return false;
+    const { data } = await agent.com.atproto.repo.getRecord({ repo, collection, rkey: rkeyOf(uri) });
+    return data.value ?? {};
+  } catch (error) {
+    if (isRecordNotFound(error)) return null;
+    throw error;
   }
 }
 
@@ -79,6 +100,9 @@ export async function syncGroupDiscovery(
   group: DiscoveryGroupInput,
   memberDids: string[],
   now: () => Date = () => new Date(),
+  // Called as soon as a new list exists, so a failure later in the sync does
+  // not leave it unrecorded and make the retry create yet another list.
+  onListCreated?: (listUri: string) => void,
 ): Promise<DiscoverySyncResult> {
   const repo = agent.session?.did;
   if (!repo) throw new Error('Curator account has no session.');
@@ -91,20 +115,21 @@ export async function syncGroupDiscovery(
   // 1. The list.
   let listUri = group.listUri;
   let createdList = false;
-  if (!(await recordExists(agent, listUri, LIST_COLLECTION))) {
+  if (!(await existingRecord(agent, listUri, LIST_COLLECTION))) {
     const { data } = await agent.com.atproto.repo.createRecord({
       repo,
       collection: LIST_COLLECTION,
       record: {
         $type: LIST_COLLECTION,
         purpose: 'app.bsky.graph.defs#curatelist',
-        name: title,
+        name: truncate(title, 50, LIST_NAME_MAX_BYTES),
         description,
         createdAt: now().toISOString(),
       },
     });
     listUri = data.uri;
     createdList = true;
+    onListCreated?.(data.uri);
   }
 
   // 2. Its members: add who is missing, remove who left the group.
@@ -151,7 +176,18 @@ export async function syncGroupDiscovery(
   // 3. The starter pack pointing at the list.
   let starterPackUri = group.starterPackUri;
   let createdStarterPack = false;
-  if (!(await recordExists(agent, starterPackUri, STARTER_PACK_COLLECTION))) {
+  const starterPack = await existingRecord(agent, starterPackUri, STARTER_PACK_COLLECTION);
+  if (starterPack && starterPack.list !== listUri) {
+    // The list was recreated (deleted in the app, or by an earlier sync): keep
+    // the starter pack people already share, pointed at the list we maintain.
+    await agent.com.atproto.repo.putRecord({
+      repo,
+      collection: STARTER_PACK_COLLECTION,
+      rkey: rkeyOf(starterPackUri as string),
+      record: { ...starterPack, list: listUri },
+    });
+  }
+  if (!starterPack) {
     const { data } = await agent.com.atproto.repo.createRecord({
       repo,
       collection: STARTER_PACK_COLLECTION,

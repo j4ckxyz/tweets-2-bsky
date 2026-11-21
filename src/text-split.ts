@@ -54,7 +54,13 @@ export function splitText(text: string, limit: number = BSKY_POST_LIMIT): string
 
     // The furthest this chunk may reach; every break point is searched for
     // inside this window.
-    const hardIndex = maxPrefixIndex(remaining, limit, BSKY_POST_BYTE_LIMIT);
+    let hardIndex = maxPrefixIndex(remaining, limit, BSKY_POST_BYTE_LIMIT);
+    if (hardIndex === 0) {
+      // Not even the first grapheme fits (a single grapheme over the byte cap,
+      // or a limit of 0): take it on its own rather than looping forever on an
+      // empty chunk. An oversized chunk then fails at the PDS like any invalid post.
+      hardIndex = segmenter.segment(remaining)[Symbol.iterator]().next().value?.segment.length ?? remaining.length;
+    }
     const window = remaining.slice(0, hardIndex);
 
     // Smart splitting priority:

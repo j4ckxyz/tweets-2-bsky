@@ -54,7 +54,14 @@ export async function syncDiscoveryForGroup(groupName: string): Promise<GroupDis
     else unresolved.push(member.bskyIdentifier);
   }
 
-  const result = await syncGroupDiscovery(agent as unknown as DiscoveryAgent, group, dids);
+  const result = await syncGroupDiscovery(agent as unknown as DiscoveryAgent, group, dids, undefined, (listUri) => {
+    updateConfig((fresh) => {
+      const entry = fresh.groups.find((candidate) => groupKey(candidate.name) === groupKey(group.name));
+      if (!entry) return false;
+      entry.listUri = listUri;
+      return true;
+    });
+  });
   updateConfig((fresh) => {
     const entry = fresh.groups.find((candidate) => groupKey(candidate.name) === groupKey(group.name));
     if (!entry) return false;

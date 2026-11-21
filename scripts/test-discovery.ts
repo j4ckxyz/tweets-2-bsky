@@ -43,7 +43,11 @@ function memoryRepo(did: string) {
             if (!records.has(uri)) throw Object.assign(new Error('Could not locate record'), { status: 400 });
             return { data: { uri, value: records.get(uri) } };
           },
-          putRecord: async () => ({}),
+          // biome-ignore lint/suspicious/noExplicitAny: xrpc payloads
+          putRecord: async (input: any) => {
+            records.set(uriFor(input.collection, input.rkey), input.record);
+            return {};
+          },
           // biome-ignore lint/suspicious/noExplicitAny: xrpc payloads
           listRecords: async (input: any) => ({
             data: {
@@ -131,6 +135,93 @@ console.log('\nKeeping it in step\n');
   );
   assert(other.listUri !== first.listUri && afterOther.removed === 0, "Folders never remove each other's members");
   assert(STARTER_PACK_RECOMMENDED_MIN === 7, 'Small folders are flagged against the app-recommended minimum of 7');
+}
+
+console.log('\nWhen things go wrong\n');
+{
+  const flaky = memoryRepo('did:plc:flaky');
+  const base = await syncGroupDiscovery(flaky.agent, { name: 'NBA' }, ['did:plc:a', 'did:plc:b']);
+  const realGet = flaky.agent.com.atproto.repo.getRecord;
+  let failOnce = true;
+  // biome-ignore lint/suspicious/noExplicitAny: xrpc payloads
+  flaky.agent.com.atproto.repo.getRecord = async (input: any) => {
+    if (failOnce && input.collection === 'app.bsky.graph.list') {
+      failOnce = false;
+      throw Object.assign(new Error('UpstreamTimeout'), { status: 504 });
+    }
+    return realGet(input);
+  };
+  let threw = false;
+  try {
+    await syncGroupDiscovery(flaky.agent, { name: 'NBA', listUri: base.listUri, starterPackUri: base.starterPackUri }, [
+      'did:plc:a',
+    ]);
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'A failed lookup is an error, not a missing list');
+  assert(flaky.of('app.bsky.graph.list').length === 1, '…so no second list is created');
+
+  // The list was deleted in the app; the starter pack people share must follow
+  // the replacement instead of pointing at nothing.
+  flaky.records.delete(base.listUri);
+  const rebuilt = await syncGroupDiscovery(
+    flaky.agent,
+    { name: 'NBA', listUri: base.listUri, starterPackUri: base.starterPackUri },
+    ['did:plc:a'],
+  );
+  assert(
+    rebuilt.createdList && rebuilt.starterPackUri === base.starterPackUri,
+    'A deleted list is recreated, the pack kept',
+  );
+  assert(
+    flaky.records.get(base.starterPackUri)?.list === rebuilt.listUri,
+    'The starter pack is repointed at the recreated list',
+  );
+
+  // Adding members fails after the list was created: the caller must already
+  // know the new list, or every retry creates another one.
+  const partial = memoryRepo('did:plc:partial');
+  const realCreate = partial.agent.com.atproto.repo.createRecord;
+  // biome-ignore lint/suspicious/noExplicitAny: xrpc payloads
+  partial.agent.com.atproto.repo.createRecord = async (input: any) => {
+    if (input.collection === 'app.bsky.graph.listitem') throw new Error('RateLimitExceeded');
+    return realCreate(input);
+  };
+  let savedListUri: string | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await syncGroupDiscovery(
+        partial.agent,
+        { name: 'F1', listUri: savedListUri },
+        ['did:plc:a'],
+        undefined,
+        (uri) => {
+          savedListUri = uri;
+        },
+      );
+    } catch {
+      // expected
+    }
+  }
+  assert(
+    partial.of('app.bsky.graph.list').length === 1 && savedListUri !== undefined,
+    'A sync that fails after creating its list reuses that list on retry',
+  );
+
+  const long = memoryRepo('did:plc:long');
+  await syncGroupDiscovery(long.agent, { name: 'プロ野球セ・リーグ公式アカウントまとめ一覧表', emoji: '⚾' }, [
+    'did:plc:a',
+  ]);
+  const name = long.of('app.bsky.graph.list')[0]?.value.name as string;
+  assert(
+    Buffer.byteLength(name, 'utf8') <= 64,
+    `A list name fits the 64-byte limit (${Buffer.byteLength(name, 'utf8')} bytes)`,
+  );
+  assert(
+    long.of('app.bsky.graph.starterpack')[0]?.value.name.length > name.length,
+    '…while the starter pack keeps its longer name',
+  );
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

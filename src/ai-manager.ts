@@ -145,7 +145,9 @@ function normalizeAltTextOutput(output: string | undefined): string | undefined 
   if (lines.length > 0) cleaned = lines[0] ?? '';
 
   cleaned = cleaned.replace(/^option\s*\d+\s*[:\-]\s*/i, '').trim();
-  cleaned = cleaned.replace(/^[\-\*\d\.\)]+\s*/g, '').trim();
+  // List markers only ("- ", "* ", "1. ", "2) "): a description may well start
+  // with a number ("3 people…", "3D render…", "1970s poster").
+  cleaned = cleaned.replace(/^(?:[-*]+\s*|\d+[.)]\s+)/, '').trim();
   cleaned = cleaned.replace(/\s+/g, ' ').trim();
 
   return cleaned || undefined;

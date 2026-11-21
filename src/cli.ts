@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import inquirer from 'inquirer';
-import { deleteAllPosts } from './bsky.js';
+import { deletePosts } from './bsky.js';
 import {
   type AccountMapping,
   type AppConfig,
@@ -839,9 +839,9 @@ program
     const mapping = await ensureMapping(mappingRef);
     if (!mapping) return;
 
-    for (const username of mapping.twitterUsernames) {
-      dbService.deleteTweetsByUsername(username);
-    }
+    // Only this mapping's history: another mapping mirroring the same source
+    // would otherwise lose its history too and re-post its recent tweets.
+    dbService.deleteTweetsForMapping(mapping.bskyIdentifier, mapping.twitterUsernames);
 
     console.log(`Cache cleared for ${mapping.twitterUsernames.join(', ')}.`);
   });
@@ -882,7 +882,13 @@ program
 
     // History is kept (marked deleted) and checks restart from now, so the
     // next sweep does not re-post the latest tweets.
-    const deleted = await deleteAllPosts(mapping.id, 'all');
+    const { deleted, failed } = await deletePosts(mapping.id, 'all');
+    if (failed > 0) {
+      console.log(
+        `Deleted ${deleted} posts for ${mapping.bskyIdentifier}, but ${failed} could not be deleted. Run this again to retry them.`,
+      );
+      return;
+    }
     console.log(
       `Deleted ${deleted} posts for ${mapping.bskyIdentifier}. Only tweets posted from now on will be mirrored.`,
     );

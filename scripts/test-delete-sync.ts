@@ -113,6 +113,29 @@ console.log('\nDeciding to delete\n');
   assert(run.present.includes('11'), 'Tweets that still exist are recorded as present');
 }
 
+console.log('\nA delete that fails\n');
+{
+  const clock = { now: 3_000_000_000 };
+  const states: Record<string, State> = { '40': 'missing', '41': 'present', '42': 'present', '43': 'present' };
+  const run = harness(states, clock);
+  let deleteWorks = false;
+  run.deps.deletePost = async (uri) => {
+    if (!deleteWorks) throw new Error('socket hang up');
+    run.deleted.push(uri);
+  };
+  const candidates = ['40', '41', '42', '43'].map((id) => candidate(id));
+  await syncDeletesForAccount(candidates, run.deps);
+  clock.now += DELETE_SYNC_MIN_MISSING_SPAN_MS;
+  const failedPass = await syncDeletesForAccount(candidates, run.deps);
+  assert(failedPass.deleted === 0, 'A mirror whose delete threw is not counted as deleted');
+  assert(run.marked.length === 0, '…and its history row is left as a live mirror');
+
+  deleteWorks = true;
+  clock.now += DELETE_SYNC_MIN_MISSING_SPAN_MS;
+  const retryPass = await syncDeletesForAccount(candidates, run.deps);
+  assert(retryPass.deleted === 1 && run.marked.join(',') === '40', 'The next pass deletes it and marks the row');
+}
+
 console.log('\nStanding down\n');
 {
   const clock = { now: 2_000_000_000 };

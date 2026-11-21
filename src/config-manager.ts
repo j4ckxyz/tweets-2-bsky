@@ -172,13 +172,16 @@ export const ADMIN_USER_PERMISSIONS: UserPermissions = {
   runNow: true,
 };
 
-const DEFAULT_CONFIG: AppConfig = {
-  twitter: DEFAULT_TWITTER_CONFIG,
+// A fresh object every time: a spread of one shared default handed every
+// caller the same arrays, so a mapping pushed onto one empty config appeared
+// in the next "empty" config too.
+const defaultConfig = (): AppConfig => ({
+  twitter: { ...DEFAULT_TWITTER_CONFIG },
   mappings: [],
   groups: [],
   users: [],
   checkIntervalMinutes: 5,
-};
+});
 
 const normalizeString = (value: unknown): string | undefined => {
   if (typeof value !== 'string') {
@@ -473,7 +476,7 @@ const normalizeAiConfig = (rawAi: unknown): AIConfig | undefined => {
 
 const normalizeConfigShape = (rawConfig: unknown): AppConfig => {
   if (!rawConfig || typeof rawConfig !== 'object') {
-    return { ...DEFAULT_CONFIG };
+    return defaultConfig();
   }
 
   const record = rawConfig as Record<string, unknown>;
@@ -529,14 +532,35 @@ const normalizeConfigShape = (rawConfig: unknown): AppConfig => {
   };
 };
 
+const fileParsesAsJson = (file: string): boolean => {
+  try {
+    JSON.parse(fs.readFileSync(file, 'utf8'));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const writeConfigFile = (config: AppConfig) => {
   const serialized = `${JSON.stringify(config, null, 2)}\n`;
+  // The file holds cookies and app passwords. Keep whatever mode it already
+  // has (someone may have tightened it) and create a new one owner-only; the
+  // temp file used to take the umask default and reset it on every save.
+  let mode = 0o600;
+  try {
+    mode = fs.statSync(CONFIG_FILE).mode & 0o777;
+  } catch {
+    // no config yet
+  }
 
   // Atomic write: write to a temp file and rename over the target so a crash
   // mid-write can never leave a truncated/corrupted config.json behind.
-  fs.writeFileSync(CONFIG_TMP_FILE, serialized);
+  fs.writeFileSync(CONFIG_TMP_FILE, serialized, { mode });
+  fs.chmodSync(CONFIG_TMP_FILE, mode);
   try {
-    if (fs.existsSync(CONFIG_FILE)) {
+    // Only a file that parses is worth keeping: copying a corrupt config over
+    // the backup destroyed the one good copy recovery depends on.
+    if (fs.existsSync(CONFIG_FILE) && fileParsesAsJson(CONFIG_FILE)) {
       fs.copyFileSync(CONFIG_FILE, CONFIG_BACKUP_FILE);
     }
   } catch (error) {
@@ -552,7 +576,7 @@ export function getConfig(): AppConfig {
 
   if (!fs.existsSync(CONFIG_FILE)) {
     configUnreadable = false;
-    return { ...DEFAULT_CONFIG };
+    return defaultConfig();
   }
 
   try {
@@ -588,7 +612,17 @@ export function getConfig(): AppConfig {
   console.error(
     `🛑 config.json is unreadable and no backup could be restored. Refusing to overwrite it; fix or remove ${CONFIG_FILE} to continue.`,
   );
-  return { ...DEFAULT_CONFIG };
+  return defaultConfig();
+}
+
+/**
+ * True when the last read found config.json present but unreadable, with no
+ * backup to recover from. getConfig() then returns an empty default config,
+ * which must not be mistaken for "nothing is configured" (for example to
+ * delete queue rows whose mapping seems to be gone). Call after getConfig().
+ */
+export function isConfigUnreadable(): boolean {
+  return configUnreadable;
 }
 
 export function saveConfig(config: AppConfig): void {
