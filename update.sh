@@ -26,6 +26,7 @@ UPDATE_SH_REEXECED="${UPDATE_SH_REEXECED:-0}"
 STASH_REF=""
 STASH_CREATED=0
 STASH_RESTORED=0
+STASH_RESTORE_ATTEMPTED=0
 UNTRACKED_COUNT=0
 
 BACKUP_SOURCES=()
@@ -180,19 +181,29 @@ backup_file() {
   BACKUP_PATHS+=("$backup_path")
 }
 
+# The snapshot only puts back a file the update itself lost (an old clone
+# where .env was still tracked loses it when the pull removes it from git).
+# A file that is still there is live state: the dashboard and the running app
+# write config.json while the update runs, and copying the start-of-run copy
+# back over it reverted those changes.
 restore_backups() {
   local idx
   for idx in "${!BACKUP_SOURCES[@]}"; do
     local src="${BACKUP_SOURCES[$idx]}"
     local bak="${BACKUP_PATHS[$idx]}"
     if [[ -f "$bak" ]]; then
-      cp "$bak" "$src"
+      if [[ ! -s "$src" ]]; then
+        cp "$bak" "$src"
+        echo "🔐 Restored $(basename "$src"), which was missing after the update."
+      fi
       rm -f "$bak"
     fi
   done
 }
 
 cleanup() {
+  # A run that failed part-way must still give back the stashed local changes.
+  restore_stash_if_needed
   restore_backups
   release_lock
 }
@@ -319,9 +330,10 @@ print_untracked_notice() {
 }
 
 restore_stash_if_needed() {
-  if [[ "$STASH_CREATED" -ne 1 || -z "$STASH_REF" ]]; then
+  if [[ "$STASH_CREATED" -ne 1 || -z "$STASH_REF" || "$STASH_RESTORE_ATTEMPTED" -eq 1 ]]; then
     return 0
   fi
+  STASH_RESTORE_ATTEMPTED=1
 
   echo "🔁 Restoring stashed local changes ($STASH_REF)..."
   if git stash apply --index "$STASH_REF" >/dev/null 2>&1; then
